@@ -226,7 +226,7 @@ static constexpr size_t MQTT_Service_Task_Stack_Size = 3512;
 static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2222;
 static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
 static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
-static constexpr size_t PPS_Discipline_Task_Stack_Size = 3135;
+static constexpr size_t PPS_Discipline_Task_Stack_Size = 3584; // was 3135: the PTP servo runs in this task (measure again)
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
 
@@ -514,7 +514,7 @@ static constexpr size_t NTP_MAX_PACKET_SIZE = NTP_PACKET_SIZE + NTP_AUTH_TRAILER
 static constexpr size_t NTP_MAX_PACKET_SIZE = NTP_PACKET_SIZE;
 #endif
 static constexpr uint64_t NTP_EPOCH_OFFSET = 2208988800ULL;
-static constexpr int8_t NTP_PRECISION_EXPONENT = -20; // 2^-20 s = 0.95 us: resolution of esp_timer (the EMAC time stamps have 25 ns)
+// NTP_PRECISION_EXPONENT is defined after the local timebase (it follows its resolution)
 static constexpr uint32_t NTP_ROOT_DISPERSION = 2; // NTP short format, 1/65536 s per unit: 2 = 30.5 us (served at stratum 1 with active PPS only)
 static constexpr uint64_t NTP_CACHE_TIMESTAMP_MATCH_TOLERANCE = 8;
 static constexpr size_t NTP_SOCKET_BATCH_LIMIT = 16;
@@ -543,7 +543,8 @@ static std::string MACToBeUsed;
 struct PpsCaptureEvent
 {
     uint32_t cap_ticks;          // raw MCPWM capture ticks
-    int64_t approximate_edge_us; // absolute edge time in microseconds (esp_timer_get_time)
+    int64_t approximate_edge_us; // absolute edge time in microseconds (esp_timer_get_time scale)
+    int64_t isr_local_ns;        // the same instant on the fine local timebase in ns (see local_now_ns)
 };
 
 static constexpr uint32_t PPS_CAPTURE_RESOLUTION_HZ = 80000000;
@@ -588,8 +589,20 @@ static uint32_t s_pps_capture_hz = PPS_CAPTURE_RESOLUTION_HZ;
 static constexpr double PPS_ISR_LATENCY_DEFAULT_US = 2.6;
 // Value in use in nanoseconds (lock-free atomic so it can be changed at run time)
 static std::atomic<int32_t> s_pps_isr_latency_ns{static_cast<int32_t>(PPS_ISR_LATENCY_DEFAULT_US * 1000.0 + 0.5)};
+
+// ---- PTP clock operating mode ----
+// 1 = free-running PTP clock (recommended). The PTP clock is set once and then never written again. Its rate is
+//     corrected through the frequency adjustment of the EMAC (fine update addend), so it runs at the GNSS rate.
+//     Once per second the offset of the PTP clock against the PPS is measured (by software readings, or in hardware
+//     with the PTP PPS loopback, see PTPPPSLoopbackPin in ESP32TimeServerSettings.h). A filter estimates offset and
+//     rate from these measurements, a servo steers the frequency, and the hardware time stamps are converted with
+//     the estimate (continuous piecewise linear mapping, so time stamps taken before an update convert correctly).
+//     No clock steps every second, no write latency, no time stamp that straddles a write.
+// 0 = previous behaviour: the PTP clock is written from the PPS model every second (see PTP_OFFSET_MEASUREMENT)
+#define PTP_FREE_RUNNING 1
+
 // ---- PTP write latency: calibrated at run time and stored in NVS ----
-// Latency between the esp_timer reading taken just before clock_settime(CLOCK_PTP_SYSTEM) and the instant the new
+// Latency between the local time reading taken just before clock_settime(CLOCK_PTP_SYSTEM) and the instant the new
 // time is latched by the EMAC (the PTP clock lags by about this much unless it is compensated).
 // 1 = if no stored value exists for this configuration, the latency is measured at run time (10 min warm-up after
 //     the PPS lock, then 30 to 40 min of measurement), applied immediately and stored in NVS. At every later start
@@ -597,6 +610,12 @@ static std::atomic<int32_t> s_pps_isr_latency_ns{static_cast<int32_t>(PPS_ISR_LA
 //     PTP_WRITE_LATENCY_DEFAULT_NS is used.
 // 0 = always use PTP_WRITE_LATENCY_DEFAULT_NS
 #define PTP_LATENCY_AUTO 1
+#if PTP_FREE_RUNNING
+// The free-running PTP clock is not written every second, so there are no samples for the calibration. Its rare
+// clock steps (only for offsets above 100 us) use PTP_WRITE_LATENCY_DEFAULT_NS; the servo removes the rest.
+#undef PTP_LATENCY_AUTO
+#define PTP_LATENCY_AUTO 0
+#endif
 // 1 = ignore the stored value and calibrate again at the next start (set back to 0 afterwards)
 #define PTP_LATENCY_FORCE_RECALIBRATION 0
 static constexpr int32_t PTP_WRITE_LATENCY_DEFAULT_NS = 3850; // measured on the development hardware
@@ -629,7 +648,8 @@ static std::atomic<int64_t> s_clock_anchor_us{0};      // esp_timer time at whic
 static std::atomic<bool> s_ptp_comp_valid{false};      // PTP clock drift compensation is valid
 static std::atomic<int32_t> s_clock_ppb{0};            // oscillator error in ppb, >0 = clock runs fast
 
-// ---- PTP clock compensation (seqlock, the PPS task is the only writer) ----
+#if !PTP_FREE_RUNNING
+// ---- PTP clock compensation, PTP_FREE_RUNNING 0 (seqlock, the PPS task is the only writer) ----
 // A raw EMAC time stamp ts (ns) is converted to true time like the model clock:
 //   el = ts - offset - anchor;  true = anchor + el - el * ppb / 1e9
 // anchor = second of the last PPS edge in ns, offset = measured difference between the PTP clock and the model clock
@@ -667,13 +687,115 @@ static void ptp_comp_read(int64_t &anchor_ns, int64_t &offset_ns)
         s2 = s_ptp_comp_seq.load(std::memory_order_relaxed);
     } while (s1 != s2 || (s1 & 1u));
 }
+#endif
 
-// ---- esp_timer based model clock: replaces gettimeofday() for NTP time stamps ----
-// true time = second of the last PPS edge + time since that edge (esp_timer), corrected by the measured ppb.
+#if PTP_FREE_RUNNING
+// ---- PTP mapping, PTP_FREE_RUNNING 1 (seqlock, the PPS task is the only writer) ----
+// offset(raw) = raw PTP time - true time, piecewise linear around a reference point:
+//   offset(raw) = ref_offset + rate * (raw - ref_raw)   with rate = rate_new for raw >= ref_raw, rate_old before
+//   true = raw - offset(raw)
+// The rates are in milli-ppb (1e-12). The reference point is the instant of the last frequency update, so the two
+// segments are the offset rates before and after that update and the mapping is continuous.
+static std::atomic<uint32_t> s_ptpmap_seq{0};
+static std::atomic<int64_t> s_ptpmap_ref_raw_ns{0};
+static std::atomic<int64_t> s_ptpmap_ref_offset_ns{0};
+static std::atomic<int64_t> s_ptpmap_rate_old_mppb{0};
+static std::atomic<int64_t> s_ptpmap_rate_new_mppb{0};
+// Ethernet MAC of the PTP clock (set when the PTP clock is enabled; frequency commands and direct reads)
+static esp_eth_mac_t *s_ptp_mac = nullptr;
+// Incremented whenever the PTP clock is set or re-initialised: the servo starts its estimate again
+static std::atomic<uint32_t> s_ptp_epoch{0};
+// Set when the EMAC PTP block was initialised again (Ethernet recovery): the frequency command is back at 0
+static std::atomic<bool> s_ptp_addend_reset{false};
+// PTP PPS loopback (see PTPPPSLoopbackPin): MCPWM capture ticks of the last PTP pulses, written by the interrupt
+static constexpr uint32_t ptp_pps_capture_ring_size = 4;
+static uint32_t s_ptp_pps_captures[ptp_pps_capture_ring_size] = {};
+static std::atomic<uint32_t> s_ptp_pps_capture_head{0};
+static std::atomic<bool> s_ptp_loopback_active{false};
+
+static constexpr int64_t ptpmap_max_age_ns = 3600LL * 1000000000LL; // like the model clock: holdover for one hour
+static constexpr int64_t ptpmap_max_rate_mppb = 500000000LL;        // +-500 ppm (plausibility limit)
+
+static void ptp_map_publish(int64_t ref_raw_ns, int64_t ref_offset_ns, int64_t rate_old_mppb, int64_t rate_new_mppb)
+{
+    rate_old_mppb = std::clamp(rate_old_mppb, -ptpmap_max_rate_mppb, ptpmap_max_rate_mppb);
+    rate_new_mppb = std::clamp(rate_new_mppb, -ptpmap_max_rate_mppb, ptpmap_max_rate_mppb);
+    const uint32_t s = s_ptpmap_seq.load(std::memory_order_relaxed);
+    s_ptpmap_seq.store(s + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    s_ptpmap_ref_raw_ns.store(ref_raw_ns, std::memory_order_relaxed);
+    s_ptpmap_ref_offset_ns.store(ref_offset_ns, std::memory_order_relaxed);
+    s_ptpmap_rate_old_mppb.store(rate_old_mppb, std::memory_order_relaxed);
+    s_ptpmap_rate_new_mppb.store(rate_new_mppb, std::memory_order_relaxed);
+    s_ptpmap_seq.store(s + 2, std::memory_order_release);
+}
+
+// Offset of the PTP clock (raw - true, ns) at the raw PTP time raw_ns. Returns false if raw_ns is too far from the
+// reference point. The caller checks s_ptp_comp_valid first.
+static bool ptp_map_offset_at(int64_t raw_ns, int64_t &offset_ns)
+{
+    int64_t ref_raw, ref_offset, rate_old, rate_new;
+    uint32_t s1, s2;
+    do
+    {
+        s1 = s_ptpmap_seq.load(std::memory_order_acquire);
+        ref_raw = s_ptpmap_ref_raw_ns.load(std::memory_order_relaxed);
+        ref_offset = s_ptpmap_ref_offset_ns.load(std::memory_order_relaxed);
+        rate_old = s_ptpmap_rate_old_mppb.load(std::memory_order_relaxed);
+        rate_new = s_ptpmap_rate_new_mppb.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        s2 = s_ptpmap_seq.load(std::memory_order_relaxed);
+    } while (s1 != s2 || (s1 & 1u));
+
+    const int64_t d = raw_ns - ref_raw;
+    if (d < -ptpmap_max_age_ns || d > ptpmap_max_age_ns)
+        return false;
+    const int64_t rate = (d >= 0) ? rate_new : rate_old;
+    // rate [1e-12] * d [ns] in two parts, so the product cannot overflow: whole seconds and the rest
+    const int64_t d_s = d / 1000000000LL;
+    const int64_t d_r = d % 1000000000LL;
+    offset_ns = ref_offset + (d_s * rate) / 1000LL + (d_r * rate) / 1000000000000LL;
+    return true;
+}
+#endif
+
+// ---- Fine local timebase ----
+// esp_timer_get_time() returns whole microseconds: the systimer counter (16 MHz on the ESP32-P4) divided by 16 and
+// truncated. All time critical readings (PPS interrupt, model clock reads, PTP offset measurements, interrupt latency
+// test) use the counter itself instead, so the 1 us truncation (0.29 us RMS per reading) no longer enters the
+// software time stamps and the PTP measurements. Resolution: 62.5 ns. esp_timer_get_time() is still used for
+// timeouts and statistics, where 1 us does not matter.
+// 1 = raw systimer counter (recommended), 0 = esp_timer_get_time() (1 us, previous behaviour)
+#define FINE_LOCAL_TIMEBASE 1
+#if FINE_LOCAL_TIMEBASE && defined(CONFIG_IDF_TARGET_ESP32P4)
+// Counter behind esp_timer_get_time() (esp_timer/src/esp_timer_impl_systimer.c, placed in IRAM like esp_timer_get_time).
+// It is declared in a private esp_timer header, therefore the declaration is repeated here.
+extern "C" uint64_t esp_timer_impl_get_counter_reg(void);
+static constexpr uint32_t LOCAL_TICKS_PER_US = 16; // ESP32-P4 systimer: 16 MHz from the 40 MHz crystal
+static inline __attribute__((always_inline)) uint64_t local_ticks() { return esp_timer_impl_get_counter_reg(); }
+static inline __attribute__((always_inline)) int64_t local_ticks_to_ns(uint64_t ticks) { return static_cast<int64_t>((ticks * 125u) >> 1); } // 62.5 ns per tick
+static constexpr int8_t LOCAL_TIMEBASE_PRECISION_EXPONENT = -24; // 2^-24 s = 60 ns
+#else
+static constexpr uint32_t LOCAL_TICKS_PER_US = 1; // 1 tick = 1 us
+static inline __attribute__((always_inline)) uint64_t local_ticks() { return static_cast<uint64_t>(esp_timer_get_time()); }
+static inline __attribute__((always_inline)) int64_t local_ticks_to_ns(uint64_t ticks) { return static_cast<int64_t>(ticks) * 1000LL; }
+static constexpr int8_t LOCAL_TIMEBASE_PRECISION_EXPONENT = -20; // 2^-20 s = 0.95 us
+#endif
+// Precision announced in NTP replies: resolution of the software clock (the EMAC time stamps have 40 ns steps)
+static constexpr int8_t NTP_PRECISION_EXPONENT = LOCAL_TIMEBASE_PRECISION_EXPONENT;
+
+// Local time in ns since boot on the fine timebase (same zero point as esp_timer_get_time).
+// always_inline: these are also used by the PPS capture interrupt (IRAM)
+static inline __attribute__((always_inline)) int64_t local_now_ns() { return local_ticks_to_ns(local_ticks()); }
+// The same instant on the esp_timer_get_time() scale (whole microseconds, truncated like esp_timer)
+static inline __attribute__((always_inline)) int64_t local_ticks_to_esp_us(uint64_t ticks) { return static_cast<int64_t>(ticks / LOCAL_TICKS_PER_US); }
+
+// ---- Model clock: replaces gettimeofday() for NTP time stamps ----
+// true time = second of the last PPS edge + time since that edge (fine local timebase), corrected by the measured ppb.
 static std::atomic<uint32_t> s_model_seq{0};
 static std::atomic<bool> s_model_valid{false};
 static std::atomic<int64_t> s_model_sec{0};     // Unix second of the last PPS edge
-static std::atomic<int64_t> s_model_edge_ns{0}; // esp_timer time of that edge in ns
+static std::atomic<int64_t> s_model_edge_ns{0}; // local time of that edge in ns (local_now_ns scale)
 static std::atomic<int32_t> s_model_ppb{0};     // >0 = local clock runs fast
 
 // The PPS task is the only writer (seqlock, so readers never see mixed values)
@@ -694,7 +816,7 @@ static void model_invalidate()
     s_model_valid.store(false, std::memory_order_release);
 }
 
-// Model time (Unix ns) for an esp_timer time in ns. Returns false if the model is not usable.
+// Model time (Unix ns) for a local time in ns (local_now_ns scale). Returns false if the model is not usable.
 static bool model_ns_at(int64_t esp_ns, int64_t &unix_ns)
 {
     if (!s_model_valid.load(std::memory_order_acquire))
@@ -998,6 +1120,9 @@ static bool admit_ntp_request()
 
 static bool configure_static_ip();
 static bool configure_hardware_timestamps();
+#if PTP_FREE_RUNNING
+static void setup_ptp_pps_loopback(esp_eth_mac_t *mac);
+#endif
 static bool start_ethernet_driver();
 
 static bool format_socket_address(const struct sockaddr_storage &address, char *buffer, size_t buffer_size)
@@ -2144,7 +2269,7 @@ static inline uint64_t ntp64_from_unix_ns(int64_t unix_ns)
 static uint64_t get_current_time_in_ntp64_format()
 {
     int64_t unix_ns = 0;
-    if (model_ns_at(static_cast<int64_t>(esp_timer_get_time()) * 1000LL, unix_ns) && unix_ns > 0)
+    if (model_ns_at(local_now_ns(), unix_ns) && unix_ns > 0)
         return ntp64_from_unix_ns(unix_ns);
 
     // Fallback (model not valid yet): system clock with drift compensation
@@ -2383,6 +2508,21 @@ static uint64_t ntp64_from_hardware_timestamp(const eth_mac_time_t &timestamp)
     const uint64_t fraction = (static_cast<uint64_t>(timestamp.nanoseconds) << 32) / 1000000000ULL;
     uint64_t ts = (seconds << 32) | fraction;
 
+#if PTP_FREE_RUNNING
+    // Remove the estimated offset of the disciplined PTP clock (see ptp_servo_update)
+    if (s_ptp_comp_valid.load(std::memory_order_acquire))
+    {
+        const int64_t ptp_ns = static_cast<int64_t>(timestamp.seconds) * 1000000000LL +
+                               static_cast<int64_t>(timestamp.nanoseconds);
+        int64_t offset_ns = 0;
+        if (ptp_map_offset_at(ptp_ns, offset_ns))
+        {
+            const int64_t unix_ns = ptp_ns - offset_ns;
+            if (unix_ns > 0)
+                return ntp64_from_unix_ns(unix_ns);
+        }
+    }
+#else
     // Map the PTP clock to true time exactly like the model clock (same oscillator as esp_timer):
     // remove the measured offset of the last write and the drift since the last PPS edge
     if (s_ptp_comp_valid.load(std::memory_order_acquire))
@@ -2400,6 +2540,7 @@ static uint64_t ntp64_from_hardware_timestamp(const eth_mac_time_t &timestamp)
                 return ntp64_from_unix_ns(unix_ns);
         }
     }
+#endif
     return ts;
 }
 
@@ -3284,11 +3425,20 @@ static ethernet_recovery_result_t restart_ethernet_transport()
     gettimeofday(&system_time, nullptr);
     const struct timespec ptp_time{system_time.tv_sec, static_cast<long>(system_time.tv_usec) * 1000L};
     s_ptp_comp_valid.store(false, std::memory_order_release);
+#if PTP_FREE_RUNNING
+    // esp_eth_mac_ptp_enable() set the EMAC frequency back to its base value and the clock was set again
+    s_ptp_mac = mac;
+    s_ptp_addend_reset.store(true, std::memory_order_release);
+#endif
     if (clock_settime(CLOCK_PTP_SYSTEM, &ptp_time) != 0)
     {
         s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
         return ethernet_recovery_result_t::timestamp_failed;
     }
+#if PTP_FREE_RUNNING
+    s_ptp_epoch.fetch_add(1, std::memory_order_acq_rel);
+    setup_ptp_pps_loopback(mac);
+#endif
 
     eth_mac_time_t first_time{};
     eth_mac_time_t second_time{};
@@ -3459,7 +3609,82 @@ static void synchronize_hardware_clock()
         now.tv_sec,
         static_cast<long>(now.tv_usec) * 1000L};
     clock_settime(CLOCK_PTP_SYSTEM, &clock_time);
+#if PTP_FREE_RUNNING
+    s_ptp_epoch.fetch_add(1, std::memory_order_acq_rel); // the servo starts its estimate again
+#endif
 }
+
+#if PTP_FREE_RUNNING
+// Capture of the EMAC PTP pulse (PTP PPS loopback): only the capture ticks are stored, the PPS task pairs them
+// with the GNSS PPS edges
+static bool IRAM_ATTR ptp_pps_capture_callback(mcpwm_cap_channel_handle_t,
+                                               const mcpwm_capture_event_data_t *edata,
+                                               void *)
+{
+    if (edata != nullptr)
+    {
+        const uint32_t head = s_ptp_pps_capture_head.load(std::memory_order_relaxed);
+        s_ptp_pps_captures[head % ptp_pps_capture_ring_size] = edata->cap_value;
+        s_ptp_pps_capture_head.store(head + 1, std::memory_order_release);
+    }
+    return false;
+}
+
+// PTP PPS loopback: the EMAC outputs its PPS on PTPPPSLoopbackPin, and a second channel of the PPS capture timer
+// reads the same pad back. Nothing has to be wired.
+static void setup_ptp_pps_loopback(esp_eth_mac_t *mac)
+{
+    if (PTPPPSLoopbackPin < 0)
+        return;
+    if (s_ptp_loopback_active.load(std::memory_order_acquire))
+    {
+        // Already set up: after an Ethernet recovery only the output mode of the EMAC is set again
+        esp_eth_mac_set_pps_out_freq(mac, 0);
+        return;
+    }
+    if (PTPPPSLoopbackPin == PPSPin || s_pps_capture_timer == nullptr)
+    {
+        ESP_LOGW(TAG, "PTP PPS loopback: GPIO %d cannot be used (it must not be the PPS pin)", PTPPPSLoopbackPin);
+        return;
+    }
+
+    // 1 PPS output: rising edge at every second of the PTP clock
+    esp_err_t err = esp_eth_mac_set_pps_out_gpio(mac, PTPPPSLoopbackPin);
+    if (err == ESP_OK)
+        err = esp_eth_mac_set_pps_out_freq(mac, 0);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "PTP PPS loopback: PPS output on GPIO %d failed (%s), software measurement is used",
+                 PTPPPSLoopbackPin, esp_err_to_name(err));
+        return;
+    }
+
+    mcpwm_capture_channel_config_t channel_config{};
+    channel_config.gpio_num = PTPPPSLoopbackPin; // also enables the input of the pad, the output stays connected
+    channel_config.prescale = 1;
+    channel_config.flags.pos_edge = true;
+    mcpwm_cap_channel_handle_t channel = nullptr;
+    err = mcpwm_new_capture_channel(s_pps_capture_timer, &channel_config, &channel);
+    if (err == ESP_OK)
+    {
+        mcpwm_capture_event_callbacks_t callbacks{};
+        callbacks.on_cap = ptp_pps_capture_callback;
+        err = mcpwm_capture_channel_register_event_callbacks(channel, &callbacks, nullptr);
+        if (err == ESP_OK)
+            err = mcpwm_capture_channel_enable(channel);
+    }
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "PTP PPS loopback: capture channel on GPIO %d failed (%s), software measurement is used",
+                 PTPPPSLoopbackPin, esp_err_to_name(err));
+        if (channel != nullptr)
+            mcpwm_del_capture_channel(channel);
+        return;
+    }
+    s_ptp_loopback_active.store(true, std::memory_order_release);
+    ESP_LOGI(TAG, "PTP PPS loopback on GPIO %d: the PTP clock is measured against the PPS in hardware", PTPPPSLoopbackPin);
+}
+#endif
 
 static bool configure_hardware_timestamps()
 {
@@ -3476,8 +3701,16 @@ static bool configure_hardware_timestamps()
         esp_eth_mac_enable_ts4all(mac, true) != ESP_OK)
         return false;
 
+#if PTP_FREE_RUNNING
+    s_ptp_mac = mac;
+#endif
     s_ptp_clock_ready.store(true, std::memory_order_release);
     synchronize_hardware_clock();
+#if PTP_FREE_RUNNING
+    setup_ptp_pps_loopback(mac);
+    if (!s_ptp_loopback_active.load(std::memory_order_acquire))
+        ESP_LOGI(TAG, "PTP clock: free-running and frequency disciplined, measured against the PPS by software readings");
+#endif
 
     const bool input_path_updated = esp_eth_update_input_path_info(handle, ntp_ethernet_input, ETH.netif()) == ESP_OK;
     s_hardware_ntp_accepting.store(input_path_updated, std::memory_order_release);
@@ -4322,10 +4555,11 @@ static void halt_with_display(const char *line1, const char *line2, const char *
 // Increase this number when the PPS interrupt path (pps_capture_callback) changes, to trigger a new measurement
 // (2: the stored value is the central value, mean of the lowest 75 % of the samples; version 1 stored an expected minimum)
 // (3: test triggers keep away from real PPS edges; the compiler optimization level is part of the fingerprint)
-static constexpr uint32_t PPS_ISR_LATENCY_CODE_VERSION = 3;
+// (4: measured on the fine local timebase; with FINE_LOCAL_TIMEBASE 0 the version stays 3)
+static constexpr uint32_t PPS_ISR_LATENCY_CODE_VERSION = (LOCAL_TICKS_PER_US > 1) ? 4 : 3;
 static std::atomic<uint32_t> s_isr_latency_test_armed{0};
 static std::atomic<uint32_t> s_isr_latency_test_fired{0};
-static volatile int64_t s_isr_latency_test_cb_us = 0;
+static volatile int64_t s_isr_latency_test_cb_ns = 0; // local time (ns) of the test callback
 static BaseType_t s_pps_isr_core = tskNO_AFFINITY; // core on which the PPS interrupt was allocated
 static bool s_pps_isr_latency_known = false;        // a stored value for this configuration was loaded
 static std::atomic<uint32_t> s_last_pps_isr_us32{0}; // low 32 bits of the esp_timer time of the last real PPS edge
@@ -4337,27 +4571,20 @@ static bool IRAM_ATTR pps_capture_callback(mcpwm_cap_channel_handle_t,
 {
     PpsCaptureEvent event{};
 
-    if (edata != nullptr)
-    {
-        // Raw MCPWM capture ticks at PPS edge
-        event.cap_ticks = edata->cap_value;
+    // Local time of the callback (fine timebase) and the same instant in whole microseconds
+    const uint64_t isr_ticks = local_ticks();
+    event.isr_local_ns = local_ticks_to_ns(isr_ticks);
+    event.approximate_edge_us = local_ticks_to_esp_us(isr_ticks);
 
-        // Absolute time (microseconds) for phase alignment and timeout
-        event.approximate_edge_us = esp_timer_get_time();
-    }
-    else
-    {
-        // Fallback: no capture data (should not normally happen)
-        event.cap_ticks = 0;
-        event.approximate_edge_us = esp_timer_get_time();
-    }
+    // Raw MCPWM capture ticks at the PPS edge (0 if no capture data, should not normally happen)
+    event.cap_ticks = (edata != nullptr) ? edata->cap_value : 0;
 
 #if PPS_ISR_LATENCY_AUTO
     // Software-triggered test event (see measure_pps_isr_latency_task): record the time and do not
     // pass it on as a PPS pulse
     if (s_isr_latency_test_armed.load(std::memory_order_relaxed) != 0)
     {
-        s_isr_latency_test_cb_us = event.approximate_edge_us;
+        s_isr_latency_test_cb_ns = event.isr_local_ns;
         s_isr_latency_test_armed.store(0, std::memory_order_relaxed);
         s_isr_latency_test_fired.store(1, std::memory_order_release);
         return false;
@@ -4579,9 +4806,9 @@ static void measure_pps_isr_latency_task(void *)
         s_isr_latency_test_fired.store(0, std::memory_order_relaxed);
         s_isr_latency_test_armed.store(1, std::memory_order_release);
 
-        const int64_t t0 = esp_timer_get_time();
+        const int64_t t0 = local_now_ns();
         const esp_err_t err = mcpwm_capture_channel_trigger_soft_catch(s_pps_capture_channel);
-        const int64_t t1 = esp_timer_get_time();
+        const int64_t t1 = local_now_ns();
 
         if (err != ESP_OK)
         {
@@ -4592,7 +4819,7 @@ static void measure_pps_isr_latency_task(void *)
         }
 
         while (s_isr_latency_test_fired.load(std::memory_order_acquire) == 0 &&
-               (esp_timer_get_time() - t0) < waitUs)
+               (local_now_ns() - t0) < waitUs * 1000LL)
         {
         }
 
@@ -4602,10 +4829,10 @@ static void measure_pps_isr_latency_task(void *)
         if (!fired)
             continue;
 
-        // The trigger happened somewhere between the two clock reads: use the middle
-        const double latency = static_cast<double>(s_isr_latency_test_cb_us) -
-                               0.5 * (static_cast<double>(t0) + static_cast<double>(t1));
-        if ((t1 - t0) <= maxGapUs && latency >= 0.0 && latency <= 500.0)
+        // The trigger happened somewhere between the two clock reads: use the middle (result in us)
+        const double latency = (static_cast<double>(s_isr_latency_test_cb_ns) -
+                                0.5 * (static_cast<double>(t0) + static_cast<double>(t1))) / 1000.0;
+        if ((t1 - t0) <= maxGapUs * 1000LL && latency >= 0.0 && latency <= 500.0)
             lat[valid++] = latency;
     }
 
@@ -4706,7 +4933,8 @@ static constexpr char ptp_lat_NVS_KEY_FP[] = "fp";
 static constexpr int32_t ptp_lat_MIN_NS = 500; // plausible range of the latency
 static constexpr int32_t ptp_lat_MAX_NS = 20000;
 // Increase this number when the way the PTP clock is written changes, to trigger a new calibration
-static constexpr uint32_t PTP_LATENCY_CODE_VERSION = 1;
+// (2: the reference reading is taken on the fine local timebase; with FINE_LOCAL_TIMEBASE 0 the version stays 1)
+static constexpr uint32_t PTP_LATENCY_CODE_VERSION = (LOCAL_TICKS_PER_US > 1) ? 2 : 1;
 
 // Hash of everything that can change the PTP write latency of this build and chip
 static uint32_t ptp_write_latency_fingerprint()
@@ -4970,30 +5198,27 @@ static void ptp_latency_calibration_task(void *)
 }
 #endif
 
-// Sets the EMAC PTP clock to true time: PPS second + time elapsed since the edge.
+// Writes PPS second + time elapsed since the edge (+ the expected write latency) into the EMAC PTP clock.
 // The value is read back and rewritten if the write was unusually late (e.g. the task was interrupted).
-// The read-back of the first write of every second also measures the write latency (see PTP_LATENCY_AUTO).
-static void set_hardware_clock_from_pps(int64_t pps_second, double edge_local_us)
+// The read-back of the first write also measures the write latency (see PTP_LATENCY_AUTO).
+// correct_drift: false = elapsed time in oscillator units (PTP_FREE_RUNNING 0, its conversion expects that),
+//                true  = elapsed time corrected by the measured ppb, i.e. true time (PTP_FREE_RUNNING 1)
+// Returns true if the clock was written.
+static bool ptp_write_from_edge(int64_t pps_second, double edge_local_us, bool correct_drift)
 {
-    if (!s_ptp_clock_ready.load(std::memory_order_acquire))
-        return;
-
     static constexpr int64_t acceptDevNs = 2000; // tolerated deviation from the expected write latency
     static constexpr int maxAttempts = 3;
 
     // Latency in use during this call (the calibration can change it between two calls)
     const int64_t latency_ns = s_ptp_write_latency_ns.load(std::memory_order_relaxed);
-
-    s_ptp_comp_valid.store(false, std::memory_order_release);
-
-    int64_t total_ns = 0;
+    const double ppb = correct_drift ? static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed)) : 0.0;
     bool written = false;
 
     for (int attempt = 0; attempt < maxAttempts; ++attempt)
     {
-        const int64_t ref_us = esp_timer_get_time();
-        const double elapsed_us = static_cast<double>(ref_us) - edge_local_us;
-        total_ns = pps_second * 1000000000LL + llround(elapsed_us * 1000.0) + latency_ns;
+        const int64_t ref_ns = local_now_ns();
+        const double elapsed_ns = static_cast<double>(ref_ns) - edge_local_us * 1000.0;
+        const int64_t total_ns = pps_second * 1000000000LL + llround(elapsed_ns - elapsed_ns * ppb * 1e-9) + latency_ns;
 
         struct timespec ts{};
         ts.tv_sec = static_cast<time_t>(total_ns / 1000000000LL);
@@ -5002,24 +5227,24 @@ static void set_hardware_clock_from_pps(int64_t pps_second, double edge_local_us
             continue;
         written = true;
 
-        // Read back, bracketed by two esp_timer readings: the middle of the two readings is the time of the PTP read.
+        // Read back, bracketed by two local time readings: the middle of the two readings is the time of the PTP read.
         // The PTP clock starts at total_ns when written and runs on from the write instant (ref + actual latency).
         // Therefore rb - (total + (time of the read - ref)) = -actual latency, and the deviation from the expected
         // latency is err + latency_ns.
         struct timespec rb{};
-        const int64_t rb_a = esp_timer_get_time();
+        const int64_t rb_a = local_now_ns();
         if (clock_gettime(CLOCK_PTP_SYSTEM, &rb) != 0)
             break;
-        const int64_t rb_b = esp_timer_get_time();
+        const int64_t rb_b = local_now_ns();
         const int64_t rb_ns = static_cast<int64_t>(rb.tv_sec) * 1000000000LL + rb.tv_nsec;
-        const int64_t expected_ns = total_ns + (rb_a + rb_b) * 500LL - ref_us * 1000LL; // (rb_a + rb_b) / 2 us in ns
+        const int64_t expected_ns = total_ns + (rb_a + rb_b) / 2 - ref_ns;
         const int64_t err_ns = rb_ns - expected_ns;
         const int64_t dev_ns = err_ns + latency_ns;
 
 #if PTP_LATENCY_AUTO
         // Only the first write of a second is used for the calibration: it is not selected by the retry check below,
         // so the samples are not biased. Readings with a long bracket were interrupted and are dropped.
-        if (attempt == 0 && (rb_b - rb_a) <= 3)
+        if (attempt == 0 && (rb_b - rb_a) <= 3000)
             ptp_latency_calibration_add_sample(-err_ns);
 #endif
 
@@ -5030,52 +5255,495 @@ static void set_hardware_clock_from_pps(int64_t pps_second, double edge_local_us
         ESP_LOGW(TAG, "PTP set retry %d: write deviation %lld ns", attempt + 1, static_cast<long long>(dev_ns));
 #endif
     }
-
-    if (written)
-    {
-        // Offset of the PTP clock against the model clock after this write: mean of several read-backs, each one
-        // bracketed by two esp_timer readings (the middle of the bracket is taken as the instant of the read).
-        // The model time of that instant is pps_second + (middle - edge); both the PTP clock and esp_timer run on
-        // the same oscillator, so no drift term is needed over these few microseconds. Averaging removes most of
-        // the error of the individual write (latency jitter, 1 us quantization of the esp_timer reading ref_us).
-        int64_t offset_ns = 0;
-#if PTP_OFFSET_MEASUREMENT
-        static constexpr int offsetReads = 16;   // about 16 x 3 us
-        static constexpr int64_t maxBracketUs = 3; // longer brackets were interrupted
-        static constexpr int minValidReads = 4;
-        int64_t offset_sum = 0;
-        int valid_reads = 0;
-        const int64_t pps_second_ns = pps_second * 1000000000LL;
-        for (int i = 0; i < offsetReads; ++i)
-        {
-            struct timespec rb{};
-            const int64_t a = esp_timer_get_time();
-            if (clock_gettime(CLOCK_PTP_SYSTEM, &rb) != 0)
-                break;
-            const int64_t b = esp_timer_get_time();
-            if (b - a > maxBracketUs)
-                continue;
-            const int64_t rb_ns = static_cast<int64_t>(rb.tv_sec) * 1000000000LL + rb.tv_nsec;
-            const int64_t model_ns = pps_second_ns + llround((0.5 * static_cast<double>(a + b) - edge_local_us) * 1000.0);
-            offset_sum += rb_ns - model_ns;
-            ++valid_reads;
-        }
-        if (valid_reads >= minValidReads)
-        {
-            offset_ns = offset_sum / valid_reads;
-            // A deviation of more than 50 us cannot come from the write latency: do not trust the read-backs
-            if (offset_ns > 50000 || offset_ns < -50000)
-                offset_ns = 0;
-        }
-#if DEBUG_ENABLED
-        s_ptp_offset_dbg_ns.store(static_cast<int32_t>(offset_ns), std::memory_order_relaxed);
-        s_ptp_offset_dbg_n.store(valid_reads, std::memory_order_relaxed);
-#endif
-#endif
-        ptp_comp_publish(pps_second * 1000000000LL, offset_ns);
-        s_ptp_comp_valid.store(true, std::memory_order_release);
-    }
+    return written;
 }
+
+#if !PTP_FREE_RUNNING
+// PTP_FREE_RUNNING 0: sets the EMAC PTP clock to PPS second + time elapsed since the edge (every second) and measures
+// the offset of the result against the model clock.
+static void set_hardware_clock_from_pps(int64_t pps_second, double edge_local_us)
+{
+    if (!s_ptp_clock_ready.load(std::memory_order_acquire))
+        return;
+
+    s_ptp_comp_valid.store(false, std::memory_order_release);
+    if (!ptp_write_from_edge(pps_second, edge_local_us, false))
+        return;
+
+    // Offset of the PTP clock against the model clock after this write: mean of several read-backs, each one
+    // bracketed by two local time readings (the middle of the bracket is taken as the instant of the read).
+    // The model time of that instant is pps_second + (middle - edge); both the PTP clock and the local timebase run on
+    // the same oscillator, so no drift term is needed (the conversion applies the ppb to the whole time since the edge).
+    // Averaging removes most of the error of the individual write (latency jitter).
+    int64_t offset_ns = 0;
+#if PTP_OFFSET_MEASUREMENT
+    static constexpr int offsetReads = 16;     // about 16 x 3 us
+    static constexpr int64_t maxBracketNs = 3000; // longer brackets were interrupted
+    static constexpr int minValidReads = 4;
+    int64_t offset_sum = 0;
+    int valid_reads = 0;
+    const int64_t pps_second_ns = pps_second * 1000000000LL;
+    for (int i = 0; i < offsetReads; ++i)
+    {
+        struct timespec rb{};
+        const int64_t a = local_now_ns();
+        if (clock_gettime(CLOCK_PTP_SYSTEM, &rb) != 0)
+            break;
+        const int64_t b = local_now_ns();
+        if (b - a > maxBracketNs)
+            continue;
+        const int64_t rb_ns = static_cast<int64_t>(rb.tv_sec) * 1000000000LL + rb.tv_nsec;
+        const int64_t model_ns = pps_second_ns + llround(0.5 * static_cast<double>(a + b) - edge_local_us * 1000.0);
+        offset_sum += rb_ns - model_ns;
+        ++valid_reads;
+    }
+    if (valid_reads >= minValidReads)
+    {
+        offset_ns = offset_sum / valid_reads;
+        // A deviation of more than 50 us cannot come from the write latency: do not trust the read-backs
+        if (offset_ns > 50000 || offset_ns < -50000)
+            offset_ns = 0;
+    }
+#if DEBUG_ENABLED
+    s_ptp_offset_dbg_ns.store(static_cast<int32_t>(offset_ns), std::memory_order_relaxed);
+    s_ptp_offset_dbg_n.store(valid_reads, std::memory_order_relaxed);
+#endif
+#endif
+    ptp_comp_publish(pps_second * 1000000000LL, offset_ns);
+    s_ptp_comp_valid.store(true, std::memory_order_release);
+}
+#else
+// ---- Servo of the free-running PTP clock (PTP_FREE_RUNNING 1) ----
+// Measurement, once per PPS edge: m = raw PTP time - true time at the edge
+//   - with the PTP PPS loopback (PTPPPSLoopbackPin): the EMAC pulse at every PTP second and the GNSS PPS are captured
+//     by the same MCPWM timer, m = -(capture of the PTP pulse - capture of the GNSS pulse). 12.5 ns resolution, no
+//     software delay in the result. Whole seconds and a plausibility check come from a short software measurement.
+//   - otherwise by software: several readings of the PTP clock, each one bracketed by two readings of the fine local
+//     timebase; the middle of the bracket is taken as the instant of the reading (median of the shortest brackets).
+//     The fixed delay of the reading within the bracket remains as a constant error (some 100 ns). With the loopback
+//     this error is measured ("sw-hw" in the debug output) and also removed from software measurements afterwards.
+// Filter (alpha-beta): estimates the offset and the free-running rate of the PTP clock (ppb, without the frequency
+//   command). The frequency command is known exactly, so it is part of the prediction and not of the estimate.
+// Servo: frequency command = -(estimated free-running rate) - offset / PTP_SERVO_TIME_CONSTANT_S, so the PTP clock
+//   runs at the GNSS rate and its offset decays slowly. The served time stamps do not depend on the servo: they are
+//   converted with the estimated offset (mapping); the servo only keeps the raw PTP clock close to true time.
+static constexpr double ptp_filter_alpha = 0.25;          // weight of a new offset measurement
+static constexpr double ptp_filter_beta = 0.035;          // weight for the rate (alpha^2 / (2 - alpha))
+static constexpr double PTP_SERVO_TIME_CONSTANT_S = 16.0; // decay time of the offset under the servo
+static constexpr double ptp_servo_max_slew_ppb = 20000.0; // offset correction at most 20 ppm (20 us per second)
+static constexpr int32_t ptp_max_command_ppb = 5000000;   // limit of the frequency command (the HAL clamps at +-5,120,000 ppb)
+static constexpr double ptp_step_threshold_ns = 100000.0; // larger offsets are stepped (clock_settime), smaller slewed
+static constexpr double ptp_loopback_gate_ns = 20000.0;   // software and loopback measurement must agree within this
+// Delay of the loopback path (EMAC pulse -> pad -> capture) minus the delay of the GNSS PPS input path, in ns.
+// Both paths go through a pad and the GPIO matrix, so the difference is a few ns at most; 0 is fine.
+static constexpr int64_t PTP_PPS_LOOPBACK_DELAY_NS = 0;
+static constexpr int ptp_sw_reads_max = 16;
+
+struct ptp_servo_state_t
+{
+    bool initialized = false;          // the filter has a valid offset estimate for the current epoch
+    bool have_rate = false;            // free_ppb is an estimate (kept through holdover and re-initialisations)
+    uint32_t epoch = 0;                // epoch of the PTP clock the estimate belongs to
+    int64_t last_edge_sec = 0;         // second of the edge of the last estimate
+    double offset_ns = 0.0;            // estimated offset at that edge (raw - true)
+    double free_ppb = 0.0;             // estimated rate of the PTP clock without frequency command
+    int32_t cmd_ppb = 0;               // frequency command in effect (absolute, against the base addend)
+    int32_t prev_cmd_ppb = 0;          // command before the last update
+    double update_after_edge_s = 0.0;  // instant of the last command update, seconds after its edge
+    double noise_ns = 0.0;             // running mean of |innovation|
+    int rejects = 0;                   // measurements in a row rejected as outliers
+    int settle = 0;                    // seconds after a start in which a loopback measurement may replace the estimate
+    double sw_bias_ns = 0.0;           // delay error of the software measurement (software - loopback)
+    uint32_t sw_bias_samples = 0;
+    // statistics for the debug output
+    double last_measurement_ns = 0.0;
+    double last_innovation_ns = 0.0;
+    bool last_from_loopback = false;
+    uint32_t loopback_used = 0;
+    uint32_t loopback_missing = 0;
+    uint32_t loopback_rejected = 0;
+    uint32_t outliers = 0;
+    uint32_t steps = 0;
+    uint32_t command_failures = 0;
+};
+static ptp_servo_state_t s_ptp_servo; // the PPS task is the only user
+
+// Raw PTP time in ns (directly from the MAC, shorter than clock_gettime)
+static bool ptp_read_raw_ns(int64_t &raw_ns)
+{
+    if (s_ptp_mac != nullptr)
+    {
+        eth_mac_time_t t{};
+        if (esp_eth_mac_get_ptp_time(s_ptp_mac, &t) != ESP_OK)
+            return false;
+        raw_ns = static_cast<int64_t>(t.seconds) * 1000000000LL + static_cast<int64_t>(t.nanoseconds);
+        return true;
+    }
+    struct timespec ts{};
+    if (clock_gettime(CLOCK_PTP_SYSTEM, &ts) != 0)
+        return false;
+    raw_ns = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+    return true;
+}
+
+// Software measurement of raw PTP - true time at the PPS edge. rate_ppb = current rate of the offset, used to refer
+// the readings (some ms after the edge) back to the edge. Returns the number of readings used (0 = failed).
+static int ptp_measure_offset_sw(int64_t edge_sec, double edge_local_us, double rate_ppb, int reads,
+                                 double &offset_ns, int64_t &bracket_ns)
+{
+    static int64_t value[ptp_sw_reads_max]; // static: the PPS task has little stack
+    static int64_t bracket[ptp_sw_reads_max];
+    static constexpr int64_t maxBracketNs = 4000;   // longer brackets were interrupted
+    static constexpr int64_t bracketSlackNs = 250;  // readings within this of the shortest bracket are used
+
+    const double ppb = static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed));
+    const double edge_ns = edge_local_us * 1000.0;
+    const int64_t edge_sec_ns = edge_sec * 1000000000LL;
+    int n = 0;
+    int64_t min_bracket = INT64_MAX;
+    reads = std::min(reads, ptp_sw_reads_max);
+    for (int i = 0; i < reads; ++i)
+    {
+        int64_t raw = 0;
+        const int64_t a = local_now_ns();
+        const bool ok = ptp_read_raw_ns(raw);
+        const int64_t b = local_now_ns();
+        if (!ok)
+            break;
+        if (b - a > maxBracketNs)
+            continue;
+        const double el = static_cast<double>(a + (b - a) / 2) - edge_ns; // local ns since the edge
+        const double el_true = el - el * ppb * 1e-9;                       // true ns since the edge
+        value[n] = llround(static_cast<double>(raw - edge_sec_ns) - el_true - rate_ppb * el_true * 1e-9);
+        bracket[n] = b - a;
+        min_bracket = std::min(min_bracket, b - a);
+        ++n;
+    }
+    if (n == 0)
+        return 0;
+
+    // Readings with the shortest brackets, median (robust against a reading that caught the second rollover
+    // between the seconds and the sub-seconds register)
+    int m = 0;
+    for (int i = 0; i < n; ++i)
+        if (bracket[i] <= min_bracket + bracketSlackNs)
+            value[m++] = value[i];
+    for (int i = 1; i < m; ++i) // insertion sort
+    {
+        const int64_t v = value[i];
+        int j = i - 1;
+        while (j >= 0 && value[j] > v)
+        {
+            value[j + 1] = value[j];
+            --j;
+        }
+        value[j + 1] = v;
+    }
+    offset_ns = (m % 2 == 1) ? static_cast<double>(value[m / 2])
+                             : 0.5 * (static_cast<double>(value[m / 2 - 1]) + static_cast<double>(value[m / 2]));
+    bracket_ns = min_bracket;
+    return m;
+}
+
+// Phase of the latest PTP loopback pulse against the GNSS PPS capture, in capture ticks (> 0: the PTP pulse came
+// later). Waits up to 300 us for a PTP pulse that follows the GNSS pulse closely.
+static bool ptp_loopback_phase_ticks(uint32_t gnss_cap_ticks, int32_t &phase_ticks)
+{
+    const int32_t half_second = static_cast<int32_t>(s_pps_capture_hz / 2);
+    bool waited = false;
+    for (int pass = 0; pass < 4; ++pass)
+    {
+        const uint32_t head = s_ptp_pps_capture_head.load(std::memory_order_acquire);
+        bool found = false;
+        int32_t best = 0;
+        for (uint32_t k = 0; k < ptp_pps_capture_ring_size && k < head; ++k)
+        {
+            const uint32_t c = s_ptp_pps_captures[(head - 1 - k) % ptp_pps_capture_ring_size];
+            const int32_t d = static_cast<int32_t>(c - gnss_cap_ticks); // modulo arithmetic handles the 32 bit wrap
+            if (d > -half_second && d < half_second && (!found || std::llabs(d) < std::llabs(best)))
+            {
+                best = d;
+                found = true;
+            }
+        }
+        if (s_ptp_pps_capture_head.load(std::memory_order_acquire) != head)
+            continue; // a capture arrived while reading: read again
+        if (found)
+        {
+            phase_ticks = best;
+            return true;
+        }
+        if (waited)
+            return false;
+        waited = true;
+        const int64_t until_ns = local_now_ns() + 300000;
+        while (local_now_ns() < until_ns && s_ptp_pps_capture_head.load(std::memory_order_acquire) == head)
+        {
+        }
+    }
+    return false;
+}
+
+// Applies a frequency command (ppb, absolute against the base addend). Returns false if the EMAC refused it.
+static bool ptp_apply_command(int32_t cmd_ppb)
+{
+    ptp_servo_state_t &st = s_ptp_servo;
+    if (cmd_ppb == st.cmd_ppb)
+        return true;
+    if (s_ptp_mac == nullptr || esp_eth_mac_adj_ptp_time(s_ptp_mac, cmd_ppb) != ESP_OK)
+    {
+        ++st.command_failures;
+        return false;
+    }
+    st.cmd_ppb = cmd_ppb;
+    return true;
+}
+
+// Sets the PTP clock to true time (for large offsets only); the filter starts again in the new epoch
+static void ptp_servo_step(int64_t edge_sec, double edge_local_us, double offset_ns)
+{
+    ptp_servo_state_t &st = s_ptp_servo;
+    s_ptp_comp_valid.store(false, std::memory_order_release);
+    // Run at the estimated GNSS rate right away, so the raw clock is usable until the next measurement
+    ptp_apply_command(static_cast<int32_t>(std::clamp(llround(-st.free_ppb), static_cast<long long>(-ptp_max_command_ppb),
+                                                      static_cast<long long>(ptp_max_command_ppb))));
+    const bool written = ptp_write_from_edge(edge_sec, edge_local_us, true);
+    st.epoch = s_ptp_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    st.initialized = false;
+    ++st.steps;
+#if DEBUG_ENABLED
+    ESP_LOGI(TAG, "PTP clock %s (offset was %.1f us)", written ? "set" : "could not be set", offset_ns / 1000.0);
+#else
+    (void)offset_ns;
+    (void)written;
+#endif
+}
+
+// Called by the PPS task for every accepted PPS edge (s_time_mutex held, after the model clock was published).
+// rate_valid: the PPS task has a frequency estimate of the crystal (s_clock_ppb), used as the start value of the rate.
+static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gnss_cap_ticks, bool rate_valid)
+{
+    ptp_servo_state_t &st = s_ptp_servo;
+    if (!s_ptp_clock_ready.load(std::memory_order_acquire) || !rate_valid)
+        return;
+
+    const uint32_t epoch = s_ptp_epoch.load(std::memory_order_acquire);
+    if (s_ptp_addend_reset.exchange(false, std::memory_order_acq_rel))
+    {
+        // The PTP block was initialised again (Ethernet recovery): the hardware runs without frequency command
+        st.cmd_ppb = 0;
+        st.prev_cmd_ppb = 0;
+    }
+    if (epoch != st.epoch)
+    {
+        st.epoch = epoch;
+        st.initialized = false;
+    }
+    if (!st.have_rate)
+    {
+        // The PTP clock runs on the same crystal as the local timebase: start with the measured oscillator error
+        st.free_ppb = static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed));
+        st.have_rate = true;
+    }
+
+    // ---- Measurement ----
+    // The first measurement after a (re)start comes from the software readings only: a loopback pulse captured
+    // before the clock was set belongs to the old clock
+    const bool loopback = s_ptp_loopback_active.load(std::memory_order_acquire) && st.initialized;
+    double sw_offset_ns = 0.0;
+    int64_t sw_bracket_ns = 0;
+    const int sw_reads = ptp_measure_offset_sw(edge_sec, edge_local_us, st.free_ppb + st.cmd_ppb, loopback ? 4 : ptp_sw_reads_max,
+                                               sw_offset_ns, sw_bracket_ns);
+    if (s_ptp_epoch.load(std::memory_order_acquire) != epoch || !s_ptp_clock_ready.load(std::memory_order_acquire))
+        return; // the clock was set or re-initialised meanwhile
+    if (sw_reads == 0)
+        return; // keep extrapolating with the last mapping
+
+    const double sw_corrected_ns = sw_offset_ns - st.sw_bias_ns; // sw_bias_ns stays 0 without loopback
+    double measurement_ns = sw_corrected_ns;
+    bool from_loopback = false;
+    if (loopback)
+    {
+        int32_t phase_ticks = 0;
+        if (ptp_loopback_phase_ticks(gnss_cap_ticks, phase_ticks))
+        {
+            // The PTP pulse marks a whole PTP second. It came phase after the GNSS pulse, so at the GNSS edge the PTP
+            // clock was phase short of a whole second; the whole seconds come from the software measurement.
+            double hw_ns = -static_cast<double>(phase_ticks) * 1e9 / static_cast<double>(s_pps_capture_hz) +
+                           static_cast<double>(PTP_PPS_LOOPBACK_DELAY_NS);
+            hw_ns += std::round((sw_offset_ns - hw_ns) / 1e9) * 1e9;
+            if (fabs(hw_ns - sw_corrected_ns) <= ptp_loopback_gate_ns)
+            {
+                measurement_ns = hw_ns;
+                from_loopback = true;
+                ++st.loopback_used;
+            }
+            else
+                ++st.loopback_rejected;
+        }
+        else
+            ++st.loopback_missing;
+
+        static bool warned = false;
+        if (!warned && st.loopback_used == 0 && st.loopback_missing + st.loopback_rejected >= 30)
+        {
+            warned = true;
+            ESP_LOGW(TAG, "PTP PPS loopback on GPIO %d: no usable pulses (%lu missing, %lu implausible); is the pin free and unconnected?",
+                     PTPPPSLoopbackPin, static_cast<unsigned long>(st.loopback_missing), static_cast<unsigned long>(st.loopback_rejected));
+        }
+    }
+    st.last_measurement_ns = measurement_ns;
+    st.last_from_loopback = from_loopback;
+
+    // ---- Filter ----
+    const int64_t dt = edge_sec - st.last_edge_sec;
+    if (st.initialized && (dt <= 0 || dt > 60))
+        st.initialized = false; // edges missing for more than a minute (or time stepped): start again
+
+    if (!st.initialized)
+    {
+        if (fabs(measurement_ns) > ptp_step_threshold_ns)
+        {
+            ptp_servo_step(edge_sec, edge_local_us, measurement_ns);
+            return;
+        }
+        st.offset_ns = measurement_ns;
+        st.noise_ns = 0.0;
+        st.rejects = 0;
+        st.last_innovation_ns = 0.0;
+        st.settle = 3;
+        st.initialized = true;
+    }
+    else
+    {
+        // Prediction: the old command until the last update, the current command after it
+        const double pred_ns = st.offset_ns + (st.free_ppb + st.prev_cmd_ppb) * st.update_after_edge_s +
+                               (st.free_ppb + st.cmd_ppb) * (static_cast<double>(dt) - st.update_after_edge_s);
+        const double innovation_ns = measurement_ns - pred_ns;
+        st.last_innovation_ns = innovation_ns;
+        const double gate_ns = std::max(from_loopback ? 1000.0 : 3000.0, 8.0 * st.noise_ns);
+        // Shortly after a start the first loopback measurement replaces the software start value (whose delay
+        // error is not known yet)
+        bool restart_from_loopback = false;
+        if (st.settle > 0)
+        {
+            --st.settle;
+            restart_from_loopback = from_loopback && fabs(innovation_ns) > gate_ns;
+        }
+
+        if (restart_from_loopback)
+        {
+            st.offset_ns = measurement_ns;
+            st.noise_ns = 0.0;
+            st.settle = 0;
+        }
+        else if (fabs(innovation_ns) > gate_ns && st.rejects < 4)
+        {
+            // Outlier: coast on the prediction (the published mapping stays valid, the command is unchanged)
+            ++st.rejects;
+            ++st.outliers;
+            st.offset_ns = pred_ns;
+            st.last_edge_sec = edge_sec;
+            st.prev_cmd_ppb = st.cmd_ppb;
+            st.update_after_edge_s = 0.0;
+            return;
+        }
+        else if (fabs(innovation_ns) > gate_ns)
+        {
+            // Five in a row: the clock really moved, take the measurement as the new start (and the rate
+            // estimate of the PPS task, in case the rate estimate was the problem)
+#if DEBUG_ENABLED
+            ESP_LOGW(TAG, "PTP servo: offset jumped by %.1f us, filter restarted", innovation_ns / 1000.0);
+#endif
+            st.offset_ns = measurement_ns;
+            st.free_ppb = static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed));
+            st.noise_ns = 0.0;
+        }
+        else
+        {
+            st.offset_ns = pred_ns + ptp_filter_alpha * innovation_ns;
+            st.free_ppb += ptp_filter_beta * innovation_ns / static_cast<double>(dt);
+            st.noise_ns += (fabs(innovation_ns) - st.noise_ns) / 16.0;
+        }
+        st.rejects = 0;
+
+        if (fabs(st.offset_ns) > ptp_step_threshold_ns)
+        {
+            ptp_servo_step(edge_sec, edge_local_us, st.offset_ns);
+            return;
+        }
+
+        // Delay error of the software measurement, learned while the loopback works (running mean, weight 1/64)
+        if (from_loopback && st.noise_ns < 200.0)
+        {
+            const double sample = sw_offset_ns - measurement_ns;
+            st.sw_bias_ns = (st.sw_bias_samples < 64)
+                                ? (st.sw_bias_ns * st.sw_bias_samples + sample) / (st.sw_bias_samples + 1)
+                                : st.sw_bias_ns + (sample - st.sw_bias_ns) / 64.0;
+            if (st.sw_bias_samples < UINT32_MAX)
+                ++st.sw_bias_samples;
+        }
+    }
+    st.last_edge_sec = edge_sec;
+
+    // ---- Servo ----
+    const double correction_ppb = std::clamp(-st.offset_ns / PTP_SERVO_TIME_CONSTANT_S, -ptp_servo_max_slew_ppb, ptp_servo_max_slew_ppb);
+    const int32_t command = static_cast<int32_t>(std::clamp(llround(-st.free_ppb + correction_ppb),
+                                                            static_cast<long long>(-ptp_max_command_ppb),
+                                                            static_cast<long long>(ptp_max_command_ppb)));
+    const int32_t old_command = st.cmd_ppb;
+    ptp_apply_command(command);
+    const double update_local_s = std::max(0.0, (static_cast<double>(local_now_ns()) - edge_local_us * 1000.0) * 1e-9);
+    const double update_s = update_local_s - update_local_s * static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed)) * 1e-9;
+    st.prev_cmd_ppb = old_command;
+    st.update_after_edge_s = update_s;
+
+    // ---- Mapping, reference point = instant of this update ----
+    const double ref_offset_ns = st.offset_ns + (st.free_ppb + old_command) * update_s;
+    const int64_t ref_true_ns = edge_sec * 1000000000LL + llround(update_s * 1e9);
+    ptp_map_publish(ref_true_ns + llround(ref_offset_ns), llround(ref_offset_ns),
+                    llround((st.free_ppb + old_command) * 1000.0), llround((st.free_ppb + st.cmd_ppb) * 1000.0));
+    s_ptp_comp_valid.store(true, std::memory_order_release);
+}
+
+// Called by the PPS task when the PPS is lost: stop the offset correction and keep the PTP clock on the estimated
+// rate (holdover). The mapping continues from the current offset.
+static void ptp_servo_holdover()
+{
+    ptp_servo_state_t &st = s_ptp_servo;
+    if (!st.initialized || !s_ptp_clock_ready.load(std::memory_order_acquire) || !s_ptp_comp_valid.load(std::memory_order_acquire))
+        return;
+    int64_t raw_ns = 0;
+    int64_t offset_ns = 0;
+    if (!ptp_read_raw_ns(raw_ns) || !ptp_map_offset_at(raw_ns, offset_ns))
+        return;
+    const int32_t old_command = st.cmd_ppb;
+    ptp_apply_command(static_cast<int32_t>(std::clamp(llround(-st.free_ppb), static_cast<long long>(-ptp_max_command_ppb),
+                                                      static_cast<long long>(ptp_max_command_ppb))));
+    ptp_map_publish(raw_ns, offset_ns, llround((st.free_ppb + old_command) * 1000.0), llround((st.free_ppb + st.cmd_ppb) * 1000.0));
+    st.initialized = false; // the next PPS edge starts the filter again, the rate estimate is kept
+#if DEBUG_ENABLED
+    ESP_LOGI(TAG, "PTP servo: holdover, offset %.1f ns, rate %.3f ppb, command %d ppb", static_cast<double>(offset_ns),
+             st.free_ppb, static_cast<int>(st.cmd_ppb));
+#endif
+}
+
+#if DEBUG_ENABLED
+// Status line of the servo (debug output of the PPS task)
+static void ptp_servo_log_status()
+{
+    const ptp_servo_state_t &st = s_ptp_servo;
+    ESP_LOGI(TAG, "PTP: %s offset %.1f ns (meas %.1f, innov %.1f, noise %.1f) rate %.3f ppb cmd %d ppb | outliers %lu steps %lu cmd err %lu",
+             st.last_from_loopback ? "loopback" : "software", st.offset_ns, st.last_measurement_ns, st.last_innovation_ns,
+             st.noise_ns, st.free_ppb, static_cast<int>(st.cmd_ppb), static_cast<unsigned long>(st.outliers),
+             static_cast<unsigned long>(st.steps), static_cast<unsigned long>(st.command_failures));
+    if (s_ptp_loopback_active.load(std::memory_order_relaxed))
+        ESP_LOGI(TAG, "PTP loopback: used %lu missing %lu rejected %lu | software - loopback %.1f ns (%lu)",
+                 static_cast<unsigned long>(st.loopback_used), static_cast<unsigned long>(st.loopback_missing),
+                 static_cast<unsigned long>(st.loopback_rejected), st.sw_bias_ns, static_cast<unsigned long>(st.sw_bias_samples));
+}
+#endif
+#endif
 
 static void pps_discipline_task(void *parameter)
 {
@@ -5122,7 +5790,8 @@ static void pps_discipline_task(void *parameter)
         PpsCaptureEvent capture_event{};
         if (xQueueReceive(s_pps_timestamp_queue, &capture_event, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
-            const int64_t edge_us = capture_event.approximate_edge_us; // ISR time (noisy)
+            const int64_t edge_us = capture_event.approximate_edge_us; // ISR time (noisy), whole microseconds
+            const double isr_us = static_cast<double>(capture_event.isr_local_ns) / 1000.0; // the same, fine timebase
             const uint32_t ticks = capture_event.cap_ticks;            // hardware ticks (exact)
             const double hz = static_cast<double>(s_pps_capture_hz);
 
@@ -5232,13 +5901,13 @@ static void pps_discipline_task(void *parameter)
                 }
             }
 
-            // ---- 3. Anchor of the edge in esp_timer time ----
-            // d = ISR time - tick time = constant offset + interrupt latency (+ rounding of esp_timer to whole
-            // microseconds). The latency has outliers that are always late, so the central value is the mean of the
+            // ---- 3. Anchor of the edge in local time ----
+            // d = ISR time - tick time = constant offset + interrupt latency (+ resolution of the local timebase).
+            // The latency has outliers that are always late, so the central value is the mean of the
             // lowest 75 % of the last 64 values. The measured interrupt latency (see measure_pps_isr_latency_task)
-            // is calculated with the same statistic, so the rounding of esp_timer and the shape of the jitter cancel
-            // out. A minimum would not do that: its bias depends on the noise (up to +-0.35 us).
-            const double d = static_cast<double>(edge_us) - static_cast<double>(unwrapped) * 1e6 / hz;
+            // is calculated with the same statistic and the same timebase, so the shape of the jitter cancels
+            // out. A minimum would not do that: its bias depends on the noise.
+            const double d = isr_us - static_cast<double>(unwrapped) * 1e6 / hz;
             anchor_d[anchor_head] = d;
             anchor_head = (anchor_head + 1) % anchorWindow;
             if (anchor_count < anchorWindow)
@@ -5252,7 +5921,7 @@ static void pps_discipline_task(void *parameter)
                 anchor_sum += anchor_sorted[i];
             const double d_central = anchor_sum / anchor_keep;
             const double excess_us = d - d_central; // jitter of this edge relative to the central value
-            const double edge_local_us = static_cast<double>(edge_us) - excess_us -
+            const double edge_local_us = isr_us - excess_us -
                                          static_cast<double>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)) / 1000.0;
 
             // ---- 4. Phase correction ----
@@ -5263,15 +5932,15 @@ static void pps_discipline_task(void *parameter)
 
             // Several bracketed reads, keep the one with the smallest gap: the first read
             // (cold cache) is discarded and the mid-point assumption gets more precise.
-            int64_t t1 = 0, t2 = 0;
+            int64_t t1 = 0, t2 = 0; // local time in ns
             struct timeval now{};
             int64_t best_gap = INT64_MAX;
             for (int i = 0; i < 4; ++i)
             {
                 struct timeval tv{};
-                const int64_t a = esp_timer_get_time();
+                const int64_t a = local_now_ns();
                 gettimeofday(&tv, nullptr);
-                const int64_t b = esp_timer_get_time();
+                const int64_t b = local_now_ns();
                 if ((b - a) < best_gap)
                 {
                     best_gap = b - a;
@@ -5280,9 +5949,10 @@ static void pps_discipline_task(void *parameter)
                     now = tv;
                 }
             }
+            best_gap /= 1000; // us (debug output)
 
             const double sys_us = static_cast<double>(now.tv_sec) * 1e6 + static_cast<double>(now.tv_usec);
-            const double mid_local_us = 0.5 * (static_cast<double>(t1) + static_cast<double>(t2));
+            const double mid_local_us = 0.5e-3 * (static_cast<double>(t1) + static_cast<double>(t2));
             const double edge_sys_us = sys_us - (mid_local_us - edge_local_us); // system clock value at the edge
 
             const int64_t edge_sec = static_cast<int64_t>(floor(edge_sys_us / 1e6 + 0.5));
@@ -5337,8 +6007,13 @@ static void pps_discipline_task(void *parameter)
                     s_clock_comp_valid.store(false, std::memory_order_release);
                 }
 
+#if PTP_FREE_RUNNING
+                // Measure the PTP clock against this edge and steer its frequency (the clock is not written)
+                ptp_servo_update(edge_sec, edge_local_us, ticks, est_valid);
+#else
                 // Set the PTP clock from the PPS second (not from the system clock, whose slew is still pending)
                 set_hardware_clock_from_pps(edge_sec, edge_local_us);
+#endif
                 s_ntp_reference_time_64 = get_current_time_in_ntp64_format();
                 s_ntp_reference_valid = true;
             }
@@ -5354,18 +6029,19 @@ static void pps_discipline_task(void *parameter)
             {
                 ESP_LOGI(TAG, "PPS: ppm=%.4f raw_phase=%.2f us resid=%.2f us jitter_excess=%.2f us d_central=%.2f gap=%lld us",
                          est_ppm, phase_error_us, resid_us, excess_us, d_central, static_cast<long long>(best_gap));
-#if NTP_BASIC_T3_TX_COMPENSATION && NTP_HW_TX_TIMESTAMPS
-                ESP_LOGI(TAG, "PTP: offset after write %d ns (%d reads) | basic T3 TX delay v4 %d ns (%lu) v6 %d ns (%lu)",
-                         static_cast<int>(s_ptp_offset_dbg_ns.load(std::memory_order_relaxed)),
-                         static_cast<int>(s_ptp_offset_dbg_n.load(std::memory_order_relaxed)),
-                         static_cast<int>(s_tx_delay[0][0].delay_ns.load(std::memory_order_relaxed)),
-                         static_cast<unsigned long>(s_tx_delay[0][0].samples.load(std::memory_order_relaxed)),
-                         static_cast<int>(s_tx_delay[1][0].delay_ns.load(std::memory_order_relaxed)),
-                         static_cast<unsigned long>(s_tx_delay[1][0].samples.load(std::memory_order_relaxed)));
+#if PTP_FREE_RUNNING
+                ptp_servo_log_status();
 #else
                 ESP_LOGI(TAG, "PTP: offset after write %d ns (%d reads)",
                          static_cast<int>(s_ptp_offset_dbg_ns.load(std::memory_order_relaxed)),
                          static_cast<int>(s_ptp_offset_dbg_n.load(std::memory_order_relaxed)));
+#endif
+#if NTP_BASIC_T3_TX_COMPENSATION && NTP_HW_TX_TIMESTAMPS
+                ESP_LOGI(TAG, "Basic T3 TX delay: v4 %d ns (%lu) v6 %d ns (%lu)",
+                         static_cast<int>(s_tx_delay[0][0].delay_ns.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long>(s_tx_delay[0][0].samples.load(std::memory_order_relaxed)),
+                         static_cast<int>(s_tx_delay[1][0].delay_ns.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long>(s_tx_delay[1][0].samples.load(std::memory_order_relaxed)));
 #endif
             }
 #endif
@@ -5380,6 +6056,17 @@ static void pps_discipline_task(void *parameter)
                 if (logged_active)
                     ESP_LOGW(TAG, "PPS discipline inactive (PPS signal unavailable).");
 #endif
+                if (logged_active)
+                {
+#if PTP_FREE_RUNNING
+                    // Holdover: keep the PTP clock on its estimated rate, stop the offset correction
+                    if (xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(20)) == pdTRUE)
+                    {
+                        ptp_servo_holdover();
+                        xSemaphoreGive(s_time_mutex);
+                    }
+#endif
+                }
                 logged_active = false;
                 s_pps_discipline_active.store(false);
                 sync_state_note_pps_timeout(now_us);
