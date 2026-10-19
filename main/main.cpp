@@ -38,7 +38,10 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cinttypes>
+#include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,6 +68,7 @@
 extern "C"
 {
 #include "esp_chip_info.h"
+#include "esp_idf_version.h"
 #include "esp_event.h"
 #include "esp_eth_clock.h"
 #include "esp_eth_driver.h"
@@ -212,17 +216,17 @@ reply and doesn’t blindly accept time data that has been changed in transit.
 
 // FreeRTOS task stack allocations, in bytes.
 
-static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 3072;
+static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 2405;
 static constexpr size_t GNSS_Recovery_Task_Stack_Size = 12288;
-static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = 2517;
-static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 4096;
+static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = 2412;
+static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2719;
 static constexpr size_t LED_LCD_Button_Task_Stack_Size = 3217;
 static constexpr size_t Ethernet_Setup_Task_Stack_Size = 4096;
 static constexpr size_t MQTT_Service_Task_Stack_Size = 3512;
-static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2304;
+static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2222;
 static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
-static constexpr size_t OTE_Service_Task_Stack_Size = 3560; // unlikely to exceed this stack size (based on current implementation)
-static constexpr size_t PPS_Discipline_Task_Stack_Size = 2390;
+static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
+static constexpr size_t PPS_Discipline_Task_Stack_Size = 3135;
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
 
@@ -510,8 +514,8 @@ static constexpr size_t NTP_MAX_PACKET_SIZE = NTP_PACKET_SIZE + NTP_AUTH_TRAILER
 static constexpr size_t NTP_MAX_PACKET_SIZE = NTP_PACKET_SIZE;
 #endif
 static constexpr uint64_t NTP_EPOCH_OFFSET = 2208988800ULL;
-static constexpr int8_t NTP_PRECISION_EXPONENT = -13;
-static constexpr uint32_t NTP_ROOT_DISPERSION = 66;
+static constexpr int8_t NTP_PRECISION_EXPONENT = -20; // 2^-20 s = 0.95 us: resolution of esp_timer (the EMAC time stamps have 25 ns)
+static constexpr uint32_t NTP_ROOT_DISPERSION = 2; // NTP short format, 1/65536 s per unit: 2 = 30.5 us (served at stratum 1 with active PPS only)
 static constexpr uint64_t NTP_CACHE_TIMESTAMP_MATCH_TOLERANCE = 8;
 static constexpr size_t NTP_SOCKET_BATCH_LIMIT = 16;
 static constexpr EventBits_t ETH_CONNECTED_BIT = BIT0;
@@ -538,7 +542,8 @@ static std::string MACToBeUsed;
 
 struct PpsCaptureEvent
 {
-    int64_t approximate_edge_us;
+    uint32_t cap_ticks;          // raw MCPWM capture ticks
+    int64_t approximate_edge_us; // absolute edge time in microseconds (esp_timer_get_time)
 };
 
 static constexpr uint32_t PPS_CAPTURE_RESOLUTION_HZ = 80000000;
@@ -567,12 +572,154 @@ static int64_t s_ote_reboot_at_us = 0;
 static char s_ote_error_reason[lcdColumns + 1] = "";
 #endif
 
-static std::atomic<bool> s_safe_guard_tripped{false};
 static std::atomic<bool> s_time_setting_in_progress{false};
 static std::atomic<bool> s_time_has_been_set{false};
 static std::atomic<uint64_t> s_ntp_reference_time_64{0};
 static std::atomic<bool> s_ntp_reference_valid{false};
 static std::atomic<bool> s_ptp_clock_ready{false};
+
+// ---- PPS / clock compensation ----
+// Actual tick rate of the MCPWM capture timer (queried in setup_pps_input()).
+static uint32_t s_pps_capture_hz = PPS_CAPTURE_RESOLUTION_HZ;
+// Default for the interrupt latency between the PPS edge and the capture callback. It is the central value of the latency
+// (mean of the lowest 75 % of the samples). The first measurement on the development board gave 2.5 us as minimum and as median.
+// With PPS_ISR_LATENCY_AUTO the latency is measured once per chip / configuration, stored in NVS and used from there;
+// the default applies until then.
+static constexpr double PPS_ISR_LATENCY_DEFAULT_US = 2.6;
+// Value in use in nanoseconds (lock-free atomic so it can be changed at run time)
+static std::atomic<int32_t> s_pps_isr_latency_ns{static_cast<int32_t>(PPS_ISR_LATENCY_DEFAULT_US * 1000.0 + 0.5)};
+// ---- PTP write latency: calibrated at run time and stored in NVS ----
+// Latency between the esp_timer reading taken just before clock_settime(CLOCK_PTP_SYSTEM) and the instant the new
+// time is latched by the EMAC (the PTP clock lags by about this much unless it is compensated).
+// 1 = if no stored value exists for this configuration, the latency is measured at run time (10 min warm-up after
+//     the PPS lock, then 30 to 40 min of measurement), applied immediately and stored in NVS. At every later start
+//     the stored value is used and no calibration is done. Until a stored or calibrated value exists,
+//     PTP_WRITE_LATENCY_DEFAULT_NS is used.
+// 0 = always use PTP_WRITE_LATENCY_DEFAULT_NS
+#define PTP_LATENCY_AUTO 1
+// 1 = ignore the stored value and calibrate again at the next start (set back to 0 afterwards)
+#define PTP_LATENCY_FORCE_RECALIBRATION 0
+static constexpr int32_t PTP_WRITE_LATENCY_DEFAULT_NS = 3850; // measured on the development hardware
+// Value in use in nanoseconds (lock-free atomic so it can be changed at run time)
+static std::atomic<int32_t> s_ptp_write_latency_ns{PTP_WRITE_LATENCY_DEFAULT_NS};
+#if PTP_LATENCY_AUTO
+static constexpr int ptp_cal_block_samples = 600;  // one sample per PPS second: 10 minutes per block
+static std::atomic<bool> s_ptp_cal_collect{false}; // the PPS task may append samples
+static std::atomic<int> s_ptp_cal_count{0};        // samples in the current block
+static int32_t *s_ptp_cal_buf = nullptr;           // block buffer, allocated while a calibration is needed
+static bool s_ptp_cal_required = true;             // cleared when a stored value for this configuration was loaded
+
+// Called by the PPS task with the measured write latency (ns) of the first write of each second.
+// Samples are only collected after the warm-up and while the calibration task has room in the block.
+static inline void ptp_latency_calibration_add_sample(int64_t latency_ns)
+{
+    if (!s_ptp_cal_collect.load(std::memory_order_acquire) || s_ptp_cal_buf == nullptr)
+        return;
+    if (latency_ns < 0 || latency_ns > 100000) // implausible reading
+        return;
+    const int n = s_ptp_cal_count.load(std::memory_order_relaxed);
+    if (n >= ptp_cal_block_samples) // block full: wait until the calibration task has processed it
+        return;
+    s_ptp_cal_buf[n] = static_cast<int32_t>(latency_ns);
+    s_ptp_cal_count.store(n + 1, std::memory_order_release);
+}
+#endif
+static std::atomic<bool> s_clock_comp_valid{false};    // system clock drift compensation is valid
+static std::atomic<int64_t> s_clock_anchor_us{0};      // esp_timer time at which the system clock was exact
+static std::atomic<bool> s_ptp_comp_valid{false};      // PTP clock drift compensation is valid
+static std::atomic<int32_t> s_clock_ppb{0};            // oscillator error in ppb, >0 = clock runs fast
+
+// ---- PTP clock compensation (seqlock, the PPS task is the only writer) ----
+// A raw EMAC time stamp ts (ns) is converted to true time like the model clock:
+//   el = ts - offset - anchor;  true = anchor + el - el * ppb / 1e9
+// anchor = second of the last PPS edge in ns, offset = measured difference between the PTP clock and the model clock
+// right after the PTP clock was written (mean of several bracketed read-backs, see set_hardware_clock_from_pps).
+// The offset removes the error of the individual write (write latency jitter, esp_timer quantization).
+// 1 = measure the offset after every write (recommended), 0 = assume the write was exact (offset 0)
+#define PTP_OFFSET_MEASUREMENT 1
+static std::atomic<uint32_t> s_ptp_comp_seq{0};
+static std::atomic<int64_t> s_ptp_anchor_ns{0}; // second of the last PPS edge in ns
+static std::atomic<int64_t> s_ptp_offset_ns{0}; // PTP clock minus model clock, measured after the last write
+#if DEBUG_ENABLED
+static std::atomic<int32_t> s_ptp_offset_dbg_ns{0}; // last measured offset (debug output only)
+static std::atomic<int32_t> s_ptp_offset_dbg_n{0};  // number of read-backs used for it
+#endif
+
+static void ptp_comp_publish(int64_t anchor_ns, int64_t offset_ns)
+{
+    const uint32_t s = s_ptp_comp_seq.load(std::memory_order_relaxed);
+    s_ptp_comp_seq.store(s + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    s_ptp_anchor_ns.store(anchor_ns, std::memory_order_relaxed);
+    s_ptp_offset_ns.store(offset_ns, std::memory_order_relaxed);
+    s_ptp_comp_seq.store(s + 2, std::memory_order_release);
+}
+
+static void ptp_comp_read(int64_t &anchor_ns, int64_t &offset_ns)
+{
+    uint32_t s1, s2;
+    do
+    {
+        s1 = s_ptp_comp_seq.load(std::memory_order_acquire);
+        anchor_ns = s_ptp_anchor_ns.load(std::memory_order_relaxed);
+        offset_ns = s_ptp_offset_ns.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        s2 = s_ptp_comp_seq.load(std::memory_order_relaxed);
+    } while (s1 != s2 || (s1 & 1u));
+}
+
+// ---- esp_timer based model clock: replaces gettimeofday() for NTP time stamps ----
+// true time = second of the last PPS edge + time since that edge (esp_timer), corrected by the measured ppb.
+static std::atomic<uint32_t> s_model_seq{0};
+static std::atomic<bool> s_model_valid{false};
+static std::atomic<int64_t> s_model_sec{0};     // Unix second of the last PPS edge
+static std::atomic<int64_t> s_model_edge_ns{0}; // esp_timer time of that edge in ns
+static std::atomic<int32_t> s_model_ppb{0};     // >0 = local clock runs fast
+
+// The PPS task is the only writer (seqlock, so readers never see mixed values)
+static void model_publish(int64_t unix_sec, int64_t edge_ns, int32_t ppb)
+{
+    const uint32_t s = s_model_seq.load(std::memory_order_relaxed);
+    s_model_seq.store(s + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    s_model_sec.store(unix_sec, std::memory_order_relaxed);
+    s_model_edge_ns.store(edge_ns, std::memory_order_relaxed);
+    s_model_ppb.store(ppb, std::memory_order_relaxed);
+    s_model_seq.store(s + 2, std::memory_order_release);
+    s_model_valid.store(true, std::memory_order_release);
+}
+
+static void model_invalidate()
+{
+    s_model_valid.store(false, std::memory_order_release);
+}
+
+// Model time (Unix ns) for an esp_timer time in ns. Returns false if the model is not usable.
+static bool model_ns_at(int64_t esp_ns, int64_t &unix_ns)
+{
+    if (!s_model_valid.load(std::memory_order_acquire))
+        return false;
+
+    int64_t sec, edge_ns;
+    int32_t ppb;
+    uint32_t s1, s2;
+    do
+    {
+        s1 = s_model_seq.load(std::memory_order_acquire);
+        sec = s_model_sec.load(std::memory_order_relaxed);
+        edge_ns = s_model_edge_ns.load(std::memory_order_relaxed);
+        ppb = s_model_ppb.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        s2 = s_model_seq.load(std::memory_order_relaxed);
+    } while (s1 != s2 || (s1 & 1u));
+
+    const int64_t el = esp_ns - edge_ns;
+    if (el < -1000000000LL || el > 3600000000000LL) // holdover for at most one hour
+        return false;
+
+    unix_ns = sec * 1000000000LL + el - (el * static_cast<int64_t>(ppb)) / 1000000000LL;
+    return true;
+}
 
 static_assert(PreferIPvX == 0 || PreferIPvX == 1 || PreferIPvX == 2 || PreferIPvX == 4 || PreferIPvX == 6 || PreferIPvX == 8 || PreferIPvX == 9,
               "PreferIPvX must be 0, 1, 2, 4, 6, 8, or 9");
@@ -588,6 +735,8 @@ enum class ipv6_address_priority_t : uint8_t
     global_unicast
 };
 static ipv6_address_priority_t s_ipv6_address_priority = ipv6_address_priority_t::none;
+// Assigned IPv4 address in network byte order (0 = none); read lock-free by the hardware NTP path
+static std::atomic<uint32_t> s_own_ipv4_address_be{0};
 
 struct network_address_snapshot_t
 {
@@ -656,6 +805,7 @@ static void clear_network_addresses()
     s_ipv4_address[0] = '\0';
     s_ipv6_address[0] = '\0';
     s_ipv6_address_priority = ipv6_address_priority_t::none;
+    s_own_ipv4_address_be.store(0, std::memory_order_relaxed);
     xSemaphoreGive(s_network_address_mutex);
 }
 
@@ -665,6 +815,7 @@ static void set_network_ipv4_address(const esp_ip4_addr_t &address)
         return;
 
     snprintf(s_ipv4_address, sizeof(s_ipv4_address), IPSTR, IP2STR(&address));
+    s_own_ipv4_address_be.store(address.addr, std::memory_order_relaxed);
     update_selected_ip_address_locked();
     xSemaphoreGive(s_network_address_mutex);
 }
@@ -675,6 +826,7 @@ static void clear_network_ipv4_address()
         return;
 
     s_ipv4_address[0] = '\0';
+    s_own_ipv4_address_be.store(0, std::memory_order_relaxed);
     update_selected_ip_address_locked();
     xSemaphoreGive(s_network_address_mutex);
 }
@@ -1018,11 +1170,9 @@ struct sync_state_t
 {
     int64_t last_successful_sync_us = 0;
     int64_t last_sync_attempt_us = 0;
-    int64_t last_pps_seen_us = 0;
     time_t last_sync_delta_seconds = 0;
     uint32_t consecutive_sync_failures = 0;
     uint32_t consecutive_sanity_failures = 0;
-    bool holdover_mode = false;
     bool pps_active = false;
     bool gnss_timing_valid = false;
     int64_t last_gnss_valid_us = 0;
@@ -1076,10 +1226,6 @@ static constexpr char gnss_ID_TYPE_MODULE_FP[] = "module_fp";
 static constexpr char gnss_ID_TYPE_GENERIC[] = "generic";
 static constexpr char gnss_ID_VALUE_UNDETERMINED[] = "undetermined_gnss_board";
 
-/* pre-release code - commented out
-static constexpr bool reduceGNSSUART1OutputToTimeMessages = true;
-static constexpr bool saveReducedGNSSUART1OutputPermanently = false;
-*/
 struct gnss_identity_t
 {
     bool valid = false;
@@ -1128,13 +1274,13 @@ static void refresh_sync_state_locked(sync_state_t *state, int64_t now_us)
     if (gnss_missing)
         ESP_LOGE(TAG, "GNSS invalid - GNSS missing.");
 #endif
-
-    state->holdover_mode = has_sync_fault(state->faults);
 }
 
 static void publish_ntp_sync_state_locked(const sync_state_t &state)
 {
-    s_ntp_sync_state_sequence.fetch_add(1, std::memory_order_release);
+    // seqlock writer (always called with s_sync_state_mutex held): odd sequence while the values change
+    s_ntp_sync_state_sequence.fetch_add(1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release); // the data stores must not move before the odd sequence
     s_ntp_last_successful_sync_us.store(state.last_successful_sync_us, std::memory_order_relaxed);
     s_ntp_last_gnss_valid_us.store(state.last_gnss_valid_us, std::memory_order_relaxed);
     s_ntp_pps_active.store(state.pps_active, std::memory_order_relaxed);
@@ -1161,7 +1307,6 @@ static void sync_state_note_pps_edge(int64_t edge_us)
 {
     if (xSemaphoreTake(s_sync_state_mutex, portMAX_DELAY) == pdTRUE)
     {
-        s_sync_state.last_pps_seen_us = edge_us;
         s_sync_state.pps_active = true;
         refresh_sync_state_locked(&s_sync_state, edge_us);
         publish_ntp_sync_state_locked(s_sync_state);
@@ -1341,10 +1486,15 @@ static sync_state_t get_sync_state_snapshot()
     return snapshot;
 }
 
+// Both candidates of the first synchronisation have to agree: their labels have to advance by exactly the number of
+// seconds between their PPS edges (a wrongly labelled edge is detected here)
 static bool first_sync_candidates_are_plausible(const sync_candidate_t &first_candidate, const sync_candidate_t &second_candidate)
 {
-    time_t delta = second_candidate.candidate_time - first_candidate.candidate_time;
-    return delta >= 1 && delta <= 3;
+    const time_t label_delta = second_candidate.candidate_time - first_candidate.candidate_time;
+    const int64_t edge_delta_us = second_candidate.pps_release_time_us - first_candidate.pps_release_time_us;
+    const int64_t edge_delta_s = (edge_delta_us + 500000LL) / 1000000LL;
+    return label_delta >= 1 && label_delta <= 3 && static_cast<int64_t>(label_delta) == edge_delta_s &&
+           llabs(edge_delta_us - edge_delta_s * 1000000LL) < 100000LL;
 }
 
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
@@ -1626,9 +1776,14 @@ static void format_local_date_time(time_t utc_time, char *date_string, size_t da
     struct tm local_tm{};
     localtime_r(&utc_time, &local_tm);
 
-    snprintf(date_string, date_size, "%04d-%02d-%02d", local_tm.tm_year + 1900, local_tm.tm_mon + 1, local_tm.tm_mday);
+    // The values are limited to their field widths so that the compiler can prove the output length
+    // (with -O2 GCC reports a possible truncation otherwise, and -Werror=all makes that an error)
+    const unsigned int year = static_cast<unsigned int>(local_tm.tm_year + 1900) % 10000u;
+    const unsigned int month = static_cast<unsigned int>(local_tm.tm_mon + 1) % 100u;
+    const unsigned int day = static_cast<unsigned int>(local_tm.tm_mday) % 100u;
+    snprintf(date_string, date_size, "%04u-%02u-%02u", year, month, day);
 
-    int hour_value = local_tm.tm_hour;
+    unsigned int hour_value = static_cast<unsigned int>(local_tm.tm_hour) % 24u;
     if (!display24HourFormat)
     {
         hour_value %= 12;
@@ -1641,8 +1796,10 @@ static void format_local_date_time(time_t utc_time, char *date_string, size_t da
     if (displayTimeZone)
         strftime(zone, sizeof(zone), "%Z", &local_tm);
 
-    const char *hour_format = displayHoursWithPaddedZero ? "%02d:%02d:%02d" : "%d:%02d:%02d";
-    int len = snprintf(time_string, time_size, hour_format, hour_value, local_tm.tm_min, local_tm.tm_sec);
+    const unsigned int minute = static_cast<unsigned int>(local_tm.tm_min) % 60u;
+    const unsigned int second = static_cast<unsigned int>(local_tm.tm_sec) % 61u; // 60 = leap second
+    const char *hour_format = displayHoursWithPaddedZero ? "%02u:%02u:%02u" : "%u:%02u:%02u";
+    int len = snprintf(time_string, time_size, hour_format, hour_value, minute, second);
 
     if (!display24HourFormat && len >= 0 && static_cast<size_t>(len) < time_size)
         len += snprintf(time_string + len, time_size - len, " %s", local_tm.tm_hour < 12 ? "AM" : "PM");
@@ -1977,19 +2134,37 @@ static time_t epoch_from_utc(int year, int month, int day, int hour, int minute,
     return static_cast<time_t>(seconds);
 }
 
-static uint64_t get_current_time_in_ntp64_format()
-
+static inline uint64_t ntp64_from_unix_ns(int64_t unix_ns)
 {
+    const uint64_t sec = NTP_EPOCH_OFFSET + static_cast<uint64_t>(unix_ns / 1000000000LL);
+    const uint64_t rem = static_cast<uint64_t>(unix_ns % 1000000000LL);
+    return (sec << 32) | ((rem << 32) / 1000000000ULL);
+}
 
+static uint64_t get_current_time_in_ntp64_format()
+{
+    int64_t unix_ns = 0;
+    if (model_ns_at(static_cast<int64_t>(esp_timer_get_time()) * 1000LL, unix_ns) && unix_ns > 0)
+        return ntp64_from_unix_ns(unix_ns);
+
+    // Fallback (model not valid yet): system clock with drift compensation
     struct timeval now{};
-
     gettimeofday(&now, nullptr);
 
-    uint64_t seconds = NTP_EPOCH_OFFSET + static_cast<uint64_t>(now.tv_sec);
+    const uint64_t seconds = NTP_EPOCH_OFFSET + static_cast<uint64_t>(now.tv_sec);
+    const uint64_t fraction = (static_cast<uint64_t>(now.tv_usec) << 32) / 1000000ULL;
+    uint64_t ts = (seconds << 32) | fraction;
 
-    uint64_t fraction = (static_cast<uint64_t>(now.tv_usec) << 32) / 1000000ULL;
-
-    return (seconds << 32) | fraction;
+    if (s_clock_comp_valid.load(std::memory_order_acquire))
+    {
+        const int64_t elapsed_us = esp_timer_get_time() - s_clock_anchor_us.load(std::memory_order_relaxed);
+        if (elapsed_us > 0 && elapsed_us < 3600000000LL)
+        {
+            const int64_t corr_ns = elapsed_us * static_cast<int64_t>(s_clock_ppb.load(std::memory_order_relaxed)) / 1000000LL;
+            ts = static_cast<uint64_t>(static_cast<int64_t>(ts) - (corr_ns * 4294967296LL) / 1000000000LL);
+        }
+    }
+    return ts;
 }
 
 static void write_ntp_timestamp(uint8_t *reply, size_t offset, uint64_t timestamp)
@@ -2032,7 +2207,8 @@ static ntp_reply_status_t get_ntp_reply_status()
             s_ntp_sanity_mismatch.load(std::memory_order_relaxed),
             s_ntp_sync_stale.load(std::memory_order_relaxed)};
 
-        if (sequence_before != s_ntp_sync_state_sequence.load(std::memory_order_acquire))
+        std::atomic_thread_fence(std::memory_order_acquire); // the data loads must not move after the second sequence load
+        if (sequence_before != s_ntp_sync_state_sequence.load(std::memory_order_relaxed))
             continue;
 
         int64_t now_us = esp_timer_get_time();
@@ -2154,9 +2330,9 @@ static void deinitialize_hardware_ntp_server()
     ntp_cache_deinit();
 }
 
-static uint16_t internet_checksum(const uint8_t *data, size_t length)
+// One's complement sum (not folded, not inverted) of a byte range, added to sum
+static uint32_t ones_complement_add(uint32_t sum, const uint8_t *data, size_t length)
 {
-    uint32_t sum = 0;
     while (length >= 2)
     {
         sum += static_cast<uint16_t>((data[0] << 8) | data[1]);
@@ -2165,22 +2341,193 @@ static uint16_t internet_checksum(const uint8_t *data, size_t length)
     }
     if (length != 0)
         sum += static_cast<uint16_t>(data[0] << 8);
+    return sum;
+}
+
+static uint16_t ones_complement_fold(uint32_t sum)
+{
     while ((sum >> 16) != 0)
         sum = (sum & 0xFFFFU) + (sum >> 16);
-    return static_cast<uint16_t>(~sum);
+    return static_cast<uint16_t>(sum);
+}
+
+static uint16_t internet_checksum(const uint8_t *data, size_t length)
+{
+    return static_cast<uint16_t>(~ones_complement_fold(ones_complement_add(0, data, length)));
+}
+
+// One's complement sum of the UDP pseudo header (source, destination, protocol, UDP length)
+static uint32_t udp_pseudo_header_sum(const uint8_t *source, const uint8_t *destination, size_t address_length, size_t udp_length)
+{
+    uint32_t sum = ones_complement_add(0, source, address_length);
+    sum = ones_complement_add(sum, destination, address_length);
+    sum += IPPROTO_UDP;
+    sum += static_cast<uint32_t>(udp_length & 0xFFFFU);
+    sum += static_cast<uint32_t>(udp_length >> 16);
+    return sum;
+}
+
+// true if the UDP checksum of a received datagram is correct (for IPv4 a checksum of 0 means "not used")
+static bool udp_checksum_is_valid(const uint8_t *source, const uint8_t *destination, size_t address_length,
+                                  const uint8_t *udp, size_t udp_length)
+{
+    if (address_length == 4 && udp[6] == 0 && udp[7] == 0)
+        return true;
+    const uint32_t sum = ones_complement_add(udp_pseudo_header_sum(source, destination, address_length, udp_length), udp, udp_length);
+    return ones_complement_fold(sum) == 0xFFFFU;
 }
 
 static uint64_t ntp64_from_hardware_timestamp(const eth_mac_time_t &timestamp)
 {
     const uint64_t seconds = NTP_EPOCH_OFFSET + timestamp.seconds;
     const uint64_t fraction = (static_cast<uint64_t>(timestamp.nanoseconds) << 32) / 1000000000ULL;
-    return (seconds << 32) | fraction;
+    uint64_t ts = (seconds << 32) | fraction;
+
+    // Map the PTP clock to true time exactly like the model clock (same oscillator as esp_timer):
+    // remove the measured offset of the last write and the drift since the last PPS edge
+    if (s_ptp_comp_valid.load(std::memory_order_acquire))
+    {
+        int64_t anchor_ns = 0;
+        int64_t offset_ns = 0;
+        ptp_comp_read(anchor_ns, offset_ns);
+        const int64_t ptp_ns = static_cast<int64_t>(timestamp.seconds) * 1000000000LL +
+                               static_cast<int64_t>(timestamp.nanoseconds);
+        const int64_t el = ptp_ns - offset_ns - anchor_ns; // time since the PPS edge in oscillator units
+        if (el > -1000000000LL && el < 3600000000000LL)
+        {
+            const int64_t unix_ns = anchor_ns + el - (el * static_cast<int64_t>(s_clock_ppb.load(std::memory_order_relaxed))) / 1000000000LL;
+            if (unix_ns > 0)
+                return ntp64_from_unix_ns(unix_ns);
+        }
+    }
+    return ts;
 }
 
 static bool timestamp_is_valid(const eth_mac_time_t *timestamp)
 {
     return timestamp != nullptr && (timestamp->seconds != 0 || timestamp->nanoseconds != 0);
 }
+
+// Set to 0 to send NTP responses without requesting a hardware TX time stamp from the EMAC.
+#ifndef NTP_HW_TX_TIMESTAMPS
+#define NTP_HW_TX_TIMESTAMPS 1
+#endif
+
+static std::atomic<bool> s_hw_tx_timestamp_enabled{true};
+static std::atomic<uint32_t> s_hw_tx_timestamp_failures{0};
+
+// Transmits a complete Ethernet frame. If possible the EMAC returns the hardware TX time stamp, converted
+// to NTP format with the same drift compensation as T2. *tx_time_ntp64 stays 0 if no usable time stamp exists.
+static esp_err_t transmit_with_hw_timestamp(esp_eth_handle_t handle, uint8_t *frame, size_t length, uint64_t *tx_time_ntp64)
+{
+    if (tx_time_ntp64 != nullptr)
+        *tx_time_ntp64 = 0;
+
+#if NTP_HW_TX_TIMESTAMPS
+    if (!s_hw_tx_timestamp_enabled.load(std::memory_order_relaxed) ||
+        !s_ptp_clock_ready.load(std::memory_order_acquire))
+        return esp_eth_transmit(handle, frame, length);
+
+    // Reserve behind the time stamp: protects the stack if ctrl is larger than expected
+    struct
+    {
+        eth_mac_time_t ts;
+        uint8_t guard[56];
+    } ctrl{};
+
+    esp_err_t result = esp_eth_transmit_ctrl_vargs(handle, &ctrl, 2, frame, static_cast<uint32_t>(length));
+
+    if (result == ESP_OK)
+    {
+        s_hw_tx_timestamp_failures.store(0, std::memory_order_relaxed);
+        if (tx_time_ntp64 != nullptr && timestamp_is_valid(&ctrl.ts))
+        {
+            struct timespec now_ptp{};
+            if (clock_gettime(CLOCK_PTP_SYSTEM, &now_ptp) == 0)
+            {
+                const int64_t now_ns = static_cast<int64_t>(now_ptp.tv_sec) * 1000000000LL + now_ptp.tv_nsec;
+                const int64_t tx_ns = static_cast<int64_t>(ctrl.ts.seconds) * 1000000000LL + ctrl.ts.nanoseconds;
+                const int64_t age_ns = now_ns - tx_ns;
+                if (age_ns > -2000000LL && age_ns < 100000000LL) // plausible: at most 100 ms old
+                    *tx_time_ntp64 = ntp64_from_hardware_timestamp(ctrl.ts);
+            }
+        }
+        return result;
+    }
+
+    if (result == ESP_ERR_NO_MEM)
+        return result; // the caller retries
+
+    // Error while sending with a time stamp: try once without, and after 5 errors in a row
+    // switch the hardware TX time stamps off
+    if (s_hw_tx_timestamp_failures.fetch_add(1, std::memory_order_relaxed) + 1 >= 5 &&
+        s_hw_tx_timestamp_enabled.exchange(false, std::memory_order_relaxed))
+        ESP_LOGW(TAG, "Hardware TX time stamping disabled after repeated errors (last: %d)", static_cast<int>(result));
+
+    return esp_eth_transmit(handle, frame, length);
+#else
+    return esp_eth_transmit(handle, frame, length);
+#endif
+}
+
+// ---- Transmit time compensation for basic mode responses ----
+// In basic mode T3 has to be written into the packet before it is sent, so it is read from the model clock just
+// before the transmit call. The real transmit instant is later by the time needed for the rest of the packet
+// (checksum, MAC with authentication) and the EMAC DMA. The hardware TX time stamp of every response measures this
+// delay; its running mean is added to the T3 of later basic mode responses. Separate estimates are kept for
+// IPv4 / IPv6 and with / without authentication, because these paths take different times.
+// Interleaved responses are not affected (their T3 is the hardware TX time stamp itself).
+// 1 = compensate, 0 = T3 is the clock reading before the transmit call (previous behaviour)
+#define NTP_BASIC_T3_TX_COMPENSATION 1
+#if NTP_BASIC_T3_TX_COMPENSATION && NTP_HW_TX_TIMESTAMPS
+struct tx_delay_estimate_t
+{
+    std::atomic<int32_t> delay_ns{0}; // running mean of hardware TX time - software T3
+    std::atomic<uint32_t> samples{0};
+};
+static tx_delay_estimate_t s_tx_delay[2][2]; // [0 = IPv4, 1 = IPv6][0 = unauthenticated, 1 = authenticated]
+static constexpr uint32_t tx_delay_min_samples = 16;  // compensate only after this many samples
+static constexpr int32_t tx_delay_max_ns = 500000;    // plausible range of a sample
+static constexpr int32_t tx_delay_ewma_shift = 5;     // running mean with weight 1/32
+
+// Adds the estimated transmit delay to a software T3 (NTP 32.32 format)
+static uint64_t compensate_basic_t3(uint64_t t3, bool ipv6, bool authenticated)
+{
+    const tx_delay_estimate_t &estimate = s_tx_delay[ipv6 ? 1 : 0][authenticated ? 1 : 0];
+    if (estimate.samples.load(std::memory_order_relaxed) < tx_delay_min_samples)
+        return t3;
+    const int64_t delay_ns = estimate.delay_ns.load(std::memory_order_relaxed);
+    return t3 + static_cast<uint64_t>((delay_ns << 32) / 1000000000LL);
+}
+
+// Called by the hardware NTP task (only writer) with the uncompensated software T3 and the hardware TX time stamp
+static void update_tx_delay_estimate(bool ipv6, bool authenticated, uint64_t software_t3, uint64_t hardware_t3)
+{
+    if (software_t3 == 0 || hardware_t3 == 0)
+        return;
+    const int64_t difference = static_cast<int64_t>(hardware_t3 - software_t3); // 32.32 fixed point
+    if (difference < 0 || difference > 4294967LL)                                // 0 .. 1 ms (also avoids an overflow below)
+        return;
+    const int64_t sample_ns = (difference * 1000000000LL) >> 32;
+    if (sample_ns < 0 || sample_ns > tx_delay_max_ns)
+        return;
+
+    tx_delay_estimate_t &estimate = s_tx_delay[ipv6 ? 1 : 0][authenticated ? 1 : 0];
+    const uint32_t n = estimate.samples.load(std::memory_order_relaxed);
+    const int32_t current = estimate.delay_ns.load(std::memory_order_relaxed);
+    int32_t updated;
+    if (n < (1u << tx_delay_ewma_shift))
+        updated = static_cast<int32_t>((static_cast<int64_t>(current) * n + sample_ns) / (n + 1)); // plain mean at the start
+    else
+        updated = static_cast<int32_t>(current + ((sample_ns - current) >> tx_delay_ewma_shift));
+    estimate.delay_ns.store(updated, std::memory_order_relaxed);
+    if (n < UINT32_MAX)
+        estimate.samples.store(n + 1, std::memory_order_relaxed);
+}
+#else
+static inline uint64_t compensate_basic_t3(uint64_t t3, bool, bool) { return t3; }
+static inline void update_tx_delay_estimate(bool, bool, uint64_t, uint64_t) {}
+#endif
 
 static bool is_ipv4_ntp_request(const uint8_t *frame, uint32_t length, size_t *ip_offset, size_t *udp_offset)
 {
@@ -2195,11 +2542,25 @@ static bool is_ipv4_ntp_request(const uint8_t *frame, uint32_t length, size_t *i
     if (frame[ipv4_offset + 9] != IPPROTO_UDP)
         return false;
 
+    // Fragments (MF set or fragment offset != 0) are left to lwIP, which reassembles them
+    const uint16_t fragment_field = static_cast<uint16_t>((frame[ipv4_offset + 6] << 8) | frame[ipv4_offset + 7]);
+    if ((fragment_field & 0x3FFFU) != 0)
+        return false;
+
+    // The IP total length has to cover the UDP datagram and has to fit into the frame (Ethernet padding is ignored)
+    const size_t total_length = static_cast<size_t>((frame[ipv4_offset + 2] << 8) | frame[ipv4_offset + 3]);
+    if (total_length < header_length + UDP_HEADER_SIZE + NTP_PACKET_SIZE || ipv4_offset + total_length > length)
+        return false;
+
+    // Header checksum (a correct header sums up to 0xFFFF)
+    if (internet_checksum(frame + ipv4_offset, header_length) != 0)
+        return false;
+
     const size_t udp_header_offset = ipv4_offset + header_length;
     const uint16_t udp_length = static_cast<uint16_t>((frame[udp_header_offset + 4] << 8) | frame[udp_header_offset + 5]);
     const uint16_t destination_port = static_cast<uint16_t>((frame[udp_header_offset + 2] << 8) | frame[udp_header_offset + 3]);
     if (destination_port != NTP_PORT || udp_length < UDP_HEADER_SIZE + NTP_PACKET_SIZE ||
-        udp_length > UDP_HEADER_SIZE + NTP_MAX_PACKET_SIZE || udp_header_offset + udp_length > length)
+        udp_length > UDP_HEADER_SIZE + NTP_MAX_PACKET_SIZE || udp_length != total_length - header_length)
         return false;
 
     *ip_offset = ipv4_offset;
@@ -2256,6 +2617,64 @@ static bool is_ipv6_ntp_request(const uint8_t *frame, uint32_t length, size_t *i
     return true;
 }
 
+// Additional checks for the raw (hardware time stamped) NTP path. The reply is built by swapping the addresses of
+// the request, so only well-formed unicast requests to this device are answered there. Everything else is handed
+// to lwIP, which applies its own rules (broadcast requests, fragments, foreign addresses, ...).
+static bool hardware_ntp_frame_is_acceptable(const uint8_t *frame, bool ipv4, size_t ip_offset, size_t udp_offset)
+{
+    // Ethernet: destination must be our unicast address (no broadcast / multicast), the source must be unicast
+    // (the reply is sent to it)
+    if ((frame[0] & 0x01) != 0 || (frame[6] & 0x01) != 0)
+        return false;
+
+    // UDP: source port 0 cannot be answered
+    if (frame[udp_offset] == 0 && frame[udp_offset + 1] == 0)
+        return false;
+
+    const size_t udp_length = static_cast<size_t>((frame[udp_offset + 4] << 8) | frame[udp_offset + 5]);
+
+    if (ipv4)
+    {
+        const uint8_t *source = frame + ip_offset + 12;
+        const uint8_t *destination = frame + ip_offset + 16;
+
+        // Destination must be the assigned IPv4 address (the reply uses it as its source address)
+        uint32_t destination_be = 0;
+        memcpy(&destination_be, destination, sizeof(destination_be));
+        const uint32_t own_be = s_own_ipv4_address_be.load(std::memory_order_relaxed);
+        if (own_be == 0 || destination_be != own_be)
+            return false;
+
+        // Source must be a plausible unicast address: not 0.0.0.0/8, 127.0.0.0/8, multicast, reserved or broadcast,
+        // and not our own address (that cannot arrive from the wire)
+        if (source[0] == 0 || source[0] == 127 || source[0] >= 224)
+            return false;
+        uint32_t source_be = 0;
+        memcpy(&source_be, source, sizeof(source_be));
+        if (source_be == own_be)
+            return false;
+
+        return udp_checksum_is_valid(source, destination, 4, frame + udp_offset, udp_length);
+    }
+
+    const uint8_t *source = frame + ip_offset + 8;
+    const uint8_t *destination = frame + ip_offset + 24;
+    static constexpr uint8_t unspecified[16] = {};
+    static constexpr uint8_t loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+
+    // Destination must not be multicast (ff00::/8): the reply would use it as its source address
+    if (destination[0] == 0xFF)
+        return false;
+    // Source must be unicast: not multicast, unspecified or loopback
+    if (source[0] == 0xFF || memcmp(source, unspecified, 16) == 0 || memcmp(source, loopback, 16) == 0)
+        return false;
+
+    // The UDP checksum is mandatory for IPv6
+    if (frame[udp_offset + 6] == 0 && frame[udp_offset + 7] == 0)
+        return false;
+    return udp_checksum_is_valid(source, destination, 16, frame + udp_offset, udp_length);
+}
+
 static bool is_internal_ntp_ipv4_address(const struct in_addr &address)
 {
     if (address.s_addr == htonl(INADDR_LOOPBACK))
@@ -2289,15 +2708,11 @@ static bool is_internal_ntp_client(const struct sockaddr_storage &address)
     return false;
 }
 
+// UDP checksum for an outgoing IPv6 datagram (the checksum field in udp must be 0)
 static uint16_t ipv6_udp_checksum(const uint8_t *source, const uint8_t *destination, const uint8_t *udp, size_t udp_length)
 {
-    uint8_t checksum_data[IPV6_HEADER_SIZE + UDP_HEADER_SIZE + NTP_MAX_PACKET_SIZE] = {};
-    memcpy(checksum_data, source, 16);
-    memcpy(checksum_data + 16, destination, 16);
-    checksum_data[35] = static_cast<uint8_t>(udp_length);
-    checksum_data[39] = IPPROTO_UDP;
-    memcpy(checksum_data + IPV6_HEADER_SIZE, udp, udp_length);
-    const uint16_t checksum = internet_checksum(checksum_data, IPV6_HEADER_SIZE + udp_length);
+    const uint32_t sum = ones_complement_add(udp_pseudo_header_sum(source, destination, 16, udp_length), udp, udp_length);
+    const uint16_t checksum = static_cast<uint16_t>(~ones_complement_fold(sum));
     return checksum == 0 ? 0xFFFF : checksum;
 }
 
@@ -2439,6 +2854,9 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     udp[5] = UDP_HEADER_SIZE + NTP_PACKET_SIZE;
     memcpy(udp + UDP_HEADER_SIZE, reply, NTP_PACKET_SIZE);
 
+    uint64_t own_transmit_time = 0; // T3 as written into a basic mode response (compensated)
+    uint64_t raw_transmit_time = 0; // clock reading before the transmit call
+    uint64_t hardware_transmit_time = 0;
     esp_err_t result = ESP_ERR_INVALID_STATE;
     if (s_hardware_ntp_accepting.load(std::memory_order_acquire) &&
         s_hardware_ntp_transmit_mutex != nullptr)
@@ -2449,9 +2867,11 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
             {
                 for (uint32_t attempt = 0; attempt < HARDWARE_NTP_TRANSMIT_RETRY_COUNT; ++attempt)
                 {
+                    raw_transmit_time = get_current_time_in_ntp64_format();
+                    own_transmit_time = compensate_basic_t3(raw_transmit_time, false, authenticated_request);
                     if (!interleaved_reply)
                     {
-                        write_ntp_timestamp(reply, 40, get_current_time_in_ntp64_format());
+                        write_ntp_timestamp(reply, 40, own_transmit_time);
                     }
 
                     size_t reply_length = NTP_PACKET_SIZE;
@@ -2470,7 +2890,7 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
                     udp[5] = static_cast<uint8_t>(UDP_HEADER_SIZE + reply_length);
                     memcpy(udp + UDP_HEADER_SIZE, reply, reply_length);
 
-                    result = esp_eth_transmit(handle, response_frame, ETH_HEADER_SIZE + IPV4_HEADER_SIZE + UDP_HEADER_SIZE + reply_length);
+                    result = transmit_with_hw_timestamp(handle, response_frame, ETH_HEADER_SIZE + IPV4_HEADER_SIZE + UDP_HEADER_SIZE + reply_length, &hardware_transmit_time);
                     if (result != ESP_ERR_NO_MEM)
                         break;
                     esp_rom_delay_us(HARDWARE_NTP_TRANSMIT_RETRY_DELAY_US);
@@ -2481,7 +2901,9 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     }
     if (result == ESP_OK)
     {
-        ntp_cache_update(client_ip, client_port, receive_time, read_ntp_timestamp(reply, 40));
+        ntp_cache_update(client_ip, client_port, receive_time,
+                         hardware_transmit_time != 0 ? hardware_transmit_time : own_transmit_time);
+        update_tx_delay_estimate(false, authenticated_request, raw_transmit_time, hardware_transmit_time);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
         s_last_ntp_response_us.store(response_us, std::memory_order_relaxed);
@@ -2624,6 +3046,9 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
     udp[6] = static_cast<uint8_t>(checksum >> 8);
     udp[7] = static_cast<uint8_t>(checksum);
 
+    uint64_t own_transmit_time = 0; // T3 as written into a basic mode response (compensated)
+    uint64_t raw_transmit_time = 0; // clock reading before the transmit call
+    uint64_t hardware_transmit_time = 0;
     esp_err_t result = ESP_ERR_INVALID_STATE;
     if (s_hardware_ntp_accepting.load(std::memory_order_acquire) && s_hardware_ntp_transmit_mutex != nullptr &&
         xSemaphoreTake(s_hardware_ntp_transmit_mutex, portMAX_DELAY) == pdTRUE)
@@ -2632,9 +3057,11 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
         {
             for (uint32_t attempt = 0; attempt < HARDWARE_NTP_TRANSMIT_RETRY_COUNT; ++attempt)
             {
+                raw_transmit_time = get_current_time_in_ntp64_format();
+                own_transmit_time = compensate_basic_t3(raw_transmit_time, true, authenticated_request);
                 if (!interleaved_reply)
                 {
-                    write_ntp_timestamp(reply, 40, get_current_time_in_ntp64_format());
+                    write_ntp_timestamp(reply, 40, own_transmit_time);
                 }
                 size_t reply_length = NTP_PACKET_SIZE;
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
@@ -2651,7 +3078,7 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
                 const uint16_t refreshed_checksum = ipv6_udp_checksum(ip + 8, ip + 24, udp, UDP_HEADER_SIZE + reply_length);
                 udp[6] = static_cast<uint8_t>(refreshed_checksum >> 8);
                 udp[7] = static_cast<uint8_t>(refreshed_checksum);
-                result = esp_eth_transmit(handle, response_frame, ETH_HEADER_SIZE + IPV6_HEADER_SIZE + UDP_HEADER_SIZE + reply_length);
+                result = transmit_with_hw_timestamp(handle, response_frame, ETH_HEADER_SIZE + IPV6_HEADER_SIZE + UDP_HEADER_SIZE + reply_length, &hardware_transmit_time);
                 if (result != ESP_ERR_NO_MEM)
                     break;
                 esp_rom_delay_us(HARDWARE_NTP_TRANSMIT_RETRY_DELAY_US);
@@ -2661,7 +3088,9 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
     }
     if (result == ESP_OK)
     {
-        ntp_cache_update_ipv6(&client_ip, client_port, receive_time, read_ntp_timestamp(reply, 40));
+        ntp_cache_update_ipv6(&client_ip, client_port, receive_time,
+                              hardware_transmit_time != 0 ? hardware_transmit_time : own_transmit_time);
+        update_tx_delay_estimate(true, authenticated_request, raw_transmit_time, hardware_transmit_time);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
         s_last_ntp_response_us.store(response_us, std::memory_order_relaxed);
@@ -2693,20 +3122,13 @@ static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uin
         return esp_netif_receive(static_cast<esp_netif_t *>(netif), frame, length, nullptr);
     }
 
-    bool internal_request = false;
-    if (frame[12] == 0x08 && frame[13] == 0x00)
-    {
-        struct in_addr source_address{};
-        memcpy(&source_address, frame + ip_offset + 12, sizeof(source_address));
-        internal_request = is_internal_ntp_ipv4_address(source_address);
-    }
-    else
-    {
-        struct in6_addr source_address{};
-        memcpy(&source_address, frame + ip_offset + 8, sizeof(source_address));
-        internal_request = is_internal_ntp_ipv6_address(source_address);
-    }
-    if (!s_ntp_external_responses_enabled.load(std::memory_order_acquire) && !internal_request)
+    // Broadcast / multicast, foreign destination addresses, invalid sources and bad checksums: leave it to lwIP
+    if (!hardware_ntp_frame_is_acceptable(frame, ipv4_request, ip_offset, udp_offset))
+        return esp_netif_receive(static_cast<esp_netif_t *>(netif), frame, length, nullptr);
+
+    // Requests of this device to itself (loopback, own address) never arrive through the EMAC, they take the lwIP
+    // loopback path to ntp_server_task. Therefore no address lookup is needed here (this runs for every NTP frame).
+    if (!s_ntp_external_responses_enabled.load(std::memory_order_acquire))
     {
         free(frame);
         return ESP_OK;
@@ -2861,6 +3283,7 @@ static ethernet_recovery_result_t restart_ethernet_transport()
     struct timeval system_time{};
     gettimeofday(&system_time, nullptr);
     const struct timespec ptp_time{system_time.tv_sec, static_cast<long>(system_time.tv_usec) * 1000L};
+    s_ptp_comp_valid.store(false, std::memory_order_release);
     if (clock_settime(CLOCK_PTP_SYSTEM, &ptp_time) != 0)
     {
         s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
@@ -3026,6 +3449,9 @@ static void synchronize_hardware_clock()
 {
     if (!s_ptp_clock_ready.load(std::memory_order_acquire))
         return;
+
+    // This path sets no clean anchor, so the PTP drift compensation is switched off until the next PPS
+    s_ptp_comp_valid.store(false, std::memory_order_release);
 
     struct timeval now{};
     gettimeofday(&now, nullptr);
@@ -3871,43 +4297,6 @@ static bool configure_gnss_outputs(bool *uart1_output_set_result)
     return uart1_output_set;
 }
 
-/* pre-release code - commented out
-
-static bool configure_gnss_time_only_uart1_output()
-{
-    if (!reduceGNSSUART1OutputToTimeMessages)
-        return true;
-
-    uint8_t layer = saveReducedGNSSUART1OutputPermanently ? VAL_LAYER_ALL : VAL_LAYER_RAM_BBR;
-    auto set_message_rate = [layer](uint32_t key, uint8_t rate, const char *message_name)
-    {
-        bool command_worked = s_gnss.setVal8(key, rate, layer);
-#if DEBUG_ENABLED
-        ESP_LOGI(TAG, "GNSS UART1 %s: %s", message_name, command_worked ? "ok" : "failed");
-#endif
-        return command_worked;
-    };
-
-    bool configured = true;
-    configured = set_message_rate(UBLOX_CFG_MSGOUT_NMEA_ID_RMC_UART1, 1, "RMC enabled") && configured;
-    configured = set_message_rate(UBLOX_CFG_MSGOUT_NMEA_ID_GGA_UART1, 0, "GGA disabled") && configured;
-    configured = set_message_rate(UBLOX_CFG_MSGOUT_NMEA_ID_GLL_UART1, 0, "GLL disabled") && configured;
-    configured = set_message_rate(UBLOX_CFG_MSGOUT_NMEA_ID_GSA_UART1, 0, "GSA disabled") && configured;
-    configured = set_message_rate(UBLOX_CFG_MSGOUT_NMEA_ID_GSV_UART1, 0, "GSV disabled") && configured;
-    configured = set_message_rate(UBLOX_CFG_MSGOUT_NMEA_ID_VTG_UART1, 0, "VTG disabled") && configured;
-
-#if DEBUG_ENABLED
-    ESP_LOGI(TAG,
-             "GNSS time-only UART1 message configuration: %s (%s)",
-             configured ? "ok" : "partially applied; continuing with available output",
-             saveReducedGNSSUART1OutputPermanently ? "saved to receiver flash" : "RAM/BBR only");
-#endif
-
-    return configured;
-}
-
-end of pre-release code */
-
 static void halt_with_display(const char *line1, const char *line2, const char *line3)
 {
     display_line(1, line1);
@@ -3919,12 +4308,62 @@ static void halt_with_display(const char *line1, const char *line2, const char *
         vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
+// ---- PPS interrupt latency: measured once per chip / configuration and stored in NVS ----
+// 1 = at the first start (and whenever the IDF version, CPU frequency, chip revision or
+//     PPS_ISR_LATENCY_CODE_VERSION change) the interrupt latency of the PPS capture path is measured with a
+//     software triggered capture event (about 110 s after the start), applied immediately and stored in NVS.
+//     At every other start the stored value is used. Until the measurement is done, and if it fails,
+//     PPS_ISR_LATENCY_DEFAULT_US is used.
+// 0 = always use PPS_ISR_LATENCY_DEFAULT_US
+#define PPS_ISR_LATENCY_AUTO 1
+// 1 = ignore the stored value and measure again at the next start (set back to 0 afterwards)
+#define PPS_ISR_LATENCY_FORCE_REMEASURE 0
+#if PPS_ISR_LATENCY_AUTO
+// Increase this number when the PPS interrupt path (pps_capture_callback) changes, to trigger a new measurement
+// (2: the stored value is the central value, mean of the lowest 75 % of the samples; version 1 stored an expected minimum)
+// (3: test triggers keep away from real PPS edges; the compiler optimization level is part of the fingerprint)
+static constexpr uint32_t PPS_ISR_LATENCY_CODE_VERSION = 3;
+static std::atomic<uint32_t> s_isr_latency_test_armed{0};
+static std::atomic<uint32_t> s_isr_latency_test_fired{0};
+static volatile int64_t s_isr_latency_test_cb_us = 0;
+static BaseType_t s_pps_isr_core = tskNO_AFFINITY; // core on which the PPS interrupt was allocated
+static bool s_pps_isr_latency_known = false;        // a stored value for this configuration was loaded
+static std::atomic<uint32_t> s_last_pps_isr_us32{0}; // low 32 bits of the esp_timer time of the last real PPS edge
+#endif
+
 static bool IRAM_ATTR pps_capture_callback(mcpwm_cap_channel_handle_t,
-                                           const mcpwm_capture_event_data_t *,
+                                           const mcpwm_capture_event_data_t *edata,
                                            void *)
 {
     PpsCaptureEvent event{};
-    event.approximate_edge_us = esp_timer_get_time();
+
+    if (edata != nullptr)
+    {
+        // Raw MCPWM capture ticks at PPS edge
+        event.cap_ticks = edata->cap_value;
+
+        // Absolute time (microseconds) for phase alignment and timeout
+        event.approximate_edge_us = esp_timer_get_time();
+    }
+    else
+    {
+        // Fallback: no capture data (should not normally happen)
+        event.cap_ticks = 0;
+        event.approximate_edge_us = esp_timer_get_time();
+    }
+
+#if PPS_ISR_LATENCY_AUTO
+    // Software-triggered test event (see measure_pps_isr_latency_task): record the time and do not
+    // pass it on as a PPS pulse
+    if (s_isr_latency_test_armed.load(std::memory_order_relaxed) != 0)
+    {
+        s_isr_latency_test_cb_us = event.approximate_edge_us;
+        s_isr_latency_test_armed.store(0, std::memory_order_relaxed);
+        s_isr_latency_test_fired.store(1, std::memory_order_release);
+        return false;
+    }
+    s_last_pps_isr_us32.store(static_cast<uint32_t>(event.approximate_edge_us), std::memory_order_relaxed);
+#endif
 
     BaseType_t higher_priority_task_woken = pdFALSE;
     if (s_pps_semaphore != nullptr)
@@ -3933,6 +4372,7 @@ static bool IRAM_ATTR pps_capture_callback(mcpwm_cap_channel_handle_t,
         xQueueOverwriteFromISR(s_pps_timestamp_queue, &event, &higher_priority_task_woken);
     if (s_pps_sync_timestamp_queue != nullptr)
         xQueueOverwriteFromISR(s_pps_sync_timestamp_queue, &event, &higher_priority_task_woken);
+
     return higher_priority_task_woken == pdTRUE;
 }
 
@@ -3943,6 +4383,17 @@ static void setup_pps_input()
     timer_config.clk_src = MCPWM_CAPTURE_CLK_SRC_DEFAULT;
     timer_config.resolution_hz = PPS_CAPTURE_RESOLUTION_HZ;
     ESP_ERROR_CHECK(mcpwm_new_capture_timer(&timer_config, &s_pps_capture_timer));
+
+    // Query the actual resolution: the driver may differ from the requested value
+    uint32_t actual_hz = 0;
+    ESP_ERROR_CHECK(mcpwm_capture_timer_get_resolution(s_pps_capture_timer, &actual_hz));
+    if (actual_hz == 0)
+        actual_hz = PPS_CAPTURE_RESOLUTION_HZ;
+    s_pps_capture_hz = actual_hz;
+#if DEBUG_ENABLED
+    ESP_LOGI(TAG, "PPS capture timer resolution: %lu Hz (requested %lu Hz)",
+             static_cast<unsigned long>(actual_hz), static_cast<unsigned long>(PPS_CAPTURE_RESOLUTION_HZ));
+#endif
 
     mcpwm_capture_channel_config_t channel_config{};
     channel_config.gpio_num = PPSPin;
@@ -3956,7 +4407,267 @@ static void setup_pps_input()
     ESP_ERROR_CHECK(mcpwm_capture_channel_enable(s_pps_capture_channel));
     ESP_ERROR_CHECK(mcpwm_capture_timer_enable(s_pps_capture_timer));
     ESP_ERROR_CHECK(mcpwm_capture_timer_start(s_pps_capture_timer));
+#if PPS_ISR_LATENCY_AUTO
+    s_pps_isr_core = static_cast<BaseType_t>(xPortGetCoreID());
+#endif
 }
+
+#if PPS_ISR_LATENCY_AUTO || PTP_LATENCY_AUTO
+// Compiler optimization level: it changes the code timing of the interrupt and PTP paths, so it is part of the
+// configuration fingerprints (a change triggers a new measurement)
+static constexpr uint32_t compiler_optimization_id()
+{
+#if defined(CONFIG_COMPILER_OPTIMIZATION_DEBUG)
+    return 1u;
+#elif defined(CONFIG_COMPILER_OPTIMIZATION_SIZE)
+    return 2u;
+#elif defined(CONFIG_COMPILER_OPTIMIZATION_PERF)
+    return 3u;
+#elif defined(CONFIG_COMPILER_OPTIMIZATION_NONE)
+    return 4u;
+#else
+    return 0u;
+#endif
+}
+
+// FNV-1a hash over 32 bit words (configuration fingerprints that are stored together with the latencies)
+static uint32_t fnv1a_words(const uint32_t *items, size_t count)
+{
+    uint32_t hash = 2166136261u;
+    for (size_t k = 0; k < count; ++k)
+        for (int i = 0; i < 4; ++i)
+        {
+            hash ^= (items[k] >> (8 * i)) & 0xFFu;
+            hash *= 16777619u;
+        }
+    return hash;
+}
+#endif
+
+#if PPS_ISR_LATENCY_AUTO
+static constexpr char isr_lat_NVS_NAMESPACE[] = "isr_latency";
+static constexpr char isr_lat_NVS_KEY_NS[] = "ns";
+static constexpr char isr_lat_NVS_KEY_FP[] = "fp";
+static constexpr int32_t isr_lat_MIN_NS = 500;    // plausible range of the measured latency
+static constexpr int32_t isr_lat_MAX_NS = 20000;
+
+// Hash (FNV-1a) of everything that can change the interrupt latency of this build and chip
+static uint32_t pps_isr_latency_fingerprint()
+{
+    esp_chip_info_t chip_info{};
+    esp_chip_info(&chip_info);
+
+    const uint32_t items[] = {
+        PPS_ISR_LATENCY_CODE_VERSION,
+        static_cast<uint32_t>(ESP_IDF_VERSION_MAJOR),
+        static_cast<uint32_t>(ESP_IDF_VERSION_MINOR),
+        static_cast<uint32_t>(ESP_IDF_VERSION_PATCH),
+#ifdef CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
+        static_cast<uint32_t>(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ),
+#else
+        0u,
+#endif
+#if defined(CONFIG_MCPWM_ISR_IRAM_SAFE) || defined(CONFIG_MCPWM_ISR_CACHE_SAFE)
+        1u,
+#else
+        0u,
+#endif
+        compiler_optimization_id(),
+        static_cast<uint32_t>(chip_info.model),
+        static_cast<uint32_t>(chip_info.revision),
+        static_cast<uint32_t>(chip_info.cores)};
+
+    return fnv1a_words(items, sizeof(items) / sizeof(items[0]));
+}
+
+// Loads the stored latency if it belongs to this configuration. Call after the NVS was initialised.
+static void load_pps_isr_latency_from_nvs()
+{
+    s_pps_isr_latency_known = false;
+
+#if !PPS_ISR_LATENCY_FORCE_REMEASURE
+    nvs_handle_t handle = 0;
+    if (nvs_open(isr_lat_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK)
+    {
+        int32_t ns = 0;
+        uint32_t fingerprint = 0;
+        const bool read_ok = nvs_get_i32(handle, isr_lat_NVS_KEY_NS, &ns) == ESP_OK &&
+                             nvs_get_u32(handle, isr_lat_NVS_KEY_FP, &fingerprint) == ESP_OK;
+        nvs_close(handle);
+
+        if (read_ok && fingerprint == pps_isr_latency_fingerprint() && ns >= isr_lat_MIN_NS && ns <= isr_lat_MAX_NS)
+        {
+            s_pps_isr_latency_ns.store(ns, std::memory_order_relaxed);
+            s_pps_isr_latency_known = true;
+            ESP_LOGI(TAG, "PPS ISR latency: using the stored value %.2f us", static_cast<double>(ns) / 1000.0);
+            return;
+        }
+    }
+#endif
+
+    ESP_LOGI(TAG, "PPS ISR latency: no stored value for this configuration, using %.2f us until it is measured",
+             static_cast<double>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)) / 1000.0);
+}
+
+static bool save_pps_isr_latency_to_nvs(int32_t ns)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(isr_lat_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "PPS ISR latency: nvs_open failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    err = nvs_set_i32(handle, isr_lat_NVS_KEY_NS, ns);
+    if (err == ESP_OK)
+        err = nvs_set_u32(handle, isr_lat_NVS_KEY_FP, pps_isr_latency_fingerprint());
+    if (err == ESP_OK)
+        err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "PPS ISR latency: writing to NVS failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}
+
+// One-time measurement of the interrupt latency of the PPS capture path, without external equipment.
+// The MCPWM capture channel is triggered by software. The time from the trigger until the callback reads
+// esp_timer is the same path a real PPS edge takes (capture latch -> interrupt -> driver ISR ->
+// pps_capture_callback). The result is applied immediately and stored in NVS (see PPS_ISR_LATENCY_AUTO).
+static void measure_pps_isr_latency_task(void *)
+{
+    static constexpr int trials = 160;      // number of trigger attempts
+    static constexpr int spacing_ms = 500;  // spacing between attempts
+    static constexpr int64_t maxGapUs = 5;  // reject attempts that were interrupted between the two clock reads
+    static constexpr int64_t waitUs = 2000; // give up waiting for the callback after 2 ms
+
+    double *lat = static_cast<double *>(malloc(sizeof(double) * trials * 2));
+    if (lat == nullptr)
+    {
+        ESP_LOGW(TAG, "PPS ISR latency measurement: out of memory, using %.2f us",
+                 static_cast<double>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)) / 1000.0);
+        vTaskDelete(nullptr);
+        return;
+    }
+    double *sorted = lat + trials;
+    int valid = 0;
+    int tried = 0;
+    bool trigger_failed = false;
+
+    vTaskDelay(pdMS_TO_TICKS(30000)); // let the system settle (NTP server running, normal load)
+    ESP_LOGI(TAG, "PPS ISR latency measurement started (about %d s); PPS interrupt on core %d, measuring on core %d",
+             trials * spacing_ms / 1000, static_cast<int>(s_pps_isr_core), static_cast<int>(xPortGetCoreID()));
+
+    for (int i = 0; i < trials; ++i)
+    {
+        vTaskDelay(pdMS_TO_TICKS(spacing_ms));
+
+        // Stay away from real PPS edges: an edge that arrives while a test is armed would be taken for the test
+        // event (wrong sample) and would be lost for the PPS task. Trigger only between 50 ms and 950 ms after the
+        // last edge (the PPS phase is checked with the low 32 bits of esp_timer, enough for this purpose).
+        for (int wait = 0; wait < 20; ++wait)
+        {
+            const uint32_t last_edge = s_last_pps_isr_us32.load(std::memory_order_relaxed);
+            const uint32_t phase_us = (static_cast<uint32_t>(esp_timer_get_time()) - last_edge) % 1000000u;
+            if (last_edge == 0 || (phase_us >= 50000u && phase_us <= 950000u))
+                break;
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+
+        s_isr_latency_test_fired.store(0, std::memory_order_relaxed);
+        s_isr_latency_test_armed.store(1, std::memory_order_release);
+
+        const int64_t t0 = esp_timer_get_time();
+        const esp_err_t err = mcpwm_capture_channel_trigger_soft_catch(s_pps_capture_channel);
+        const int64_t t1 = esp_timer_get_time();
+
+        if (err != ESP_OK)
+        {
+            s_isr_latency_test_armed.store(0, std::memory_order_relaxed);
+            ESP_LOGE(TAG, "PPS ISR latency measurement: soft trigger failed: %s", esp_err_to_name(err));
+            trigger_failed = true;
+            break;
+        }
+
+        while (s_isr_latency_test_fired.load(std::memory_order_acquire) == 0 &&
+               (esp_timer_get_time() - t0) < waitUs)
+        {
+        }
+
+        const bool fired = s_isr_latency_test_fired.load(std::memory_order_acquire) != 0;
+        s_isr_latency_test_armed.store(0, std::memory_order_relaxed); // disarm in any case
+        ++tried;
+        if (!fired)
+            continue;
+
+        // The trigger happened somewhere between the two clock reads: use the middle
+        const double latency = static_cast<double>(s_isr_latency_test_cb_us) -
+                               0.5 * (static_cast<double>(t0) + static_cast<double>(t1));
+        if ((t1 - t0) <= maxGapUs && latency >= 0.0 && latency <= 500.0)
+            lat[valid++] = latency;
+    }
+
+    if (!trigger_failed && valid >= 32)
+    {
+        for (int i = 0; i < valid; ++i)
+            sorted[i] = lat[i];
+        for (int i = 1; i < valid; ++i) // insertion sort
+        {
+            const double v = sorted[i];
+            int j = i - 1;
+            while (j >= 0 && sorted[j] > v)
+            {
+                sorted[j + 1] = sorted[j];
+                --j;
+            }
+            sorted[j + 1] = v;
+        }
+        double sum = 0.0;
+        for (int i = 0; i < valid; ++i)
+            sum += lat[i];
+        const double median = (valid % 2 == 1) ? sorted[valid / 2] : 0.5 * (sorted[valid / 2 - 1] + sorted[valid / 2]);
+
+        // The value to use is the central value of the interrupt latency in the same sense as in pps_discipline_task:
+        // the mean of the lowest 75 % of the samples (late outliers are dropped)
+        const int keep = std::max(1, (valid * 3) / 4);
+        double keep_sum = 0.0;
+        for (int i = 0; i < keep; ++i)
+            keep_sum += sorted[i];
+        const double recommended = keep_sum / keep;
+
+        ESP_LOGI(TAG, "PPS ISR latency: %d of %d valid | min=%.2f median=%.2f mean=%.2f p90=%.2f max=%.2f us",
+                 valid, tried, sorted[0], median, sum / valid, sorted[(valid * 9) / 10], sorted[valid - 1]);
+        ESP_LOGI(TAG, "PPS ISR latency: central value (mean of the lowest 75 %%) = %.2f us", recommended);
+
+        const int32_t ns = static_cast<int32_t>(llround(recommended * 1000.0));
+        if (ns >= isr_lat_MIN_NS && ns <= isr_lat_MAX_NS)
+        {
+            const int32_t previous = s_pps_isr_latency_ns.exchange(ns, std::memory_order_relaxed);
+            const bool saved = save_pps_isr_latency_to_nvs(ns);
+            s_pps_isr_latency_known = true;
+            ESP_LOGI(TAG, "PPS ISR latency: %.2f us applied (was %.2f us)%s",
+                     static_cast<double>(ns) / 1000.0, static_cast<double>(previous) / 1000.0,
+                     saved ? " and stored in NVS" : ", NVS is not available: the value is used until the next restart");
+        }
+        else
+        {
+            ESP_LOGW(TAG, "PPS ISR latency: %.2f us is outside %.1f..%.1f us, ignored; %.2f us stays in use",
+                     recommended, isr_lat_MIN_NS / 1000.0, isr_lat_MAX_NS / 1000.0,
+                     static_cast<double>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)) / 1000.0);
+        }
+    }
+    else if (!trigger_failed)
+    {
+        ESP_LOGW(TAG, "PPS ISR latency measurement: only %d of %d attempts valid, %.2f us stays in use (retry at the next start)",
+                 valid, tried, static_cast<double>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)) / 1000.0);
+    }
+
+    free(lat);
+    vTaskDelete(nullptr);
+}
+#endif
 
 static void clear_pps_events()
 {
@@ -3988,21 +4699,465 @@ static void finish_ntp_request_rate_second()
 #endif
 }
 
+#if PTP_LATENCY_AUTO
+static constexpr char ptp_lat_NVS_NAMESPACE[] = "ptp_latency";
+static constexpr char ptp_lat_NVS_KEY_NS[] = "ns";
+static constexpr char ptp_lat_NVS_KEY_FP[] = "fp";
+static constexpr int32_t ptp_lat_MIN_NS = 500; // plausible range of the latency
+static constexpr int32_t ptp_lat_MAX_NS = 20000;
+// Increase this number when the way the PTP clock is written changes, to trigger a new calibration
+static constexpr uint32_t PTP_LATENCY_CODE_VERSION = 1;
+
+// Hash of everything that can change the PTP write latency of this build and chip
+static uint32_t ptp_write_latency_fingerprint()
+{
+    esp_chip_info_t chip_info{};
+    esp_chip_info(&chip_info);
+
+    const uint32_t items[] = {
+        0x50545031u, // "PTP1": keeps this fingerprint apart from the one of the interrupt latency
+        PTP_LATENCY_CODE_VERSION,
+        compiler_optimization_id(),
+        static_cast<uint32_t>(ESP_IDF_VERSION_MAJOR),
+        static_cast<uint32_t>(ESP_IDF_VERSION_MINOR),
+        static_cast<uint32_t>(ESP_IDF_VERSION_PATCH),
+#ifdef CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
+        static_cast<uint32_t>(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ),
+#else
+        0u,
+#endif
+        static_cast<uint32_t>(chip_info.model),
+        static_cast<uint32_t>(chip_info.revision),
+        static_cast<uint32_t>(chip_info.cores)};
+
+    return fnv1a_words(items, sizeof(items) / sizeof(items[0]));
+}
+
+// Loads the stored latency if it belongs to this configuration. Call after the NVS was initialised.
+static void load_ptp_write_latency_from_nvs()
+{
+    s_ptp_cal_required = true;
+
+#if !PTP_LATENCY_FORCE_RECALIBRATION
+    nvs_handle_t handle = 0;
+    if (nvs_open(ptp_lat_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK)
+    {
+        int32_t ns = 0;
+        uint32_t fingerprint = 0;
+        const bool read_ok = nvs_get_i32(handle, ptp_lat_NVS_KEY_NS, &ns) == ESP_OK &&
+                             nvs_get_u32(handle, ptp_lat_NVS_KEY_FP, &fingerprint) == ESP_OK;
+        nvs_close(handle);
+
+        if (read_ok && fingerprint == ptp_write_latency_fingerprint() && ns >= ptp_lat_MIN_NS && ns <= ptp_lat_MAX_NS)
+        {
+            s_ptp_write_latency_ns.store(ns, std::memory_order_relaxed);
+            s_ptp_cal_required = false;
+            ESP_LOGI(TAG, "PTP write latency: %d ns read from NVS (calibration skipped)", static_cast<int>(ns));
+            return;
+        }
+    }
+    ESP_LOGI(TAG, "PTP write latency: no stored value for this configuration, using the default %d ns until the calibration has finished "
+                  "(it starts once the PPS is locked: 10 min warm-up, then 30 to 40 min of measurement)",
+             static_cast<int>(s_ptp_write_latency_ns.load(std::memory_order_relaxed)));
+#else
+    ESP_LOGI(TAG, "PTP write latency: recalibration forced, using %d ns until the calibration has finished",
+             static_cast<int>(s_ptp_write_latency_ns.load(std::memory_order_relaxed)));
+#endif
+}
+
+static bool save_ptp_write_latency_to_nvs(int32_t ns)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(ptp_lat_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "PTP write latency: nvs_open failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    err = nvs_set_i32(handle, ptp_lat_NVS_KEY_NS, ns);
+    if (err == ESP_OK)
+        err = nvs_set_u32(handle, ptp_lat_NVS_KEY_FP, ptp_write_latency_fingerprint());
+    if (err == ESP_OK)
+        err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "PTP write latency: writing to NVS failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}
+
+// Statistics of one block of samples: trimmed mean and standard deviation over the central 80 % of the samples.
+// The buffer is sorted in place.
+static void ptp_cal_block_stats(int32_t *v, int n, double &mean, double &stddev, int32_t &vmin, int32_t &vmax)
+{
+    std::sort(v, v + n);
+    vmin = v[0];
+    vmax = v[n - 1];
+
+    const int cut = n / 10;
+    double sum = 0.0;
+    int m = 0;
+    for (int i = cut; i < n - cut; ++i)
+    {
+        sum += v[i];
+        ++m;
+    }
+    mean = sum / m;
+
+    double var = 0.0;
+    for (int i = cut; i < n - cut; ++i)
+    {
+        const double d = v[i] - mean;
+        var += d * d;
+    }
+    stddev = std::sqrt(var / m);
+}
+
+// Measures the PTP write latency during normal operation. The PPS task delivers one sample per second (the read-back
+// of the first write, see set_hardware_clock_from_pps). After a warm-up of 10 minutes, samples are collected in blocks
+// of 10 minutes. Per block the trimmed mean is calculated. As soon as the means of the last three blocks agree within
+// max_spread_ns the result is accepted (after 30 minutes at the earliest). If this has not happened after four blocks
+// (40 minutes) the calibration is given up and tried again at the next start. Loss of the PPS lock restarts everything.
+// The result is applied immediately and stored in NVS.
+static void ptp_latency_calibration_task(void *)
+{
+    static constexpr int64_t warmup_us = 600LL * 1000000LL; // warm-up after the PPS lock
+    static constexpr int min_blocks = 3;                    // three blocks of 10 minutes
+    static constexpr int max_blocks = 4;                    // four blocks (40 minutes) at most
+    static constexpr double max_spread_ns = 250.0;          // block means have to agree within this range
+
+    double block_mean[max_blocks] = {};
+    int blocks = 0;
+    bool warming_up = true;
+    bool warmup_running = false;
+    int64_t warmup_start_us = 0;
+#if DEBUG_ENABLED
+    int64_t last_progress_us = 0;
+#endif
+    bool failed = false;
+    double result_ns = 0.0;
+
+    for (;;)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        const int64_t now_us = esp_timer_get_time();
+
+        const bool locked = s_pps_discipline_active.load() && s_time_has_been_set.load() &&
+                            s_model_valid.load(std::memory_order_acquire);
+        if (!locked)
+        {
+#if DEBUG_ENABLED
+            if (warmup_running)
+                ESP_LOGI(TAG, "PTP write latency calibration: PPS lock lost, starting again");
+#endif
+            s_ptp_cal_collect.store(false, std::memory_order_release);
+            s_ptp_cal_count.store(0, std::memory_order_relaxed);
+            blocks = 0;
+            warming_up = true;
+            warmup_running = false;
+            continue;
+        }
+
+        if (warming_up)
+        {
+            if (!warmup_running)
+            {
+                warmup_running = true;
+                warmup_start_us = now_us;
+                ESP_LOGI(TAG, "PTP write latency calibration: PPS locked, warm-up started (%d min)",
+                         static_cast<int>(warmup_us / 60000000LL));
+                continue;
+            }
+            if (now_us - warmup_start_us < warmup_us)
+                continue;
+
+            warming_up = false;
+            s_ptp_cal_count.store(0, std::memory_order_relaxed);
+            s_ptp_cal_collect.store(true, std::memory_order_release);
+#if DEBUG_ENABLED
+            last_progress_us = now_us;
+#endif
+            ESP_LOGI(TAG, "PTP write latency calibration: warm-up done, measuring (about 30 to 40 min)");
+            continue;
+        }
+
+        const int n = s_ptp_cal_count.load(std::memory_order_acquire);
+        if (n < ptp_cal_block_samples)
+        {
+#if DEBUG_ENABLED
+            if (now_us - last_progress_us >= 120LL * 1000000LL)
+            {
+                last_progress_us = now_us;
+                ESP_LOGI(TAG, "PTP write latency calibration: block %d of at least %d, %d of %d samples",
+                         blocks + 1, min_blocks, n, ptp_cal_block_samples);
+            }
+#endif
+            continue;
+        }
+
+        // The block is full (the PPS task does not append any more until the count is reset)
+        double mean = 0.0;
+        double stddev = 0.0;
+        int32_t vmin = 0;
+        int32_t vmax = 0;
+        ptp_cal_block_stats(s_ptp_cal_buf, n, mean, stddev, vmin, vmax);
+        block_mean[blocks++] = mean;
+        s_ptp_cal_count.store(0, std::memory_order_release);
+#if DEBUG_ENABLED
+        ESP_LOGI(TAG, "PTP write latency calibration: block %d finished: %d samples, trimmed mean %.0f ns, std %.0f ns, min %d ns, max %d ns",
+                 blocks, n, mean, stddev, static_cast<int>(vmin), static_cast<int>(vmax));
+#endif
+
+        if (blocks >= min_blocks)
+        {
+            double lo = block_mean[blocks - min_blocks];
+            double hi = lo;
+            double sum = 0.0;
+            for (int i = blocks - min_blocks; i < blocks; ++i)
+            {
+                lo = std::min(lo, block_mean[i]);
+                hi = std::max(hi, block_mean[i]);
+                sum += block_mean[i];
+            }
+#if DEBUG_ENABLED
+            ESP_LOGI(TAG, "PTP write latency calibration: spread of the last %d blocks %.0f ns (limit %.0f ns)",
+                     min_blocks, hi - lo, max_spread_ns);
+#endif
+            if (hi - lo <= max_spread_ns)
+            {
+                result_ns = sum / min_blocks;
+                break;
+            }
+            if (blocks >= max_blocks)
+            {
+                failed = true;
+                break;
+            }
+        }
+    }
+
+    // Stop the PPS task from appending, wait until it surely is not inside the append any more, then free the buffer
+    s_ptp_cal_collect.store(false, std::memory_order_release);
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    free(s_ptp_cal_buf);
+    s_ptp_cal_buf = nullptr;
+
+    const int32_t ns = static_cast<int32_t>(llround(result_ns));
+    if (!failed && ns >= ptp_lat_MIN_NS && ns <= ptp_lat_MAX_NS)
+    {
+        const int32_t previous = s_ptp_write_latency_ns.exchange(ns, std::memory_order_relaxed);
+        const bool saved = save_ptp_write_latency_to_nvs(ns);
+        s_ptp_cal_required = false;
+        ESP_LOGI(TAG, "PTP write latency calibration finished: %d ns (default was %d ns)%s",
+                 static_cast<int>(ns), static_cast<int>(previous),
+                 saved ? ", stored in NVS" : ", NVS is not available: the value is used until the next restart");
+    }
+    else if (failed)
+    {
+        ESP_LOGW(TAG, "PTP write latency calibration failed: the readings were not stable, keeping %d ns; it will be tried again at the next start",
+                 static_cast<int>(s_ptp_write_latency_ns.load(std::memory_order_relaxed)));
+    }
+    else
+    {
+        ESP_LOGW(TAG, "PTP write latency calibration: result %d ns is outside %d..%d ns and ignored, keeping %d ns; it will be tried again at the next start",
+                 static_cast<int>(ns), static_cast<int>(ptp_lat_MIN_NS), static_cast<int>(ptp_lat_MAX_NS),
+                 static_cast<int>(s_ptp_write_latency_ns.load(std::memory_order_relaxed)));
+    }
+
+    vTaskDelete(nullptr);
+}
+#endif
+
+// Sets the EMAC PTP clock to true time: PPS second + time elapsed since the edge.
+// The value is read back and rewritten if the write was unusually late (e.g. the task was interrupted).
+// The read-back of the first write of every second also measures the write latency (see PTP_LATENCY_AUTO).
+static void set_hardware_clock_from_pps(int64_t pps_second, double edge_local_us)
+{
+    if (!s_ptp_clock_ready.load(std::memory_order_acquire))
+        return;
+
+    static constexpr int64_t acceptDevNs = 2000; // tolerated deviation from the expected write latency
+    static constexpr int maxAttempts = 3;
+
+    // Latency in use during this call (the calibration can change it between two calls)
+    const int64_t latency_ns = s_ptp_write_latency_ns.load(std::memory_order_relaxed);
+
+    s_ptp_comp_valid.store(false, std::memory_order_release);
+
+    int64_t total_ns = 0;
+    bool written = false;
+
+    for (int attempt = 0; attempt < maxAttempts; ++attempt)
+    {
+        const int64_t ref_us = esp_timer_get_time();
+        const double elapsed_us = static_cast<double>(ref_us) - edge_local_us;
+        total_ns = pps_second * 1000000000LL + llround(elapsed_us * 1000.0) + latency_ns;
+
+        struct timespec ts{};
+        ts.tv_sec = static_cast<time_t>(total_ns / 1000000000LL);
+        ts.tv_nsec = static_cast<long>(total_ns % 1000000000LL);
+        if (clock_settime(CLOCK_PTP_SYSTEM, &ts) != 0)
+            continue;
+        written = true;
+
+        // Read back, bracketed by two esp_timer readings: the middle of the two readings is the time of the PTP read.
+        // The PTP clock starts at total_ns when written and runs on from the write instant (ref + actual latency).
+        // Therefore rb - (total + (time of the read - ref)) = -actual latency, and the deviation from the expected
+        // latency is err + latency_ns.
+        struct timespec rb{};
+        const int64_t rb_a = esp_timer_get_time();
+        if (clock_gettime(CLOCK_PTP_SYSTEM, &rb) != 0)
+            break;
+        const int64_t rb_b = esp_timer_get_time();
+        const int64_t rb_ns = static_cast<int64_t>(rb.tv_sec) * 1000000000LL + rb.tv_nsec;
+        const int64_t expected_ns = total_ns + (rb_a + rb_b) * 500LL - ref_us * 1000LL; // (rb_a + rb_b) / 2 us in ns
+        const int64_t err_ns = rb_ns - expected_ns;
+        const int64_t dev_ns = err_ns + latency_ns;
+
+#if PTP_LATENCY_AUTO
+        // Only the first write of a second is used for the calibration: it is not selected by the retry check below,
+        // so the samples are not biased. Readings with a long bracket were interrupted and are dropped.
+        if (attempt == 0 && (rb_b - rb_a) <= 3)
+            ptp_latency_calibration_add_sample(-err_ns);
+#endif
+
+        if (dev_ns > -acceptDevNs && dev_ns < acceptDevNs)
+            break;
+
+#if DEBUG_ENABLED
+        ESP_LOGW(TAG, "PTP set retry %d: write deviation %lld ns", attempt + 1, static_cast<long long>(dev_ns));
+#endif
+    }
+
+    if (written)
+    {
+        // Offset of the PTP clock against the model clock after this write: mean of several read-backs, each one
+        // bracketed by two esp_timer readings (the middle of the bracket is taken as the instant of the read).
+        // The model time of that instant is pps_second + (middle - edge); both the PTP clock and esp_timer run on
+        // the same oscillator, so no drift term is needed over these few microseconds. Averaging removes most of
+        // the error of the individual write (latency jitter, 1 us quantization of the esp_timer reading ref_us).
+        int64_t offset_ns = 0;
+#if PTP_OFFSET_MEASUREMENT
+        static constexpr int offsetReads = 16;   // about 16 x 3 us
+        static constexpr int64_t maxBracketUs = 3; // longer brackets were interrupted
+        static constexpr int minValidReads = 4;
+        int64_t offset_sum = 0;
+        int valid_reads = 0;
+        const int64_t pps_second_ns = pps_second * 1000000000LL;
+        for (int i = 0; i < offsetReads; ++i)
+        {
+            struct timespec rb{};
+            const int64_t a = esp_timer_get_time();
+            if (clock_gettime(CLOCK_PTP_SYSTEM, &rb) != 0)
+                break;
+            const int64_t b = esp_timer_get_time();
+            if (b - a > maxBracketUs)
+                continue;
+            const int64_t rb_ns = static_cast<int64_t>(rb.tv_sec) * 1000000000LL + rb.tv_nsec;
+            const int64_t model_ns = pps_second_ns + llround((0.5 * static_cast<double>(a + b) - edge_local_us) * 1000.0);
+            offset_sum += rb_ns - model_ns;
+            ++valid_reads;
+        }
+        if (valid_reads >= minValidReads)
+        {
+            offset_ns = offset_sum / valid_reads;
+            // A deviation of more than 50 us cannot come from the write latency: do not trust the read-backs
+            if (offset_ns > 50000 || offset_ns < -50000)
+                offset_ns = 0;
+        }
+#if DEBUG_ENABLED
+        s_ptp_offset_dbg_ns.store(static_cast<int32_t>(offset_ns), std::memory_order_relaxed);
+        s_ptp_offset_dbg_n.store(valid_reads, std::memory_order_relaxed);
+#endif
+#endif
+        ptp_comp_publish(pps_second * 1000000000LL, offset_ns);
+        s_ptp_comp_valid.store(true, std::memory_order_release);
+    }
+}
+
 static void pps_discipline_task(void *parameter)
 {
-    static constexpr int64_t ppsTimeoutUs = 3500000;
-    static constexpr int64_t maxPhaseErrorUsToCorrect = 250000;
-    static constexpr int64_t minCorrectionMagnitudeUs = 2;
+    static constexpr int64_t ppsTimeoutUs = 3500000;          // 3.5 s: PPS missing timeout
+    static constexpr int64_t maxPhaseErrorUsToCorrect = 250000; // do not correct if the phase error is huge
+    static constexpr int64_t minAppliedCorrectionUs = 1;
+    static constexpr double settledPhaseUs = 200.0;           // below this the clock counts as settled
+    static constexpr int freqCap = 17;                        // frequency window: at most 16 s
+    static constexpr int freqMinSeconds = 4;                  // first estimate after 4 s
+    static constexpr int anchorWindow = 64;                   // edges used for the central value of the interrupt latency
+    static constexpr double maxPlausiblePpm = 200.0;
+    static constexpr double spikeLimitUs = 50.0;              // tolerated deviation of a PPS interval from the expected one
+    static constexpr int maxSpikes = 3;                       // after this many spikes in a row the edges are trusted again
 
-    int64_t last_pps_us = esp_timer_get_time();
+    struct TickSample
+    {
+        int64_t seq;
+        uint64_t ticks;
+    };
+    TickSample hist[freqCap]{};
+    int hist_count = 0;
+    static double anchor_d[anchorWindow]; // static: the PPS task has little stack
+    static double anchor_sorted[anchorWindow];
+    int anchor_count = 0;
+    int anchor_head = 0;
+
+    bool have_last = false;
+    uint32_t last_ticks = 0;
+    uint64_t unwrapped = 0;
+    int64_t seq = 0;
+    double carry_us = 0.0;
+    double est_ppm = 0.0;
+    (void)est_ppm; // only read by the debug log
+    bool est_valid = false; // a frequency estimate exists (it is kept as holdover value when the PPS is lost)
+    int spike_count = 0;    // PPS edges in a row that were ignored as spikes
+    int64_t last_pps_us = 0;
     bool logged_active = false;
+#if DEBUG_ENABLED
+    uint32_t log_counter = 0;
+#endif
 
     for (;;)
     {
         PpsCaptureEvent capture_event{};
         if (xQueueReceive(s_pps_timestamp_queue, &capture_event, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
-            int64_t edge_us = capture_event.approximate_edge_us;
+            const int64_t edge_us = capture_event.approximate_edge_us; // ISR time (noisy)
+            const uint32_t ticks = capture_event.cap_ticks;            // hardware ticks (exact)
+            const double hz = static_cast<double>(s_pps_capture_hz);
+
+            // ---- 0. Spike rejection ----
+            // Once the frequency is known, the interval to the previous edge is predictable to a few hundred ns.
+            // An edge that is far off (glitch, spurious pulse) is ignored completely: it does not touch the estimators,
+            // the system clock, the model or the sync state. After maxSpikes in a row the edges are trusted again
+            // (the PPS itself may have moved) and the estimators start over.
+            bool spike_accepted = false;
+            if (have_last && est_valid)
+            {
+                const uint32_t gap_ticks = ticks - last_ticks;
+                const int64_t gap_s = llround(static_cast<double>(gap_ticks) / hz);
+                bool spike = (gap_s == 0); // two edges within half a second
+                if (gap_s >= 1 && gap_s <= 3)
+                {
+                    const double expected_ticks = static_cast<double>(gap_s) * hz * (1.0 + est_ppm * 1e-6);
+                    spike = fabs(static_cast<double>(gap_ticks) - expected_ticks) / hz * 1e6 > spikeLimitUs;
+                }
+                if (spike)
+                {
+                    if (spike_count < maxSpikes)
+                    {
+                        ++spike_count;
+#if DEBUG_ENABLED
+                        ESP_LOGW(TAG, "PPS spike ignored (%d of %d): interval %.6f s", spike_count, maxSpikes,
+                                 static_cast<double>(gap_ticks) / hz);
+#endif
+                        continue;
+                    }
+                    spike_accepted = true;
+                }
+            }
+            spike_count = 0;
+
             last_pps_us = edge_us;
             s_pps_discipline_active.store(true);
 #if MQTT_ENABLED
@@ -4019,60 +5174,222 @@ static void pps_discipline_task(void *parameter)
                 logged_active = true;
             }
 
-            if (!s_time_has_been_set.load() || s_time_setting_in_progress.load())
-                continue;
-
-            if (xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
-                continue;
-
-            int64_t processing_now_us = esp_timer_get_time();
-            struct timeval now{};
-            gettimeofday(&now, nullptr);
-
-            int64_t current_time_us = static_cast<int64_t>(now.tv_sec) * 1000000LL + static_cast<int64_t>(now.tv_usec);
-            int64_t wake_delay_us = processing_now_us - edge_us;
-            if (wake_delay_us < 0)
-                wake_delay_us = 0;
-            int64_t edge_time_us = current_time_us - wake_delay_us;
-
-            int64_t phase_error_us = edge_time_us % 1000000LL;
-            if (phase_error_us > 500000)
-                phase_error_us -= 1000000;
-            else if (phase_error_us < -500000)
-                phase_error_us += 1000000;
-
-            int64_t correction_us = -phase_error_us;
-            if (llabs(correction_us) >= minCorrectionMagnitudeUs && llabs(phase_error_us) <= maxPhaseErrorUsToCorrect)
+            // ---- 1. Tick bookkeeping ----
+            bool restart = !have_last || spike_accepted;
+            if (have_last)
             {
-                struct timeval delta{};
-                delta.tv_sec = static_cast<time_t>(correction_us / 1000000LL);
-                delta.tv_usec = static_cast<suseconds_t>(correction_us % 1000000LL);
-                if (delta.tv_usec < 0)
+                const uint32_t interval = ticks - last_ticks; // modulo arithmetic handles the 32 bit wrap
+                const double secs = static_cast<double>(interval) / hz;
+                const int64_t n = llround(secs);
+                if (n >= 1 && n <= 3 && fabs(secs - static_cast<double>(n)) < 0.2)
                 {
-                    delta.tv_usec += 1000000;
-                    delta.tv_sec -= 1;
+                    unwrapped += interval;
+                    seq += n;
                 }
-
-                if (adjtime(&delta, nullptr) == 0)
+                else
                 {
-                    synchronize_hardware_clock();
-                    s_ntp_reference_time_64 = get_current_time_in_ntp64_format();
-                    s_ntp_reference_valid = true;
+#if DEBUG_ENABLED
+                    ESP_LOGW(TAG, "PPS interval out of bounds (%.6f s); restarting estimators", secs);
+#endif
+                    restart = true;
+                }
+            }
+            if (restart)
+            {
+                unwrapped = 0;
+                seq = 0;
+                hist_count = 0;
+                anchor_count = 0;
+                anchor_head = 0;
+            }
+            last_ticks = ticks;
+            have_last = true;
+
+            // ---- 2. Frequency estimate: sliding window of hardware ticks ----
+            if (hist_count == freqCap)
+            {
+                memmove(&hist[0], &hist[1], sizeof(TickSample) * (freqCap - 1));
+                hist_count--;
+            }
+            hist[hist_count++] = {seq, unwrapped};
+            if (hist_count >= 2)
+            {
+                const TickSample &o = hist[0];
+                const TickSample &nw = hist[hist_count - 1];
+                const int64_t dseq = nw.seq - o.seq;
+                if (dseq >= freqMinSeconds)
+                {
+                    const double ppm = (static_cast<double>(nw.ticks - o.ticks) /
+                                            (static_cast<double>(dseq) * hz) -
+                                        1.0) *
+                                       1e6;
+                    if (fabs(ppm) <= maxPlausiblePpm)
+                    {
+                        est_ppm = ppm; // >0 = oscillator / local clock runs TOO FAST
+                        est_valid = true;
+                        s_clock_ppb.store(static_cast<int32_t>(llround(ppm * 1000.0)), std::memory_order_relaxed);
+                    }
                 }
             }
 
+            // ---- 3. Anchor of the edge in esp_timer time ----
+            // d = ISR time - tick time = constant offset + interrupt latency (+ rounding of esp_timer to whole
+            // microseconds). The latency has outliers that are always late, so the central value is the mean of the
+            // lowest 75 % of the last 64 values. The measured interrupt latency (see measure_pps_isr_latency_task)
+            // is calculated with the same statistic, so the rounding of esp_timer and the shape of the jitter cancel
+            // out. A minimum would not do that: its bias depends on the noise (up to +-0.35 us).
+            const double d = static_cast<double>(edge_us) - static_cast<double>(unwrapped) * 1e6 / hz;
+            anchor_d[anchor_head] = d;
+            anchor_head = (anchor_head + 1) % anchorWindow;
+            if (anchor_count < anchorWindow)
+                anchor_count++;
+            for (int i = 0; i < anchor_count; ++i)
+                anchor_sorted[i] = anchor_d[i];
+            std::sort(anchor_sorted, anchor_sorted + anchor_count);
+            const int anchor_keep = std::max(1, (anchor_count * 3) / 4);
+            double anchor_sum = 0.0;
+            for (int i = 0; i < anchor_keep; ++i)
+                anchor_sum += anchor_sorted[i];
+            const double d_central = anchor_sum / anchor_keep;
+            const double excess_us = d - d_central; // jitter of this edge relative to the central value
+            const double edge_local_us = static_cast<double>(edge_us) - excess_us -
+                                         static_cast<double>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)) / 1000.0;
+
+            // ---- 4. Phase correction ----
+            if (!s_time_has_been_set.load() || s_time_setting_in_progress.load())
+                continue;
+            if (xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
+                continue;
+
+            // Several bracketed reads, keep the one with the smallest gap: the first read
+            // (cold cache) is discarded and the mid-point assumption gets more precise.
+            int64_t t1 = 0, t2 = 0;
+            struct timeval now{};
+            int64_t best_gap = INT64_MAX;
+            for (int i = 0; i < 4; ++i)
+            {
+                struct timeval tv{};
+                const int64_t a = esp_timer_get_time();
+                gettimeofday(&tv, nullptr);
+                const int64_t b = esp_timer_get_time();
+                if ((b - a) < best_gap)
+                {
+                    best_gap = b - a;
+                    t1 = a;
+                    t2 = b;
+                    now = tv;
+                }
+            }
+
+            const double sys_us = static_cast<double>(now.tv_sec) * 1e6 + static_cast<double>(now.tv_usec);
+            const double mid_local_us = 0.5 * (static_cast<double>(t1) + static_cast<double>(t2));
+            const double edge_sys_us = sys_us - (mid_local_us - edge_local_us); // system clock value at the edge
+
+            const int64_t edge_sec = static_cast<int64_t>(floor(edge_sys_us / 1e6 + 0.5));
+            const double phase_error_us = edge_sys_us - static_cast<double>(edge_sec) * 1e6;
+
+            // Residual error after drift compensation (the actual quality figure)
+            double resid_us = phase_error_us;
+            if (s_clock_comp_valid.load(std::memory_order_acquire))
+                resid_us -= static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed)) * 1e-9 *
+                            (edge_local_us - static_cast<double>(s_clock_anchor_us.load(std::memory_order_relaxed)));
+
+            bool ok = false;
+            if (fabs(phase_error_us) <= static_cast<double>(maxPhaseErrorUsToCorrect))
+            {
+                const double total_us = -phase_error_us + carry_us;
+                const int64_t apply_us = llround(total_us);
+                ok = true;
+                if (llabs(apply_us) >= minAppliedCorrectionUs)
+                {
+                    struct timeval delta{};
+                    delta.tv_sec = static_cast<time_t>(apply_us / 1000000LL);
+                    delta.tv_usec = static_cast<suseconds_t>(apply_us % 1000000LL);
+                    if (delta.tv_usec < 0)
+                    {
+                        delta.tv_usec += 1000000;
+                        delta.tv_sec -= 1;
+                    }
+                    ok = (adjtime(&delta, nullptr) == 0);
+                }
+                if (ok)
+                {
+                    carry_us = total_us - static_cast<double>(apply_us);
+                    if (fabs(carry_us) > 2.0)
+                        carry_us = 0.0;
+                }
+            }
+
+            if (ok)
+            {
+                // Model clock: second of the edge + exact esp_timer time of the edge (hardware ticks)
+                model_publish(edge_sec, llround(edge_local_us * 1000.0),
+                              s_clock_ppb.load(std::memory_order_relaxed));
+
+                // Set the system clock anchor only when the clock has settled
+                if (fabs(phase_error_us) <= settledPhaseUs)
+                {
+                    s_clock_anchor_us.store(llround(edge_local_us), std::memory_order_relaxed);
+                    s_clock_comp_valid.store(true, std::memory_order_release);
+                }
+                else
+                {
+                    s_clock_comp_valid.store(false, std::memory_order_release);
+                }
+
+                // Set the PTP clock from the PPS second (not from the system clock, whose slew is still pending)
+                set_hardware_clock_from_pps(edge_sec, edge_local_us);
+                s_ntp_reference_time_64 = get_current_time_in_ntp64_format();
+                s_ntp_reference_valid = true;
+            }
+            else
+            {
+                s_clock_comp_valid.store(false, std::memory_order_release);
+            }
+
             xSemaphoreGive(s_time_mutex);
+
+#if DEBUG_ENABLED
+            if ((log_counter++ % 16) == 0)
+            {
+                ESP_LOGI(TAG, "PPS: ppm=%.4f raw_phase=%.2f us resid=%.2f us jitter_excess=%.2f us d_central=%.2f gap=%lld us",
+                         est_ppm, phase_error_us, resid_us, excess_us, d_central, static_cast<long long>(best_gap));
+#if NTP_BASIC_T3_TX_COMPENSATION && NTP_HW_TX_TIMESTAMPS
+                ESP_LOGI(TAG, "PTP: offset after write %d ns (%d reads) | basic T3 TX delay v4 %d ns (%lu) v6 %d ns (%lu)",
+                         static_cast<int>(s_ptp_offset_dbg_ns.load(std::memory_order_relaxed)),
+                         static_cast<int>(s_ptp_offset_dbg_n.load(std::memory_order_relaxed)),
+                         static_cast<int>(s_tx_delay[0][0].delay_ns.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long>(s_tx_delay[0][0].samples.load(std::memory_order_relaxed)),
+                         static_cast<int>(s_tx_delay[1][0].delay_ns.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long>(s_tx_delay[1][0].samples.load(std::memory_order_relaxed)));
+#else
+                ESP_LOGI(TAG, "PTP: offset after write %d ns (%d reads)",
+                         static_cast<int>(s_ptp_offset_dbg_ns.load(std::memory_order_relaxed)),
+                         static_cast<int>(s_ptp_offset_dbg_n.load(std::memory_order_relaxed)));
+#endif
+            }
+#endif
+            (void)resid_us; // only read by the debug log
         }
         else
         {
-            int64_t now_us = esp_timer_get_time();
-            if ((now_us - last_pps_us) > ppsTimeoutUs)
+            const int64_t now_us = esp_timer_get_time();
+            if (last_pps_us != 0 && (now_us - last_pps_us) > ppsTimeoutUs)
             {
-                if (logged_active && DEBUG_ENABLED)
+#if DEBUG_ENABLED
+                if (logged_active)
                     ESP_LOGW(TAG, "PPS discipline inactive (PPS signal unavailable).");
+#endif
                 logged_active = false;
                 s_pps_discipline_active.store(false);
                 sync_state_note_pps_timeout(now_us);
+
+                // Restart the estimators but keep ppb as the holdover value;
+                // the compensation keeps running with the last anchor.
+                have_last = false;
+                hist_count = 0;
+                anchor_count = 0;
+                anchor_head = 0;
             }
         }
 
@@ -4142,9 +5459,9 @@ static bool wait_for_gnss_startup_qualification()
             char pps_edges_line[lcdColumns + 1];
             snprintf(pps_edges_line,
                      sizeof(pps_edges_line),
-                     "Edges %lu of %lu",
-                     static_cast<unsigned long>(stable_pps_edges),
-                     static_cast<unsigned long>(gnss_Startup_Qualification_PPS_Edges));
+                     "Edges %u of %u",
+                     static_cast<unsigned int>(std::min<uint32_t>(stable_pps_edges, 999u)),
+                     static_cast<unsigned int>(std::min<uint32_t>(gnss_Startup_Qualification_PPS_Edges, 999u)));
             display_line(1, "PPS Stabilizing");
             display_line(2, pps_edges_line);
             valid_started_us = esp_timer_get_time();
@@ -4169,9 +5486,9 @@ static bool wait_for_gnss_startup_qualification()
             char pps_edges_line[lcdColumns + 1];
             snprintf(pps_edges_line,
                      sizeof(pps_edges_line),
-                     "Edges %lu of %lu",
-                     static_cast<unsigned long>(stable_pps_edges),
-                     static_cast<unsigned long>(gnss_Startup_Qualification_PPS_Edges));
+                     "Edges %u of %u",
+                     static_cast<unsigned int>(std::min<uint32_t>(stable_pps_edges, 999u)),
+                     static_cast<unsigned int>(std::min<uint32_t>(gnss_Startup_Qualification_PPS_Edges, 999u)));
             display_line(1, "PPS Stabilizing");
             display_line(2, pps_edges_line);
         }
@@ -4185,8 +5502,8 @@ static bool wait_for_gnss_startup_qualification()
                 char dwell_line[lcdColumns + 1];
                 snprintf(dwell_line,
                          sizeof(dwell_line),
-                         "Dwelling for %lu secs",
-                         static_cast<unsigned long>(remaining_us / 1000000LL));
+                         "Dwelling for %u secs",
+                         static_cast<unsigned int>(std::min<int64_t>(remaining_us / 1000000LL, 99)));
                 display_line(1, "PPS Stabilizing");
                 display_line(2, dwell_line);
             }
@@ -4396,9 +5713,6 @@ static void setup_gnss()
     bool uart1_output_set = false;
     configure_gnss_outputs(&uart1_output_set);
 
-    /* pre-release code - commented out
-    configure_gnss_time_only_uart1_output();
-    end of pre-release code */
 #if DEBUG_ENABLED
     if (!uart1_output_set)
         ESP_LOGW(TAG, "GNSS UART1 output configuration failed. Continuing with the module's current output settings.");
@@ -4802,10 +6116,24 @@ static void mqtt_send_queued_messages()
     std::string payload;
     char buffer[512];
     size_t read = 0;
+    bool too_large = false;
     while ((read = fread(buffer, 1, sizeof(buffer), file)) > 0)
+    {
+        if (payload.size() + read > MQTT_MAX_REPORT_SIZE)
+        {
+            too_large = true; // corrupted or foreign file: do not let it eat up the heap
+            break;
+        }
         payload.append(buffer, read);
+    }
     bool read_failed = ferror(file) != 0;
     fclose(file);
+    if (too_large)
+    {
+        if (unlink(files.front().c_str()) == 0)
+            mqtt_tf_refresh_queue_count();
+        return;
+    }
     if (!read_failed && mqtt_publish_queued_report(payload.c_str()))
     {
 #if DEBUG_ENABLED
@@ -4835,6 +6163,23 @@ static uint32_t gnss_locked_seconds_this_period()
         return 0;
 
     return static_cast<uint32_t>(period_us / 1000000LL);
+}
+
+// Appends formatted text to a report buffer. Unlike "len += snprintf(...)" it never moves len past the end of the
+// buffer (snprintf returns the length it would have written, which made the next call write out of bounds).
+// When the buffer is full the text is truncated and all further calls do nothing.
+static size_t json_append(char *payload, size_t payload_size, size_t len, const char *format, ...)
+{
+    if (payload_size == 0 || len >= payload_size - 1)
+        return payload_size == 0 ? 0 : payload_size - 1;
+    va_list arguments;
+    va_start(arguments, format);
+    const int written = vsnprintf(payload + len, payload_size - len, format, arguments);
+    va_end(arguments);
+    if (written < 0)
+        return len;
+    const size_t end = len + static_cast<size_t>(written);
+    return end >= payload_size ? payload_size - 1 : end;
 }
 
 static void mqtt_build_report(char *payload, size_t payload_size)
@@ -4874,12 +6219,12 @@ static void mqtt_build_report(char *payload, size_t payload_size)
 
     size_t len = 0;
 
-    len += snprintf(payload + len, payload_size - len, "{");
+    len = json_append(payload, payload_size, len, "{");
 
-    len += snprintf(payload + len, payload_size - len, "\"current\":{");
-    len += snprintf(payload + len, payload_size - len, "\"time\":\"%s\",", publishing_date_and_time);
-    len += snprintf(payload + len, payload_size - len, "\"uptime\":%lu,", (unsigned long)(esp_timer_get_time() / 1000000LL));
-    len += snprintf(payload + len, payload_size - len, "\"ethernet_up\":%s,", s_ethernet_connected.load() ? "true" : "false");
+    len = json_append(payload, payload_size, len, "\"current\":{");
+    len = json_append(payload, payload_size, len, "\"time\":\"%s\",", publishing_date_and_time);
+    len = json_append(payload, payload_size, len, "\"uptime\":%lu,", (unsigned long)(esp_timer_get_time() / 1000000LL));
+    len = json_append(payload, payload_size, len, "\"ethernet_up\":%s,", s_ethernet_connected.load() ? "true" : "false");
 
     // to make this easy on the user - the following have been simplified for reporting so the user sees true when things are ok and false when they are not
     bool current_gnss_locked = s_gnss_locked.load();                 // Indicates whether GNSS currently has a satellite lock
@@ -4889,16 +6234,16 @@ static void mqtt_build_report(char *payload, size_t payload_size)
     bool current_sanity_matched = !s_ntp_sanity_mismatch.load();     // Marks detected mismatch between GNSS time and sanity checks (if the gnss time is outside the timeframe that it should be)
     bool current_gnss_ok = current_gnss_locked && current_gnss_timing_valid && current_gnss_valid && current_sync_fresh && current_sanity_matched;
 
-    len += snprintf(payload + len, payload_size - len, "\"gnss_synchronized\":%s,", current_gnss_ok ? "true" : "false");
+    len = json_append(payload, payload_size, len, "\"gnss_synchronized\":%s,", current_gnss_ok ? "true" : "false");
     if (!current_gnss_ok)
     {
-        len += snprintf(payload + len, payload_size - len, "\"gnss_synchronized_indicators\":{");
-        len += snprintf(payload + len, payload_size - len, "\"locked\":%s,", current_gnss_locked ? "true" : "false");
-        len += snprintf(payload + len, payload_size - len, "\"timing\":%s,", current_gnss_timing_valid ? "true" : "false");
-        len += snprintf(payload + len, payload_size - len, "\"gnss_valid\":%s,", current_gnss_valid ? "true" : "false");
-        len += snprintf(payload + len, payload_size - len, "\"sync_fresh\":%s,", current_sync_fresh ? "true" : "false");
-        len += snprintf(payload + len, payload_size - len, "\"sanity_check_passed\":%s", current_sanity_matched ? "true" : "false");
-        len += snprintf(payload + len, payload_size - len, "},");
+        len = json_append(payload, payload_size, len, "\"gnss_synchronized_indicators\":{");
+        len = json_append(payload, payload_size, len, "\"locked\":%s,", current_gnss_locked ? "true" : "false");
+        len = json_append(payload, payload_size, len, "\"timing\":%s,", current_gnss_timing_valid ? "true" : "false");
+        len = json_append(payload, payload_size, len, "\"gnss_valid\":%s,", current_gnss_valid ? "true" : "false");
+        len = json_append(payload, payload_size, len, "\"sync_fresh\":%s,", current_sync_fresh ? "true" : "false");
+        len = json_append(payload, payload_size, len, "\"sanity_check_passed\":%s", current_sanity_matched ? "true" : "false");
+        len = json_append(payload, payload_size, len, "},");
     }
 
     // to make this easy on the user - the following have been simplified for reporting so the user sees true when things are ok and false when they are not
@@ -4907,54 +6252,54 @@ static void mqtt_build_report(char *payload, size_t payload_size)
     bool current_pps_synchronized = !s_ntp_pps_missing.load();           // Is PPS missing in a way that constitutes a synchronization fault?
     bool current_pps_ok = current_pps_active && current_pps_discipline_active && current_pps_synchronized;
 
-    len += snprintf(payload + len, payload_size - len, "\"pps_disciplined\":%s,", current_pps_ok ? "true" : "false");
+    len = json_append(payload, payload_size, len, "\"pps_disciplined\":%s,", current_pps_ok ? "true" : "false");
     if (!current_pps_ok)
     {
-        len += snprintf(payload + len, payload_size - len, "\"pps_disciplined_indicators\":{");
-        len += snprintf(payload + len, payload_size - len, "\"pps_signals_present\":%s,", current_pps_active ? "true" : "false");
-        len += snprintf(payload + len, payload_size - len, "\"discipline_active\":%s,", current_pps_discipline_active ? "true" : "false");
-        len += snprintf(payload + len, payload_size - len, "\"pps_synchronized\":%s", current_pps_synchronized ? "true" : "false");
-        len += snprintf(payload + len, payload_size - len, "},");
+        len = json_append(payload, payload_size, len, "\"pps_disciplined_indicators\":{");
+        len = json_append(payload, payload_size, len, "\"pps_signals_present\":%s,", current_pps_active ? "true" : "false");
+        len = json_append(payload, payload_size, len, "\"discipline_active\":%s,", current_pps_discipline_active ? "true" : "false");
+        len = json_append(payload, payload_size, len, "\"pps_synchronized\":%s", current_pps_synchronized ? "true" : "false");
+        len = json_append(payload, payload_size, len, "},");
     }
 
-    len += snprintf(payload + len, payload_size - len, "\"satellites\":%u", (unsigned int)s_satellite_count.load());
+    len = json_append(payload, payload_size, len, "\"satellites\":%u", (unsigned int)s_satellite_count.load());
 
 #if MQTT_MEMORY_REPORTING_ENABLED
-    len += snprintf(payload + len, payload_size - len, ",");
-    len += snprintf(payload + len, payload_size - len, "\"memory\":{");
-    // len += snprintf(payload + len, payload_size - len, "\"malloc_cap_8bit\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT));
-    // len += snprintf(payload + len, payload_size - len, "\"malloc_cap_32bit\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_32BIT));
-    // len += snprintf(payload + len, payload_size - len, "\"malloc_cap_internal\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    len += snprintf(payload + len, payload_size - len, "\"malloc_cap_dma\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA));
-    // len += snprintf(payload + len, payload_size - len, "\"malloc_cap_spiram\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    // len += snprintf(payload + len, payload_size - len, "\"malloc_cap_default\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
-    len += snprintf(payload + len, payload_size - len, "\"free_heap\":%lu,", (unsigned long)esp_get_free_heap_size());
-    len += snprintf(payload + len, payload_size - len, "\"minimum_free_heap\":%lu,", (unsigned long)esp_get_minimum_free_heap_size());
-    len += snprintf(payload + len, payload_size - len, "\"largest_free_8bit_block\":%lu", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    len += snprintf(payload + len, payload_size - len, "}},");
+    len = json_append(payload, payload_size, len, ",");
+    len = json_append(payload, payload_size, len, "\"memory\":{");
+    // len = json_append(payload, payload_size, len, "\"malloc_cap_8bit\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+    // len = json_append(payload, payload_size, len, "\"malloc_cap_32bit\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_32BIT));
+    // len = json_append(payload, payload_size, len, "\"malloc_cap_internal\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    len = json_append(payload, payload_size, len, "\"malloc_cap_dma\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA));
+    // len = json_append(payload, payload_size, len, "\"malloc_cap_spiram\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    // len = json_append(payload, payload_size, len, "\"malloc_cap_default\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+    len = json_append(payload, payload_size, len, "\"free_heap\":%lu,", (unsigned long)esp_get_free_heap_size());
+    len = json_append(payload, payload_size, len, "\"minimum_free_heap\":%lu,", (unsigned long)esp_get_minimum_free_heap_size());
+    len = json_append(payload, payload_size, len, "\"largest_free_8bit_block\":%lu", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    len = json_append(payload, payload_size, len, "}},");
 
 #else
-    len += snprintf(payload + len, payload_size - len, "},");
+    len = json_append(payload, payload_size, len, "},");
 #endif
 
     if (MQTT_QOS > 0)
     {
-        len += snprintf(payload + len, payload_size - len, "\"queued_messages\":{");
-        len += snprintf(payload + len, payload_size - len, "\"held\":%lu,", (unsigned long)queued_messages);
-        len += snprintf(payload + len, payload_size - len, "\"discarded\":%lu", (unsigned long)queued_messages_discarded);
-        len += snprintf(payload + len, payload_size - len, "},");
+        len = json_append(payload, payload_size, len, "\"queued_messages\":{");
+        len = json_append(payload, payload_size, len, "\"held\":%lu,", (unsigned long)queued_messages);
+        len = json_append(payload, payload_size, len, "\"discarded\":%lu", (unsigned long)queued_messages_discarded);
+        len = json_append(payload, payload_size, len, "},");
     };
 
-    len += snprintf(payload + len, payload_size - len, "\"this_period\":{");
-    len += snprintf(payload + len, payload_size - len, "\"ethernet_up_secs\":%lld,", (long long)(link_up_us / 1000000LL));
-    len += snprintf(payload + len, payload_size - len, "\"pps_pulses\":%lu,", (unsigned long)s_pps_pulses.exchange(0));
-    len += snprintf(payload + len, payload_size - len, "\"gnss_locked_secs\":%lu,", (unsigned long)gnss_locked_seconds_this_period());
-    len += snprintf(payload + len, payload_size - len, "\"satellites\":{");
-    len += snprintf(payload + len, payload_size - len, "\"min\":%u,", (unsigned int)satellite_min);
-    len += snprintf(payload + len, payload_size - len, "\"max\":%u", (unsigned int)satellite_max);
-    len += snprintf(payload + len, payload_size - len, "},");
-    len += snprintf(payload + len, payload_size - len, "\"ntp\":{");
-    len += snprintf(payload + len, payload_size - len, "\"requests\":{");
+    len = json_append(payload, payload_size, len, "\"this_period\":{");
+    len = json_append(payload, payload_size, len, "\"ethernet_up_secs\":%lld,", (long long)(link_up_us / 1000000LL));
+    len = json_append(payload, payload_size, len, "\"pps_pulses\":%lu,", (unsigned long)s_pps_pulses.exchange(0));
+    len = json_append(payload, payload_size, len, "\"gnss_locked_secs\":%lu,", (unsigned long)gnss_locked_seconds_this_period());
+    len = json_append(payload, payload_size, len, "\"satellites\":{");
+    len = json_append(payload, payload_size, len, "\"min\":%u,", (unsigned int)satellite_min);
+    len = json_append(payload, payload_size, len, "\"max\":%u", (unsigned int)satellite_max);
+    len = json_append(payload, payload_size, len, "},");
+    len = json_append(payload, payload_size, len, "\"ntp\":{");
+    len = json_append(payload, payload_size, len, "\"requests\":{");
     const uint32_t authenticated_valid = s_ntp_authenticated_valid_requests.exchange(0);
     const uint32_t authenticated_invalid = s_ntp_authenticated_invalid_requests.exchange(0);
     const uint32_t unauthenticated_valid = s_ntp_unauthenticated_valid_requests.exchange(0);
@@ -4963,26 +6308,26 @@ static void mqtt_build_report(char *payload, size_t payload_size)
     s_ntp_invalid_requests.exchange(0);
 
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED && MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED
-    len += snprintf(payload + len, payload_size - len, "\"authenticated\":{\"valid\":%lu,\"invalid\":%lu},", (unsigned long)authenticated_valid, (unsigned long)authenticated_invalid);
-    len += snprintf(payload + len, payload_size - len, "\"unauthenticated\":{\"valid\":%lu,\"invalid\":%lu},", (unsigned long)unauthenticated_valid, (unsigned long)unauthenticated_invalid);
+    len = json_append(payload, payload_size, len, "\"authenticated\":{\"valid\":%lu,\"invalid\":%lu},", (unsigned long)authenticated_valid, (unsigned long)authenticated_invalid);
+    len = json_append(payload, payload_size, len, "\"unauthenticated\":{\"valid\":%lu,\"invalid\":%lu},", (unsigned long)unauthenticated_valid, (unsigned long)unauthenticated_invalid);
 #else
-    len += snprintf(payload + len, payload_size - len, "\"valid\":%lu,", (unsigned long)(authenticated_valid + unauthenticated_valid));
-    len += snprintf(payload + len, payload_size - len, "\"invalid\":%lu,", (unsigned long)(authenticated_invalid + unauthenticated_invalid));
+    len = json_append(payload, payload_size, len, "\"valid\":%lu,", (unsigned long)(authenticated_valid + unauthenticated_valid));
+    len = json_append(payload, payload_size, len, "\"invalid\":%lu,", (unsigned long)(authenticated_invalid + unauthenticated_invalid));
 #endif
 
-    len += snprintf(payload + len, payload_size - len, "\"load_shedding\":%s,", load_shedding_this_period ? "true" : "false");
-    len += snprintf(payload + len, payload_size - len, "\"telemetry_dropped\":%lu,", (unsigned long)s_ntp_telemetry_events_dropped.exchange(0));
-    len += snprintf(payload + len, payload_size - len, "\"max_per_second\":%lu", (unsigned long)most_requests_per_second);
-    len += snprintf(payload + len, payload_size - len, "},");
-    len += snprintf(payload + len, payload_size - len, "\"responses\":{");
-    len += snprintf(payload + len, payload_size - len, "\"synchronized_and_disciplined\":%lu,", (unsigned long)s_ntp_responses_synchronized_and_disciplined.exchange(0));
-    len += snprintf(payload + len, payload_size - len, "\"gnss_unsynchronized\":%lu,", (unsigned long)s_ntp_responses_gnss_unsynchronized.exchange(0));
-    len += snprintf(payload + len, payload_size - len, "\"pps_undisciplined\":%lu", (unsigned long)s_ntp_responses_pps_undisciplined.exchange(0));
-    len += snprintf(payload + len, payload_size - len, "}");
+    len = json_append(payload, payload_size, len, "\"load_shedding\":%s,", load_shedding_this_period ? "true" : "false");
+    len = json_append(payload, payload_size, len, "\"telemetry_dropped\":%lu,", (unsigned long)s_ntp_telemetry_events_dropped.exchange(0));
+    len = json_append(payload, payload_size, len, "\"max_per_second\":%lu", (unsigned long)most_requests_per_second);
+    len = json_append(payload, payload_size, len, "},");
+    len = json_append(payload, payload_size, len, "\"responses\":{");
+    len = json_append(payload, payload_size, len, "\"synchronized_and_disciplined\":%lu,", (unsigned long)s_ntp_responses_synchronized_and_disciplined.exchange(0));
+    len = json_append(payload, payload_size, len, "\"gnss_unsynchronized\":%lu,", (unsigned long)s_ntp_responses_gnss_unsynchronized.exchange(0));
+    len = json_append(payload, payload_size, len, "\"pps_undisciplined\":%lu", (unsigned long)s_ntp_responses_pps_undisciplined.exchange(0));
+    len = json_append(payload, payload_size, len, "}");
 
 #if MQTT_CLIENT_REPORTING_ENABLED
-    len += snprintf(payload + len, payload_size - len, "},");
-    len += snprintf(payload + len, payload_size - len, "\"clients\":[");
+    len = json_append(payload, payload_size, len, "},");
+    len = json_append(payload, payload_size, len, "\"clients\":[");
     bool first_client = true;
     if (xSemaphoreTake(s_mqtt_stats_mutex, portMAX_DELAY) == pdTRUE)
     {
@@ -5030,24 +6375,24 @@ static void mqtt_build_report(char *payload, size_t payload_size)
         s_mqtt_client_count = 0;
         xSemaphoreGive(s_mqtt_stats_mutex);
     }
-    len += snprintf(payload + len, payload_size - len, "],");
-    len += snprintf(payload + len, payload_size - len, "\"clients_overflown\":%s", s_mqtt_client_table_overflown.exchange(false) ? "true" : "false");
+    len = json_append(payload, payload_size, len, "],");
+    len = json_append(payload, payload_size, len, "\"clients_overflown\":%s", s_mqtt_client_table_overflown.exchange(false) ? "true" : "false");
 #else
-    len += snprintf(payload + len, payload_size - len, "}");
+    len = json_append(payload, payload_size, len, "}");
 #endif
 
 #if MQTT_HISTORICAL_REPORTING_ENABLED
-    len += snprintf(payload + len, payload_size - len, "},");
-    len += snprintf(payload + len, payload_size - len, "\"historical\":{");
-    len += snprintf(payload + len, payload_size - len, "\"gnss_receiver_last\":{");
-    len += snprintf(payload + len, payload_size - len, "\"synchronized_and_disciplined\":\"%s\",", last_synchronized_and_disciplined);
-    len += snprintf(payload + len, payload_size - len, "\"gnss_unsynchronized\":\"%s\",", last_gnss_unsynchronized);
-    len += snprintf(payload + len, payload_size - len, "\"pps_undisciplined\":\"%s\"", last_pps_undisciplined);
-    len += snprintf(payload + len, payload_size - len, "}");
+    len = json_append(payload, payload_size, len, "},");
+    len = json_append(payload, payload_size, len, "\"historical\":{");
+    len = json_append(payload, payload_size, len, "\"gnss_receiver_last\":{");
+    len = json_append(payload, payload_size, len, "\"synchronized_and_disciplined\":\"%s\",", last_synchronized_and_disciplined);
+    len = json_append(payload, payload_size, len, "\"gnss_unsynchronized\":\"%s\",", last_gnss_unsynchronized);
+    len = json_append(payload, payload_size, len, "\"pps_undisciplined\":\"%s\"", last_pps_undisciplined);
+    len = json_append(payload, payload_size, len, "}");
 #endif
 
-    len += snprintf(payload + len, payload_size - len, "}");
-    len += snprintf(payload + len, payload_size - len, "}");
+    len = json_append(payload, payload_size, len, "}");
+    len = json_append(payload, payload_size, len, "}");
 
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "Published:");
@@ -5852,7 +7197,17 @@ void write_opening_messages_to_the_console()
 void setup_NVS_storage(void)
 {
     if (!initialize_nvs_storage())
+    {
         ESP_LOGE(TAG, "NVS initialization failed. GNSS module settings persistence is unavailable.");
+        return;
+    }
+
+#if PPS_ISR_LATENCY_AUTO
+    load_pps_isr_latency_from_nvs();
+#endif
+#if PTP_LATENCY_AUTO
+    load_ptp_write_latency_from_nvs();
+#endif
 }
 
 void setup_mutexes_and_semaphores(void)
@@ -6225,28 +7580,11 @@ static void ote_service_task(void *parameter)
     ESP_LOGI(TAG, "OTE service task started on port %u", static_cast<unsigned int>(OTEPort));
 #endif
 
-    // uint32_t last_heartbeat_ms = 0;   // uncomment this line and the block below if you want to see a heart beat message in the console log every 10 seconds
 
     for (;;)
     {
         ArduinoOTA.handle();
 
-        // uncomment the following if you want to see a heart beat message in the console log every 10 seconds
-        /*
-        uint32_t now_ms = millis();
-        if (last_heartbeat_ms == 0 || (now_ms - last_heartbeat_ms) >= 10000UL)
-        {
-
-            #if DEBUG_ENABLED
-                ESP_LOGI(TAG,
-                         "OTE heartbeat: online=%s, ip=%s, in_progress=%s",
-                         Network.isOnline() ? "true" : "false",
-                         s_ip_address[0] == '\0' ? "<none>" : s_ip_address,
-                         s_ote_in_progress ? "true" : "false");
-
-            last_heartbeat_ms = now_ms;
-        }
-        */
 
         bool should_reboot = false;
         TickType_t loop_delay_ticks = pdMS_TO_TICKS(50);
@@ -6362,64 +7700,67 @@ void setup_for_ote_updates()
 #endif
 }
 
+// Reads the GNSS date and time together with the PPS edge it belongs to.
+// The candidate time is the UTC second of the PPS edge at pps_release_time_us. The label is taken only from data that
+// was received after this edge and well before the next one, so it cannot belong to another second:
+//  - NMEA: the serial receive buffer is emptied right after the edge, then the first valid RMC sentence is used
+//    (the sentences of a second follow its time pulse; old sentences in the buffer could describe an earlier second)
+//  - UBX: the navigation solution is polled 300 ms after the edge. A poll right at the edge can still return the
+//    solution of the previous second; 300 ms later the solution of the edge's second is surely available and the
+//    one of the next second is not.
+// Data that is complete later than labelDeadlineUs after the edge is rejected.
 static bool acquire_sync_candidate(sync_candidate_t *candidate)
 {
+    static constexpr int64_t labelDeadlineUs = 950000;
+    static constexpr uint32_t ubxPollDelayMs = 300;
+    static constexpr uint16_t ubxPollTimeoutMs = 600;
+
     if (candidate == nullptr)
         return false;
 
     *candidate = sync_candidate_t{};
     candidate->used_nmea_fallback = s_use_nmea_fallback;
-    candidate->pps_release_time_us = esp_timer_get_time();
-    int64_t attempt_start_us = candidate->pps_release_time_us;
+    const int64_t attempt_start_us = esp_timer_get_time();
+
+    clear_pps_events();
+    PpsCaptureEvent capture_event{};
+    if (!wait_for_pps_capture_event(&capture_event, pdMS_TO_TICKS(1500)))
+    {
+#if DEBUG_ENABLED
+        ESP_LOGE(TAG, "%s mode is running without PPS.", s_use_nmea_fallback ? "NMEA fallback" : "UBX");
+#endif
+        candidate->failures.pps_missing = true;
+        return false;
+    }
+    const int64_t edge_us = capture_event.approximate_edge_us;
 
     if (s_use_nmea_fallback)
     {
+        // Discard what was received before the edge
+        for (int discarded = 0; discarded < 4096 && s_gnss_serial.available() > 0; ++discarded)
+            (void)s_gnss_serial.read();
+
         nmea_rmc_time_t nmea_time{};
-        if (!wait_for_nmea_rmc_time(&nmea_time, 3000UL))
+        const int64_t remaining_us = labelDeadlineUs - (esp_timer_get_time() - edge_us);
+        if (remaining_us <= 20000 || !wait_for_nmea_rmc_time(&nmea_time, static_cast<uint32_t>(remaining_us / 1000)) ||
+            (esp_timer_get_time() - edge_us) > labelDeadlineUs)
         {
             candidate->failures.gnss_invalid = true;
 #if DEBUG_ENABLED
-            ESP_LOGE(TAG, "GNSS invalid checkpoint 1.");
+            ESP_LOGE(TAG, "GNSS invalid - no RMC sentence in time after the PPS edge.");
 #endif
             return false;
         }
 
         candidate->candidate_time = epoch_from_utc(nmea_time.year, nmea_time.month, nmea_time.day, nmea_time.hour, nmea_time.minute, nmea_time.second);
-
-        clear_pps_events();
-        PpsCaptureEvent capture_event{};
-        if (wait_for_pps_capture_event(&capture_event, pdMS_TO_TICKS(1500)))
-        {
-            candidate->use_pps_alignment = true;
-            candidate->pps_release_time_us = capture_event.approximate_edge_us;
-            candidate->candidate_time += 1;
-        }
-        else
-        {
-
-#if DEBUG_ENABLED
-            ESP_LOGE(TAG, "NMEA fallback is running without PPS.");
-#endif
-
-            candidate->failures.pps_missing = true;
-            return false;
-        }
     }
     else
     {
-        clear_pps_events();
-        PpsCaptureEvent capture_event{};
-        if (!wait_for_pps_capture_event(&capture_event, pdMS_TO_TICKS(1500)))
-        {
-#if DEBUG_ENABLED
-            ESP_LOGE(TAG, "UBX mode is running without PPS.");
-#endif
+        const int64_t wait_us = edge_us + static_cast<int64_t>(ubxPollDelayMs) * 1000LL - esp_timer_get_time();
+        if (wait_us > 1000)
+            vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(wait_us / 1000)));
 
-            candidate->failures.pps_missing = true;
-            return false;
-        }
-
-        if (!s_gnss.getPVT())
+        if (!s_gnss.getPVT(ubxPollTimeoutMs))
         {
             candidate->failures.gnss_invalid = true;
 #if DEBUG_ENABLED
@@ -6454,24 +7795,20 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
             return false;
         }
 
-        candidate->candidate_time = epoch_from_utc(year, month, day, hour, minute, second) + 1;
-
-        vTaskDelay(pdMS_TO_TICKS(200));
-
-        clear_pps_events();
-        if (!wait_for_pps_capture_event(&capture_event, pdMS_TO_TICKS(1500)))
+        if ((esp_timer_get_time() - edge_us) > labelDeadlineUs)
         {
+            candidate->failures.gnss_invalid = true;
 #if DEBUG_ENABLED
-            ESP_LOGE(TAG, "UBX mode lost PPS alignment pulse.");
+            ESP_LOGE(TAG, "GNSS invalid - navigation solution arrived too late after the PPS edge.");
 #endif
-
-            candidate->failures.pps_missing = true;
             return false;
         }
 
-        candidate->pps_release_time_us = capture_event.approximate_edge_us;
-        candidate->use_pps_alignment = true;
+        candidate->candidate_time = epoch_from_utc(year, month, day, hour, minute, second);
     }
+
+    candidate->pps_release_time_us = edge_us;
+    candidate->use_pps_alignment = true;
 
     if ((esp_timer_get_time() - attempt_start_us) > Max_Sync_Attempt_Us)
     {
@@ -6484,6 +7821,20 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
 
     candidate->used_nmea_fallback = s_use_nmea_fallback;
     return true;
+}
+
+// Whole-second offset of the system clock at the PPS edge of a candidate: system time at the edge minus the GNSS
+// second of the edge, rounded to whole seconds (0 = the clock shows the right second)
+static time_t system_clock_second_offset(const sync_candidate_t &candidate)
+{
+    struct timeval now{};
+    const int64_t before_us = esp_timer_get_time();
+    gettimeofday(&now, nullptr);
+    const int64_t after_us = esp_timer_get_time();
+    const int64_t since_edge_us = (before_us + after_us) / 2 - candidate.pps_release_time_us;
+    const double system_at_edge = static_cast<double>(now.tv_sec) + static_cast<double>(now.tv_usec) * 1e-6 -
+                                  static_cast<double>(since_edge_us) * 1e-6;
+    return static_cast<time_t>(llround(system_at_edge - static_cast<double>(candidate.candidate_time)));
 }
 
 static void gnss_runtime_recovery_task(void *parameter)
@@ -6551,45 +7902,18 @@ static void handle_runtime_sync_failure(const sync_faults_t &faults, time_t upda
 
 static void gnss_time_sync_task(void *parameter)
 {
+    (void)parameter;
     bool first_sync = true;
+    time_t pending_step_delta = 0; // a whole-second difference seen once; it has to be confirmed before the clock is stepped
 
     for (;;)
     {
-
-        s_time_setting_in_progress.store(true);
+        // During the first synchronisation the time is not valid yet. Afterwards the flag is set only while the
+        // clock is really stepped: the periodic GNSS check must not switch the responses to stratum 16 (that is
+        // what get_ntp_reply_status does while a time setting is in progress).
+        if (first_sync)
+            s_time_setting_in_progress.store(true);
         sync_state_note_attempt();
-
-        /*  pre-release code - commented out
-        sync_candidate_t candidate{};
-
-        // Start stopwatch
-        int64_t start_us = esp_timer_get_time();
-
-        bool ok = acquire_sync_candidate(&candidate);
-
-        // Stop stopwatch
-        int64_t end_us = esp_timer_get_time();
-
-        // Calculate time to sync
-        int64_t elapsed_us = end_us - start_us;
-
-        if (!ok)
-        {
-            // Display elapsed time even on failure
-            ESP_LOGE(TAG, "acquire_sync_candidate() failed after %lld us\n", elapsed_us);
-
-            handle_runtime_sync_failure(candidate.failures, 0, 1000);
-            continue;
-        }
-
-        // Success path
-        ESP_LOGI(TAG, "acquire_sync_candidate() succeeded in %lld us\n", elapsed_us);
-
-        // end of performance test code *************************
-
-        end of pre-release code */
-
-        // start of code block to be replaced with the above when released
 
         sync_candidate_t candidate{};
         if (!acquire_sync_candidate(&candidate))
@@ -6597,8 +7921,6 @@ static void gnss_time_sync_task(void *parameter)
             handle_runtime_sync_failure(candidate.failures, 0, 1000);
             continue;
         }
-
-        // end of code block to be replaced with the above when released
 
         if (first_sync)
         {
@@ -6619,13 +7941,14 @@ static void gnss_time_sync_task(void *parameter)
         }
 
         time_t update_delta = 0;
+        bool step_clock = true;
         if (!first_sync)
         {
-            time_t current_time = time(nullptr);
-            update_delta = current_time - candidate.candidate_time;
+            update_delta = system_clock_second_offset(candidate);
             bool sanity_check_passed = (update_delta >= -safeguardThresholdInSeconds) && (update_delta <= safeguardThresholdInSeconds);
             if (!sanity_check_passed)
             {
+                pending_step_delta = 0;
                 uint32_t sanity_failure_count = sync_state_note_sanity_retry(update_delta);
                 s_time_setting_in_progress.store(false);
 
@@ -6639,7 +7962,6 @@ static void gnss_time_sync_task(void *parameter)
                     continue;
                 }
 
-                s_safe_guard_tripped.store(true);
                 sync_state_note_failure({false, false, true, false}, update_delta);
 
                 if (rebootIfSanityCheckFails)
@@ -6648,78 +7970,109 @@ static void gnss_time_sync_task(void *parameter)
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 continue;
             }
+
+            if (update_delta == 0)
+            {
+                pending_step_delta = 0;
+                // The clock already shows the right second. While the PPS discipline is running a step would only
+                // disturb it (model clock and PTP compensation are invalid until the next PPS edge), so skip it.
+                step_clock = !(s_pps_discipline_active.load(std::memory_order_acquire) &&
+                               s_model_valid.load(std::memory_order_acquire));
+            }
+            else if (update_delta != pending_step_delta)
+            {
+                // A whole second of difference: confirm it with a new reading before the clock is stepped
+                pending_step_delta = update_delta;
+#if DEBUG_ENABLED
+                ESP_LOGW(TAG, "GNSS second differs from the clock by %lld s; confirming before the clock is stepped.",
+                         static_cast<long long>(update_delta));
+#endif
+                vTaskDelay(pdMS_TO_TICKS(250));
+                continue;
+            }
+            else
+            {
+                pending_step_delta = 0; // confirmed: step
+            }
         }
 
         sync_state_clear_sanity_failures();
 
-        if (xSemaphoreTake(s_time_mutex, portMAX_DELAY) == pdTRUE)
+        if (step_clock)
         {
-            int64_t elapsed_us = candidate.use_pps_alignment ? (esp_timer_get_time() - candidate.pps_release_time_us) : 0;
-            if (elapsed_us < 0)
-                elapsed_us = 0;
-
-            struct timeval tv{};
-            tv.tv_sec = candidate.candidate_time + static_cast<time_t>(elapsed_us / 1000000LL);
-            tv.tv_usec = static_cast<suseconds_t>(elapsed_us % 1000000LL);
-            settimeofday(&tv, nullptr);
-            synchronize_hardware_clock();
-            s_ntp_reference_time_64 = get_current_time_in_ntp64_format();
-            s_ntp_reference_valid = true;
-
-            xSemaphoreGive(s_time_mutex);
-
-            s_safe_guard_tripped.store(false);
-            s_time_setting_in_progress.store(false);
-            s_time_has_been_set.store(true);
-            first_sync = false;
-            sync_state_note_success(update_delta);
-
-#if DEBUG_ENABLED
-            char date_string[16] = "";
-            char time_string[24] = "";
-            time_t now_utc = time(nullptr);
-            format_local_date_time(now_utc, date_string, sizeof(date_string), time_string, sizeof(time_string));
-
-            if (candidate.used_nmea_fallback)
-                ESP_LOGI(TAG, "GNSS time sync ( using NMEA fallback %s ) on %s at %s", candidate.use_pps_alignment ? "with PPS alignment" : "without PPS alignment", date_string, time_string);
-            else
-                ESP_LOGI(TAG, "GNSS time sync on %s at %s", date_string, time_string);
-#endif
-
-            uint32_t refresh_start_ms = millis();
-            uint32_t refresh_interval_ms = periodicGNSSRefreshEveryThisNumberOfMinutes * 60UL * 1000UL;
-            int64_t invalid_started_us = 0;
-
-            while ((millis() - refresh_start_ms) < refresh_interval_ms)
+            s_time_setting_in_progress.store(true);
+            if (xSemaphoreTake(s_time_mutex, portMAX_DELAY) == pdTRUE)
             {
-                bool gnss_valid = current_gnss_timing_is_valid();
+                int64_t elapsed_us = candidate.use_pps_alignment ? (esp_timer_get_time() - candidate.pps_release_time_us) : 0;
+                if (elapsed_us < 0)
+                    elapsed_us = 0;
 
-                if (gnss_valid)
-                {
-                    invalid_started_us = 0;
-                    sync_state_note_gnss_validity(true);
-                }
-                else
-                {
-                    if (invalid_started_us == 0)
-                        invalid_started_us = esp_timer_get_time();
+                struct timeval tv{};
+                tv.tv_sec = candidate.candidate_time + static_cast<time_t>(elapsed_us / 1000000LL);
+                tv.tv_usec = static_cast<suseconds_t>(elapsed_us % 1000000LL);
+                settimeofday(&tv, nullptr);
+                s_clock_comp_valid.store(false, std::memory_order_release);
+                model_invalidate();
+                synchronize_hardware_clock();
+                s_ntp_reference_time_64 = get_current_time_in_ntp64_format();
+                s_ntp_reference_valid = true;
 
-                    if ((esp_timer_get_time() - invalid_started_us) >= Gnss_Invalid_Reacquisition_After_Us)
-                    {
-                        sync_state_note_gnss_validity(false);
+                xSemaphoreGive(s_time_mutex);
+            }
+        }
+
+        s_time_setting_in_progress.store(false);
+        s_time_has_been_set.store(true);
+        first_sync = false;
+        sync_state_note_success(update_delta);
 
 #if DEBUG_ENABLED
-                        ESP_LOGW(TAG,
-                                 "GNSS timing invalid for more than %lu seconds; starting reacquisition.",
-                                 static_cast<unsigned long>(Gnss_Invalid_Reacquisition_After_Us / 1000000LL));
+        char date_string[16] = "";
+        char time_string[24] = "";
+        time_t now_utc = time(nullptr);
+        format_local_date_time(now_utc, date_string, sizeof(date_string), time_string, sizeof(time_string));
+
+        if (candidate.used_nmea_fallback)
+            ESP_LOGI(TAG, "GNSS time sync ( using NMEA fallback with PPS alignment ) on %s at %s%s", date_string, time_string,
+                     step_clock ? "" : " (clock already correct, not stepped)");
+        else
+            ESP_LOGI(TAG, "GNSS time sync on %s at %s%s", date_string, time_string,
+                     step_clock ? "" : " (clock already correct, not stepped)");
 #endif
 
-                        break;
-                    }
-                }
+        uint32_t refresh_start_ms = millis();
+        uint32_t refresh_interval_ms = periodicGNSSRefreshEveryThisNumberOfMinutes * 60UL * 1000UL;
+        int64_t invalid_started_us = 0;
 
-                vTaskDelay(pdMS_TO_TICKS(1000));
+        while ((millis() - refresh_start_ms) < refresh_interval_ms)
+        {
+            bool gnss_valid = current_gnss_timing_is_valid();
+
+            if (gnss_valid)
+            {
+                invalid_started_us = 0;
+                sync_state_note_gnss_validity(true);
             }
+            else
+            {
+                if (invalid_started_us == 0)
+                    invalid_started_us = esp_timer_get_time();
+
+                if ((esp_timer_get_time() - invalid_started_us) >= Gnss_Invalid_Reacquisition_After_Us)
+                {
+                    sync_state_note_gnss_validity(false);
+
+#if DEBUG_ENABLED
+                    ESP_LOGW(TAG,
+                             "GNSS timing invalid for more than %lu seconds; starting reacquisition.",
+                             static_cast<unsigned long>(Gnss_Invalid_Reacquisition_After_Us / 1000000LL));
+#endif
+
+                    break;
+                }
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
 #if CALCULATE_STACK_SIZES_ENABLED
@@ -6744,6 +8097,39 @@ void setup_the_gnss()
     xTaskCreatePinnedToCore(gnss_time_sync_task, "gnss_time_sync", GNSS_Time_Sync_Task_Stack_Size, nullptr, 15, nullptr, tskNO_AFFINITY);
 
     xTaskCreatePinnedToCore(pps_discipline_task, "pps_discipline", PPS_Discipline_Task_Stack_Size, nullptr, 14, nullptr, tskNO_AFFINITY);
+
+#if PPS_ISR_LATENCY_AUTO
+    if (!s_pps_isr_latency_known)
+    {
+        // Run the measurement on the other core than the PPS interrupt, like a real PPS edge arrives
+        const BaseType_t measure_core = (configNUM_CORES > 1 && s_pps_isr_core != tskNO_AFFINITY)
+                                            ? static_cast<BaseType_t>(s_pps_isr_core == 0 ? 1 : 0)
+                                            : static_cast<BaseType_t>(tskNO_AFFINITY);
+        xTaskCreatePinnedToCore(measure_pps_isr_latency_task, "pps_isr_latency", 6144, nullptr, 21, nullptr, measure_core);
+    }
+#endif
+
+#if PTP_LATENCY_AUTO
+    if (s_ptp_cal_required)
+    {
+        // Calibrate the PTP write latency during normal operation (low priority, it only looks at the samples
+        // delivered by the PPS task once per second)
+        s_ptp_cal_buf = static_cast<int32_t *>(malloc(sizeof(int32_t) * ptp_cal_block_samples));
+        if (s_ptp_cal_buf != nullptr)
+        {
+            if (xTaskCreatePinnedToCore(ptp_latency_calibration_task, "ptp_lat_cal", 6144, nullptr, 5, nullptr, tskNO_AFFINITY) != pdPASS)
+            {
+                free(s_ptp_cal_buf);
+                s_ptp_cal_buf = nullptr;
+                ESP_LOGW(TAG, "PTP write latency calibration: task could not be started, using %d ns",
+                         static_cast<int>(s_ptp_write_latency_ns.load(std::memory_order_relaxed)));
+            }
+        }
+        else
+            ESP_LOGW(TAG, "PTP write latency calibration: out of memory, using %d ns",
+                     static_cast<int>(s_ptp_write_latency_ns.load(std::memory_order_relaxed)));
+    }
+#endif
 
     while (!s_time_has_been_set.load())
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -7100,13 +8486,13 @@ static void ntp_server_task(void *parameter)
                     if (source_ipv4 != nullptr)
                     {
                         ntp_cache_update(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port),
-                                         receive_time, read_ntp_timestamp(reply, 40));
+                                         receive_time, transmit_time);
                     }
                     else if (client_ipv6 != nullptr)
                     {
                         ntp_cache_update_ipv6(client_ipv6,
                                               ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_port),
-                                              receive_time, read_ntp_timestamp(reply, 40));
+                                              receive_time, transmit_time);
                     }
                 }
 #if MQTT_ENABLED
@@ -7696,7 +9082,7 @@ static int get_required_top_line_message()
     if (s_saved_gnss_baud_communication_failed.load())
         return 9;
     if (s_time_setting_in_progress.load())
-        return 99;
+        return 98; // 98 = time being set ('*' on the LCD); 99 is reserved for the button
 
     if (!s_ethernet_connected.load())
         required_top_line_message = 1;
@@ -7812,21 +9198,22 @@ static void update_RGB_LED()
 
     if (s_open_for_business_message_written.load(std::memory_order_acquire))
     {
+        // The codes are the ones returned by get_required_top_line_message()
         switch (get_required_top_line_message())
         {
         case 0: // The server is operating normally
             Colour = LED_normal;
             break;
 
-        case 5: // There are queued MQTT items
+        case 3: // There are queued MQTT items
             Colour = LED_warning;
             flashing = true;
             break;
 
-        case 6:  // PPS missing
-        case 7:  // GNSS missing or invalid
-        case 8:  // GNSS sync stale
-        case 14: // GNSS has lost its satellite lock
+        case 5: // PPS missing
+        case 6: // GNSS missing or invalid
+        case 7: // GNSS sync stale
+        case 8: // GNSS has lost its satellite lock
             Colour = LED_warning;
             break;
 
@@ -7839,7 +9226,7 @@ static void update_RGB_LED()
         case 2:  // MQTT setup failed
         case 4:  // Sanity check mismatch
         case 9:  // Communication failure with the GNSS receiver
-        case 13: // Transport layer stalled
+        case 14: // Transport layer stalled
             Colour = LED_critical;
             break;
 
@@ -7848,11 +9235,11 @@ static void update_RGB_LED()
             flashing = true;
             break;
 
-        case 3: // IPv4 address not assigned yet preferred
+        case 13: // No usable IP address
             Colour = LED_alert;
             break;
 
-        case 98: // The server is synchronizing its time
+        case 98: // The server is setting its time
             Colour = LED_sync;
             break;
 
@@ -7926,21 +9313,21 @@ static void update_LED_LCD_Button_task(void *parameter)
             |   n/a   | ESP32 Time Server    | Blue flashing   | The server is almost ready, but needs to complete PPS disciplining |
             |         |                      |                 |                                                                    |
             |    0    | ESP32 Time Server    | Green           | The server is operating normally                                   |
-            |    5    | ESP32 Time Server[3] | Yellow flashing | There are queued MQTT items                                        |
-            |    6    | ESP32 Time Server[5] | Yellow          | PPS missing                                                        |
-            |    7    | ESP32 Time Server[6] | Yellow          | GNSS missing or invalid                                            |
-            |    8    | ESP32 Time Server[7] | Yellow          | GNSS sync stale                                                    |
-            |   14    | ESP32 Time Server[8] | Yellow          | GNSS has lost its satellite lock                                   |
+            |    3    | ESP32 Time Server[3] | Yellow flashing | There are queued MQTT items                                        |
+            |    5    | ESP32 Time Server[5] | Yellow          | PPS missing                                                        |
+            |    6    | ESP32 Time Server[6] | Yellow          | GNSS missing or invalid                                            |
+            |    7    | ESP32 Time Server[7] | Yellow          | GNSS sync stale                                                    |
+            |    8    | ESP32 Time Server[8] | Yellow          | GNSS has lost its satellite lock                                   |
             |   11    | ESP32 Time Server[M] | Red flashing    | Not connected to the MQTT broker                                   |
             |    9    | ESP32 Time Server[9] | Red             | Communication failure with the GNSS receiver                       |
             |    1    | ESP32 Time Server[1] | Red             | Ethernet not connected                                             |
             |    2    | ESP32 Time Server[2] | Red             | MQTT setup failed                                                  |
-            |   13    | ESP32 Time Server[T] | Red             | Transport layer stalled                                            |
+            |   14    | ESP32 Time Server[T] | Red             | Transport layer stalled                                            |
             |    4    | ESP32 Time Server[4] | Red             | Sanity check mismatch                                              |
             |         |                      |                 |                                                                    |
-            |    3    | ESP32 Time Server[I] | Orange          | IPv4 address not assigned yet preferred                            |
+            |   13    | ESP32 Time Server[I] | Orange          | No usable IP address                                               |
             |   12    | ESP32 Time Server[+] | Orange flashing | Load shedding active                                               |
-            |   98    | ESP32 Time Server[*] | White           | The server is synchronizing its time                               |
+            |   98    | ESP32 Time Server[*] | White           | The server is setting its time                                     |
             |   99    | ESP32 Time Server's  | Pink            | The button is being pressed                                        |
 
 
@@ -7984,9 +9371,10 @@ static void update_LED_LCD_Button_task(void *parameter)
                 else if (required_top_line_message >= 11 && required_top_line_message <= 14)
                 {
                     top_line_message[17] = '[';
-                    top_line_message[18] = required_top_line_message == 11 ? 'M' : required_top_line_message == 12 ? '+'
-                                                                               : required_top_line_message == 13   ? 'T'
-                                                                                                                   : 'I';
+                    top_line_message[18] = required_top_line_message == 11   ? 'M'
+                                           : required_top_line_message == 12 ? '+'
+                                           : required_top_line_message == 13 ? 'I'
+                                                                             : 'T';
                     top_line_message[19] = ']';
                 }
 
@@ -8141,8 +9529,11 @@ void write_open_for_business_messages_to_the_console()
     //    If afterwards a Global Unicast Address (GUA) is acquired, it will be used as a more preferred address type over the LLA and ULA.
     //
 
-#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
+#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED && DEBUG_ENABLED
 
+    // The secret keys are only printed with DEBUG_ENABLED (a serial log is easily copied or recorded).
+    // For the client configuration the ASCII keys of ESP32TimeServerSettingsSecrets.h can be used directly,
+    // e.g. "1 SHA256 ASCII:<key>" in chrony.keys.
     if (ntp_auth_key_count() != 0)
     {
         char authentication_key_hex[NTP_AUTH_MAX_KEY_SIZE * 2 + 1] = "";

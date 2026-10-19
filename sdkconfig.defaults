@@ -41,3 +41,6 @@ CONFIG_ETH_DMA_TX_BUFFER_NUM=30
 CONFIG_ETH_IRAM_OPTIMIZATION=y
 CONFIG_LWIP_IPV6=y
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
+
+# Compiler optimization for performance (-O2) instead of debug (-Og): shorter and steadier NTP and PPS code paths
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
