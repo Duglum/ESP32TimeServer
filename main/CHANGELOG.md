@@ -381,6 +381,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
 **Page hardening and resources**
 
 - HTML, CSS and JavaScript are separate files embedded with `EMBED_TXTFILES`; no inline script or style. The JavaScript writes values only with `textContent` / `.value`.
+- Favicon `/favicon.ico`: an alarm clock (U+23F0) drawn for this project (own artwork, MIT like the project), PNG images of 16, 32, 48 and 64 px in an ICO container (`main/web/www/favicon.ico`, embedded with `EMBED_FILES`, cached by the browser for a day).
 - Headers: `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: no-store` for the API.
 - Dark mode with CSS variables, dark is the default. The toggle button shows the mode it switches to (U+2600 sun = light, U+1F319 crescent moon = dark); the choice is stored in the browser (localStorage).
 - At most 3 sockets with LRU purge, request body at most 4 kB, receive / send timeout 5 s, request headers up to 2 kB (`CONFIG_HTTPD_MAX_REQ_HDR_LEN`, browsers send long headers), mbedTLS dynamic buffers (`CONFIG_MBEDTLS_DYNAMIC_BUFFER`).
@@ -736,7 +737,7 @@ Current files of the changes:
 | `main/web/web_tls.*` | TLS key and self-signed certificate |
 | `main/web/web_net.*` | network settings at run time, ND6 gateway hook |
 | `main/web/web_server.*` | HTTPS server, TLS transport, JSON API |
-| `main/web/www/index.html`, `app.css`, `app.js` | the page (embedded) |
+| `main/web/www/index.html`, `app.css`, `app.js`, `favicon.ico` | the page and its icon (embedded) |
 | `main/custom/ntp_auth.*` | always compiled; keys and on/off at run time (lock-free) |
 | `main/CMakeLists.txt`, `main/idf_component.yml`, `sdkconfig.defaults` | all features compiled in, web sources, cJSON, TLS / lwIP options |
 | `main/ESP32TimeServerSettings.h`, `main/ESP32TimeServerSettingsSecrets.h` | note on the web admin, `WebAdminPassword` |

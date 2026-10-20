@@ -46,6 +46,9 @@ idf_component_register(
         "web/www/index.html"
         "web/www/app.js"
         "web/www/app.css"
+    # Favicon: self-drawn alarm clock (U+23F0), 16 to 64 px PNG images in an ICO container
+    EMBED_FILES
+        "web/www/favicon.ico"
 )
 
 # ---------------------------------------------------------------------------

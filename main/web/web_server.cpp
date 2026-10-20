@@ -41,6 +41,8 @@ extern const char app_js_start[] asm("_binary_app_js_start");
 extern const char app_js_end[] asm("_binary_app_js_end");
 extern const char app_css_start[] asm("_binary_app_css_start");
 extern const char app_css_end[] asm("_binary_app_css_end");
+extern const char favicon_ico_start[] asm("_binary_favicon_ico_start");
+extern const char favicon_ico_end[] asm("_binary_favicon_ico_end");
 
 namespace
 {
@@ -163,7 +165,7 @@ namespace
     }
 
     // ---- Response helpers ----
-    void set_security_headers(httpd_req_t *req, bool api)
+    void set_security_headers(httpd_req_t *req, const char *cache_control)
     {
         httpd_resp_set_hdr(req, "Content-Security-Policy",
                            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
@@ -173,14 +175,14 @@ namespace
         httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
         httpd_resp_set_hdr(req, "Cross-Origin-Opener-Policy", "same-origin");
         httpd_resp_set_hdr(req, "Cross-Origin-Resource-Policy", "same-origin");
-        httpd_resp_set_hdr(req, "Cache-Control", api ? "no-store" : "no-cache");
+        httpd_resp_set_hdr(req, "Cache-Control", cache_control);
     }
 
     esp_err_t send_json(httpd_req_t *req, const char *status, cJSON *root)
     {
         char *text = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
-        set_security_headers(req, true);
+        set_security_headers(req, "no-store");
         httpd_resp_set_status(req, status);
         httpd_resp_set_type(req, "application/json");
         const esp_err_t err = text == nullptr ? httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN)
@@ -207,7 +209,7 @@ namespace
 
     esp_err_t send_static(httpd_req_t *req, const char *type, const char *start, const char *end)
     {
-        set_security_headers(req, false);
+        set_security_headers(req, "no-cache");
         httpd_resp_set_type(req, type);
         // EMBED_TXTFILES appends a NUL that is not part of the file
         return httpd_resp_send(req, start, end - start - 1);
@@ -623,6 +625,14 @@ namespace
     esp_err_t handle_index(httpd_req_t *req) { return send_static(req, "text/html; charset=utf-8", index_html_start, index_html_end); }
     esp_err_t handle_js(httpd_req_t *req) { return send_static(req, "text/javascript; charset=utf-8", app_js_start, app_js_end); }
     esp_err_t handle_css(httpd_req_t *req) { return send_static(req, "text/css; charset=utf-8", app_css_start, app_css_end); }
+
+    // Binary file (EMBED_FILES, no NUL appended), may be cached by the browser for a day
+    esp_err_t handle_favicon(httpd_req_t *req)
+    {
+        set_security_headers(req, "max-age=86400");
+        httpd_resp_set_type(req, "image/x-icon");
+        return httpd_resp_send(req, favicon_ico_start, favicon_ico_end - favicon_ico_start);
+    }
 
     esp_err_t handle_not_found(httpd_req_t *req, httpd_err_code_t)
     {
@@ -1055,6 +1065,7 @@ namespace
             {"/", HTTP_GET, handle_index},
             {"/app.js", HTTP_GET, handle_js},
             {"/app.css", HTTP_GET, handle_css},
+            {"/favicon.ico", HTTP_GET, handle_favicon},
             {"/api/login", HTTP_POST, handle_login},
             {"/api/logout", HTTP_POST, handle_logout},
             {"/api/state", HTTP_GET, handle_state},
