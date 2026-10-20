@@ -43,7 +43,7 @@ static constexpr int LEDRedPin = 6;
 static constexpr int WS2812DataPin = 4;
 
 // (optional) attached LCD support
-#define LIQUID_CRYSTAL_DISPLAY_ENABLED 1 // 0 = Disabled; 1 = Enabled
+#define LIQUID_CRYSTAL_DISPLAY_ENABLED 0 // 0 = Disabled; 1 = Enabled
 static constexpr int lcdColumns = 20;
 static constexpr int lcdRows = 4;
 static constexpr char lcdTopLineTitle[] = "ESP32 Time Server"; // text on the LCD's top line (max 17 characters; the last 3 columns are reserved for status indicators)
@@ -54,7 +54,7 @@ static constexpr int lcdI2CAddressPrimary = 0x27;
 static constexpr int lcdI2CAddressSecondary = 0x3F;
 
 // (optional) uptime / reset momentary button support
-#define UPTIME_RESTART_BUTTON_ENABLED 1 // 0 = Disabled; 1 = Enabled
+#define UPTIME_RESTART_BUTTON_ENABLED 0 // 0 = Disabled; 1 = Enabled
 static constexpr unsigned long holdUpTimeRestartButtonForThisManySecondsToTriggerAReset = 10UL;
 static constexpr int upTimeDisplayWillStayActiveForThisManySeconds = 10;
 // GPIO pin definitions for the uptime / reset momentary button
@@ -62,7 +62,7 @@ static constexpr int upTimeRestartPin = 3;
 
 // (optional) Over The Ethernet updates support
 // Please also see ESP32TimeServerSettingsSecretes.h for the configuration of the OTE password.
-#define OTE_UPDATES_ENABLED 1 // 0 = Disabled; 1 = Enabled
+#define OTE_UPDATES_ENABLED 0 // 0 = Disabled; 1 = Enabled
 static constexpr char DeviceName[] = "ESP32TimeServer";
 static constexpr uint16_t OTEPort = 3232;
 
@@ -78,10 +78,10 @@ static constexpr uint16_t OTEPort = 3232;
 // Additional detailed related to client activity, memory usage, and historical information can be optionally included
 // When symmetric-key authentication is enabled, MQTT reporting can distinguish between authenticated and unauthenticated requests as well
 // Please also see ESP32TimeServerSettingsSecretes.h for the configuration of the MQTT credentials.
-#define MQTT_ENABLED 1                                     // 0 = Disabled; 1 = Enabled
-#define MQTT_CLIENT_REPORTING_ENABLED 1                    // 0 = Disabled; 1 = Enabled
-#define MQTT_MEMORY_REPORTING_ENABLED 1                    // 0 = Disabled; 1 = Enabled
-#define MQTT_HISTORICAL_REPORTING_ENABLED 1                // 0 = Disabled; 1 = Enabled
+#define MQTT_ENABLED 0                                     // 0 = Disabled; 1 = Enabled
+#define MQTT_CLIENT_REPORTING_ENABLED 0                    // 0 = Disabled; 1 = Enabled
+#define MQTT_MEMORY_REPORTING_ENABLED 0                    // 0 = Disabled; 1 = Enabled
+#define MQTT_HISTORICAL_REPORTING_ENABLED 0                // 0 = Disabled; 1 = Enabled
 #define MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED 0 // 0 = Disabled; 1 = Enabled
 
 static constexpr char MQTTServerIPAddress[] = ""; // For example 192.168.1.15
@@ -131,7 +131,7 @@ static constexpr char PrimaryDNS[] = "";      // optional - leave as "" to omit,
 static constexpr char SecondaryDNS[] = "";    // optional - leave as "" to omit, or for example: 1.1.1.1
 
 // Preference for network connection
-static constexpr int PreferIPvX = 4; // 0 - dual-stack (uses both IPv4 and IPv6), LCD shows both IPv4 and IPv6 addresses
+static constexpr int PreferIPvX = 0; // 0 - dual-stack (uses both IPv4 and IPv6), LCD shows both IPv4 and IPv6 addresses
                                      // 1 - use IPv4 only, LCD shows IPv4 address only
                                      // 2 - use IPv6 only, LCD shows IPv6 address only
                                      // 4 - dual-stack, but LCD shows IPv4 address only
@@ -152,7 +152,7 @@ static constexpr int PreferIPvX = 4; // 0 - dual-stack (uses both IPv4 and IPv6)
                                      //   otherwise if a LLA is assigned it will be shown.
 
 // (required) Time zone setting for your region - for more information see https://gist.github.com/alwynallan/24d96091655391107939
-static constexpr const char *timeZoneSpec = "EST5EDT,M3.2.0/2,M11.1.0/2";
+static constexpr const char *timeZoneSpec = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 // Unless you know what you are doing, the options below should be left as is
 
@@ -202,15 +202,17 @@ static constexpr bool rebootIfSanityCheckFails = true; // Further to the above,
 // 3. The GNSS GND must be connected to the ESP32 GND                                                     *
 // ********************************************************************************************************
 
-#define UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED 1 // 0 = Disabled; 1 = Enabled
+#define UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED 0 // 0 = Disabled; 1 = Enabled
 // The following only needs to be set if your receiver does not use a U-Blox or U-Block clone GNSS chip
-static constexpr uint32_t baudRateForUbloxNonCompliantGNSSReceiver = 115200;
+static constexpr uint32_t baudRateForUbloxNonCompliantGNSSReceiver = 921600;
 
 // (required) GPIO pin definitions for the GNSS module
 static constexpr int TXPin = 22;  // note: prior to release 2.4 pin 16 was used for TX
 static constexpr int RXPin = 21;  // note: prior to release 2.4 pin 17 was used for RX
 static constexpr int PPSPin = 20; // note: prior to release 2.4 pin 18 was used for PPS
 
+<<<<<<< Updated upstream
+=======
 // (optional) GPIO pin for the PTP PPS loopback, -1 = not used
 // The Ethernet MAC outputs one pulse per second of its PTP clock on this pin, and the pin is read back by the same
 // MCPWM capture timer that captures the GNSS PPS. This compares the PTP clock with the GNSS PPS in hardware
@@ -218,8 +220,9 @@ static constexpr int PPSPin = 20; // note: prior to release 2.4 pin 18 was used 
 // Nothing has to be wired: the pulse is looped back inside the pad of the chip. The pin is driven as an output, so
 // it must be free and connected to nothing (no header pin that is in use, no on-board function).
 // Requires PTP_FREE_RUNNING 1 in main.cpp and an ESP32-P4 of revision v3.0 or newer.
-static constexpr int PTPPPSLoopbackPin = -1;
+static constexpr int PTPPPSLoopbackPin = 23;
 
+>>>>>>> Stashed changes
 // (required) GPIO pin definitions for the Waveshare:
 // ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH, ESP32-P4-WIFI-POE-ETH
 // if your using this board do not change these
