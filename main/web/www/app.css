@@ -151,6 +151,7 @@ button:disabled { opacity: .5; cursor: wait; }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 button.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
 button.ghost { background: transparent; }
+button.theme-toggle { font-size: 1.15rem; line-height: 1; padding: .45rem .6rem; min-width: 2.4rem; }
 
 .buttons { display: flex; gap: .6rem; flex-wrap: wrap; justify-content: center; }
 .buttons.sticky {

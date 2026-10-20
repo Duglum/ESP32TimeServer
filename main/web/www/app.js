@@ -18,9 +18,14 @@
   }
   function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
-    $('theme-toggle').textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+    // The button shows the mode it switches to: U+2600 (sun) = light mode, U+1F319 (crescent moon) = dark mode
+    const toggle = $('theme-toggle');
+    toggle.textContent = theme === 'dark' ? '☀️' : '\u{1F319}';
+    toggle.setAttribute('aria-label', theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+    toggle.title = toggle.getAttribute('aria-label');
   }
-  applyTheme(storedTheme() || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+  // Dark mode is the default; a choice made with the button is kept in this browser
+  applyTheme(storedTheme() === 'light' ? 'light' : 'dark');
   $('theme-toggle').addEventListener('click', () => {
     const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     applyTheme(next);
