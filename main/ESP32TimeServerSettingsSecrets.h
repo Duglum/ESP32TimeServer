@@ -4,6 +4,11 @@
 // Website: https://github.com/roblatour/ESP32TimeServer
 //
 
+// Password of the web admin page (https://<address>/), used until a new one is set on the page (it is then
+// stored in NVS as a salted PBKDF2 hash). While the factory value "password" is in use the page shows a warning.
+// The factory reset (page or button) returns to this password.
+static constexpr char WebAdminPassword[] = "password";
+
 // Over The Ethernet password for the ESP32 Time Server
 static constexpr char OTEPassword[] = "ESP32TimeServerpw";
 

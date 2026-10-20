@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>ESP32 Time Server</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <h1>ESP32 Time Server</h1>
+      <p class="sub" id="hdr-host"></p>
+    </div>
+  </div>
+  <div class="actions">
+    <button type="button" class="ghost" id="theme-toggle" aria-label="Switch dark mode">Dark mode</button>
+    <button type="button" class="ghost" id="logout" hidden>Log out</button>
+  </div>
+</header>
+
+<main>
+  <div id="banner-default-pw" class="banner danger" hidden>
+    The default web admin password is in use. Anyone on the network can change the settings of this server.
+    Change the password below.
+  </div>
+  <div id="banner-network" class="banner warn" hidden>
+    <div>
+      <strong>Network change pending.</strong>
+      Confirm within <span id="net-seconds"></span> s or the previous settings come back.
+      <span id="net-urls-text" hidden>Open the page over the new address, log in again and confirm there:</span>
+      <ul id="net-urls" class="plain"></ul>
+    </div>
+    <button type="button" id="net-confirm">Keep these network settings</button>
+  </div>
+  <div id="banner-oneshot" class="banner info" hidden>
+    This start uses settings from <em>Apply</em> that are valid for this start only. Use <em>Save</em> to keep them.
+  </div>
+  <div id="message" class="banner" role="status" hidden></div>
+
+  <section id="login-card" class="card narrow" hidden>
+    <h2>Log in</h2>
+    <form id="login-form" autocomplete="on">
+      <input type="text" name="username" value="admin" autocomplete="username" hidden>
+      <label>Password
+        <input type="password" id="login-password" autocomplete="current-password" maxlength="128" required>
+      </label>
+      <button type="submit" class="primary">Log in</button>
+    </form>
+    <p class="hint">Check the certificate fingerprint against the one printed on the serial console at every start.</p>
+  </section>
+
+  <div id="app" hidden>
+    <section class="card">
+      <h2>Status</h2>
+      <dl class="status-grid">
+        <dt>Firmware</dt><dd id="st-firmware"></dd>
+        <dt>Uptime</dt><dd id="st-uptime"></dd>
+        <dt>UTC</dt><dd id="st-utc"></dd>
+        <dt>Time service</dt><dd id="st-time"></dd>
+        <dt>GNSS receiver</dt><dd id="st-gnss"></dd>
+        <dt>IPv4</dt><dd id="st-ipv4"></dd>
+        <dt>IPv6</dt><dd><ul id="st-ipv6" class="plain"></ul></dd>
+        <dt>DNS servers</dt><dd id="st-dns"></dd>
+        <dt>MQTT</dt><dd id="st-mqtt"></dd>
+        <dt>NTP authentication</dt><dd id="st-auth"></dd>
+        <dt>Free heap</dt><dd id="st-heap"></dd>
+        <dt>Your address</dt><dd id="st-client"></dd>
+        <dt>Certificate SHA-256</dt><dd id="st-fingerprint" class="mono small"></dd>
+      </dl>
+    </section>
+
+    <form id="settings-form" novalidate>
+      <section class="card">
+        <h2>Network</h2>
+        <div class="grid">
+          <label class="span2">Host name and domain (FQDN) <span class="badge restart">restart</span>
+            <input type="text" name="fqdn" maxlength="253" spellcheck="false" autocomplete="off">
+            <small class="def" data-for="fqdn"></small>
+          </label>
+          <label class="switch span2"><input type="checkbox" name="ipv4_dhcp"> IPv4 by DHCP</label>
+          <label>IPv4 address / prefix
+            <input type="text" name="ipv4_cidr" placeholder="192.168.1.10/24" spellcheck="false" autocomplete="off">
+            <small class="def" data-for="ipv4_cidr"></small>
+          </label>
+          <label>IPv4 gateway
+            <input type="text" name="ipv4_gateway" placeholder="192.168.1.1" spellcheck="false" autocomplete="off">
+            <small class="def" data-for="ipv4_gateway"></small>
+          </label>
+          <label class="switch span2"><input type="checkbox" name="ipv6_slaac"> IPv6 SLAAC (addresses from router advertisements)</label>
+          <label>Additional IPv6 address / prefix
+            <input type="text" name="ipv6_cidr" placeholder="2001:db8::10/64 (empty = none)" spellcheck="false" autocomplete="off">
+            <small class="def" data-for="ipv6_cidr"></small>
+          </label>
+          <label>IPv6 gateway
+            <input type="text" name="ipv6_gateway" placeholder="fe80::1 (empty = from router advertisements)" spellcheck="false" autocomplete="off">
+            <small class="def" data-for="ipv6_gateway"></small>
+          </label>
+          <label class="span2">DNS servers (one per line, at most 3; empty = from DHCP)
+            <textarea name="dns" rows="3" spellcheck="false"></textarea>
+            <small class="def" data-for="dns"></small>
+          </label>
+        </div>
+        <p class="hint">Network changes take effect at once and have to be confirmed within 120 s, otherwise the previous settings come back. Save them only after the confirmation.</p>
+      </section>
+
+      <section class="card">
+        <h2>GNSS and PPS <span class="badge restart">restart</span></h2>
+        <div class="grid">
+          <label>GNSS TX pin (GPIO)<input type="number" name="gnss_tx_pin" min="0" max="54"><small class="def" data-for="gnss_tx_pin"></small></label>
+          <label>GNSS RX pin (GPIO)<input type="number" name="gnss_rx_pin" min="0" max="54"><small class="def" data-for="gnss_rx_pin"></small></label>
+          <label>PPS pin (GPIO)<input type="number" name="gnss_pps_pin" min="0" max="54"><small class="def" data-for="gnss_pps_pin"></small></label>
+          <label>GNSS baud rate
+            <select name="gnss_baud">
+              <option>4800</option><option>9600</option><option>19200</option><option>38400</option><option>57600</option>
+              <option>115200</option><option>230400</option><option>460800</option><option>921600</option>
+            </select>
+            <small class="def" data-for="gnss_baud"></small>
+            <small class="note" id="baud-note"></small>
+          </label>
+          <label class="span2">PTP PPS loopback pin (GPIO, empty = off)
+            <input type="number" name="ptp_loopback_pin" min="0" max="54">
+            <small class="def" data-for="ptp_loopback_pin"></small>
+            <small class="note">The pin has to be empty: a free GPIO with nothing connected. It is driven as an output.</small>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>LCD and time zone</h2>
+        <div class="grid">
+          <label class="switch span2"><input type="checkbox" name="lcd_enabled"> LCD (20×4, I2C on GPIO 7/8) <span class="badge restart">restart</span></label>
+          <label>Top line title (max. 17 characters)<input type="text" name="lcd_title" maxlength="17"><small class="def" data-for="lcd_title"></small></label>
+          <label>Time zone (POSIX TZ)<input type="text" name="time_zone" maxlength="63" spellcheck="false" placeholder="CET-1CEST,M3.5.0,M10.5.0/3"><small class="def" data-for="time_zone"></small></label>
+          <label class="switch"><input type="checkbox" name="lcd_24_hour"> 24-hour clock</label>
+          <label class="switch"><input type="checkbox" name="lcd_pad_hour"> Hour with leading zero</label>
+          <label class="switch"><input type="checkbox" name="lcd_show_time_zone"> Show the time zone</label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>RGB LED</h2>
+        <div class="grid">
+          <label>Module <span class="badge restart">restart</span>
+            <select name="led_type">
+              <option value="none">none</option>
+              <option value="ky016">KY-016 (3 pins, PWM)</option>
+              <option value="ws2812">WS2812 (1 data pin)</option>
+            </select>
+            <small class="def" data-for="led_type"></small>
+          </label>
+          <label>Brightness <output id="brightness-out"></output>
+            <input type="range" name="led_brightness" min="0" max="100" step="1">
+            <small class="def" data-for="led_brightness"></small>
+          </label>
+          <label class="led-ky016">Red pin (GPIO) <span class="badge restart">restart</span><input type="number" name="led_red_pin" min="0" max="54"><small class="def" data-for="led_red_pin"></small></label>
+          <label class="led-ky016">Green pin (GPIO) <span class="badge restart">restart</span><input type="number" name="led_green_pin" min="0" max="54"><small class="def" data-for="led_green_pin"></small></label>
+          <label class="led-ky016">Blue pin (GPIO) <span class="badge restart">restart</span><input type="number" name="led_blue_pin" min="0" max="54"><small class="def" data-for="led_blue_pin"></small></label>
+          <label class="led-ws2812">Data pin (GPIO) <span class="badge restart">restart</span><input type="number" name="led_ws2812_pin" min="0" max="54"><small class="def" data-for="led_ws2812_pin"></small></label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>MQTT <span class="badge restart">restart</span></h2>
+        <div class="grid">
+          <label class="switch span2"><input type="checkbox" name="mqtt_enabled"> MQTT reporting</label>
+          <label class="span2">Broker URI<input type="text" name="mqtt_uri" maxlength="127" spellcheck="false" placeholder="mqtt://192.168.1.15:1883 or mqtts://broker.example:8883"><small class="def" data-for="mqtt_uri"></small></label>
+          <label>User name<input type="text" name="mqtt_username" maxlength="64" autocomplete="off" spellcheck="false"><small class="def" data-for="mqtt_username"></small></label>
+          <label>Password
+            <input type="password" name="mqtt_password" maxlength="64" autocomplete="new-password">
+            <small class="note" id="mqtt-password-state"></small>
+          </label>
+          <label class="switch span2"><input type="checkbox" name="mqtt_password_clear"> Clear the MQTT password</label>
+        </div>
+        <p class="hint">An empty password field keeps the stored password. Secrets are never sent back to the browser.</p>
+      </section>
+
+      <section class="card">
+        <h2>NTP authentication (symmetric key, SHA-256)</h2>
+        <div class="grid">
+          <label class="switch span2"><input type="checkbox" name="ntp_auth_enabled"> Answer authenticated NTPv4 requests</label>
+          <label>Key ID (1 to 65535)<input type="number" name="ntp_key_id" min="1" max="65535"><small class="def" data-for="ntp_key_id"></small></label>
+          <label>Key (32 letters or digits)
+            <input type="password" name="ntp_key" maxlength="32" autocomplete="new-password" spellcheck="false">
+            <small class="note" id="ntp-key-state"></small>
+          </label>
+          <label class="switch span2"><input type="checkbox" name="ntp_key_clear"> Use the keys compiled into the firmware</label>
+        </div>
+      </section>
+
+      <div class="buttons sticky">
+        <button type="button" class="primary" id="btn-apply">Apply</button>
+        <button type="button" id="btn-save">Save to NVS</button>
+        <button type="button" class="danger" id="btn-factory">Factory reset</button>
+      </div>
+      <p class="hint center">Apply: in effect now, not stored (settings marked <span class="badge restart">restart</span> restart the device once). Save: loaded at every start. Factory reset: back to the compiled settings and the compiled password; the TLS certificate is kept.</p>
+    </form>
+
+    <section class="card" id="factory-card" hidden>
+      <h2>Factory reset</h2>
+      <p>This erases the saved settings, the web admin password and the allow-list, then restarts the device.</p>
+      <form id="factory-form">
+        <label>Current password<input type="password" id="factory-password" autocomplete="current-password" maxlength="128" required></label>
+        <div class="buttons">
+          <button type="submit" class="danger">Erase and restart</button>
+          <button type="button" id="factory-cancel">Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Security</h2>
+      <div class="grid">
+        <form id="password-form" class="stack">
+          <h3>Change the password</h3>
+          <input type="text" name="username" value="admin" autocomplete="username" hidden>
+          <label>Current password<input type="password" id="pw-current" autocomplete="current-password" maxlength="128" required></label>
+          <label>New password (12 to 128 characters)<input type="password" id="pw-new" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+          <label>Repeat the new password<input type="password" id="pw-repeat" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+          <button type="submit">Change password</button>
+          <p class="hint">Takes effect and is stored at once. Other sessions are logged out.</p>
+        </form>
+        <form id="allow-form" class="stack">
+          <h3>Allowed source networks</h3>
+          <label>One address or CIDR network per line, at most 8 (empty = all)
+            <textarea id="allow-list" rows="6" spellcheck="false" placeholder="192.168.1.0/24&#10;fd00::/8"></textarea>
+          </label>
+          <button type="submit">Store allow-list</button>
+          <p class="hint">Connections from other addresses are closed before the TLS handshake. A list that does not contain your own address is refused.</p>
+        </form>
+      </div>
+    </section>
+  </div>
+</main>
+<footer class="footer">HTTPS only &middot; TCP 443 &middot; self-signed certificate</footer>
+</body>
+</html>

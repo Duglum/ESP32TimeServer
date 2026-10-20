@@ -44,3 +44,32 @@ CONFIG_LWIP_IPV6_AUTOCONFIG=y
 
 # Compiler optimization for performance (-O2) instead of debug (-Og): shorter and steadier NTP and PPS code paths
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# ==============================================================================
+# WEB ADMIN PAGE (HTTPS, TCP 443)
+# ==============================================================================
+# After changing these values delete the file sdkconfig (or run "idf.py fullclean" and delete it), otherwise
+# the values already stored in sdkconfig stay in effect. main/web/web_net.cpp stops the build with an error if
+# the ND6 gateway hook is missing.
+#
+# Self-signed certificate created on the device (X.509 writing)
+CONFIG_MBEDTLS_X509_CREATE_C=y
+CONFIG_MBEDTLS_X509_CRT_WRITE_C=y
+CONFIG_MBEDTLS_PK_WRITE_C=y
+CONFIG_MBEDTLS_PEM_WRITE_C=y
+# TLS 1.2 and TLS 1.3 (with ECDHE), no renegotiation
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_2=y
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+CONFIG_MBEDTLS_SSL_TLS1_3_KEXM_EPHEMERAL=y
+# CONFIG_MBEDTLS_SSL_TLS1_3_KEXM_PSK is not set
+# CONFIG_MBEDTLS_SSL_TLS1_3_KEXM_PSK_EPHEMERAL is not set
+# CONFIG_MBEDTLS_SSL_RENEGOTIATION is not set
+# Allocate the TLS record buffers only while they are used (about 40 kB less per idle connection)
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+# Browsers send long request headers (cookies, client hints)
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+# Static IPv6 default gateway (lwIP has no API for it): lwip_hook_nd6_get_gw() in main/web/web_net.cpp
+CONFIG_LWIP_HOOK_ND6_GET_GW_CUSTOM=y
+# Link-local + SLAAC (global and unique local) + the static IPv6 address of the web settings + one spare
+CONFIG_LWIP_IPV6_NUM_ADDRESSES=5

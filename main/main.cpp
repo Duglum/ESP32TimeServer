@@ -51,6 +51,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <algorithm>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -60,9 +61,27 @@
 #include "SparkFun_u-blox_GNSS_v3.h"
 #include "ESP32TimeServerSettings.h"
 #include "custom/app_metadata.h"
-#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
+#include "web/web_net.h"
+#include "web/web_server.h"
+#include "web/web_settings.h"
+
+// ---- Features that can be switched on the web admin page ----
+// The *_ENABLED values below in ESP32TimeServerSettings.h are only the run-time defaults now (see
+// web/web_settings.cpp). The code of these features is always compiled in; the settings of this boot decide at run
+// time whether a feature is started (s_lcd_on, s_led_type, s_mqtt_on, ntp_auth_configure()). A feature that is off
+// has no task, no driver and no buffers.
+#undef LIQUID_CRYSTAL_DISPLAY_ENABLED
+#define LIQUID_CRYSTAL_DISPLAY_ENABLED 1
+#undef RBG_LED_KY_016_MODULE_ENABLED
+#define RBG_LED_KY_016_MODULE_ENABLED 1
+#undef RBG_LED_WS2812_MODULE_ENABLED
+#define RBG_LED_WS2812_MODULE_ENABLED 1
+#undef MQTT_ENABLED
+#define MQTT_ENABLED 1
+#undef SYMMETRIC_KEY_AUTHENTICATION_ENABLED
+#define SYMMETRIC_KEY_AUTHENTICATION_ENABLED 1
+
 #include "custom/ntp_auth.h"
-#endif
 #include "custom/ntp_cache.h"
 
 extern "C"
@@ -77,10 +96,9 @@ extern "C"
 #include "esp_log.h"
 #include "ff.h"
 #include "esp_mac.h"
-#if MQTT_ENABLED
+#include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "mqtt_client.h"
-#endif
 #include "esp_netif.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -112,6 +130,23 @@ extern "C"
 }
 
 static const char *TAG = "main_cpp";
+
+// ---- Settings of this boot (web admin, see web/web_settings.h) ----
+// Settings that need a restart are read from s_cfg only; it is set in setup_NVS_storage() before any task starts
+// and never changes afterwards. Live settings (time zone, LCD text, LED brightness) are copied into the atomics /
+// the mutex protected buffer below by app_apply_live_settings().
+static const web_settings_t *s_cfg = nullptr;
+static bool s_lcd_on = false;                         // LCD enabled for this boot
+static bool s_mqtt_on = false;                        // MQTT enabled for this boot (fixed after the start)
+static web_led_type_t s_led_type = web_led_type_t::none; // RGB LED module of this boot
+static std::atomic<uint8_t> s_led_brightness_percent{0};
+static std::atomic<bool> s_lcd_24_hour{false};
+static std::atomic<bool> s_lcd_pad_hour{false};
+static std::atomic<bool> s_lcd_show_time_zone{false};
+static std::atomic<bool> s_lcd_title_changed{false};
+static SemaphoreHandle_t s_live_settings_mutex = nullptr;
+static char s_lcd_title[WEB_LCD_TITLE_SIZE] = "";     // protected by s_live_settings_mutex
+static char s_time_zone[WEB_TZ_SIZE] = "";            // protected by s_live_settings_mutex
 
 // the following is used to determine the NTP load shedding threshold based on the ESP32-P4 chip version
 static constexpr uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion1_3 = 8500;
@@ -540,6 +575,7 @@ static bool s_lcd_line_cached[lcdRows] = {};
 #endif
 
 static std::string MACToBeUsed;
+static char s_hostname[WEB_HOSTNAME_MAX_LEN + 1] = ""; // first label of the FQDN of the settings
 
 struct PpsCaptureEvent
 {
@@ -1137,7 +1173,6 @@ static void control_RGB_LED(RGB_LED_Colour Colour, bool enabled);
 #endif
 #if RBG_LED_WS2812_MODULE_ENABLED
 static led_strip_handle_t s_ws2812_strip = nullptr;
-static uint8_t s_ws2812_brightness = 0;
 #endif
 static std::atomic<bool> s_open_for_business_message_written{false};
 static std::atomic<int64_t> s_last_hardware_ntp_response_us{0};
@@ -1200,7 +1235,6 @@ static bool admit_ntp_request()
     }
 }
 
-static bool configure_static_ip();
 static bool configure_hardware_timestamps();
 #if PTP_FREE_RUNNING
 static void setup_ptp_pps_loopback(esp_eth_mac_t *mac);
@@ -1321,18 +1355,19 @@ static size_t s_mqtt_client_count = 0;
 #endif
 
 static int64_t s_mqtt_last_link_up_us = 0;
-static mqtt_report_t s_mqtt_reports[MQTT_REPORT_QUEUE_DEPTH]{};
-static char s_mqtt_payload[MQTT_MAX_REPORT_SIZE] = "";
-static char s_mqtt_final_payload[MQTT_REPORT_SIZE] = "";
+// The report buffers (about 76 kB) are allocated by setup_mqtt() only when MQTT is on for this boot
+static mqtt_report_t *s_mqtt_reports = nullptr;        // [MQTT_REPORT_QUEUE_DEPTH]
+static char *s_mqtt_payload = nullptr;                 // [MQTT_MAX_REPORT_SIZE]
+static char *s_mqtt_final_payload = nullptr;           // [MQTT_REPORT_SIZE]
 static size_t s_mqtt_report_head = 0;
 static std::atomic<size_t> s_mqtt_queued_messages_count{0};
 static uint32_t s_mqtt_queued_messages_discarded = 0;
-static mqtt_client_request_t s_mqtt_clients[MQTT_TF_Client_Limit]{};
+static mqtt_client_request_t *s_mqtt_clients = nullptr; // [MQTT_TF_Client_Limit]
 static std::atomic<bool> s_tf_queue_available{false};
 static sdmmc_card_t *s_tf_card = nullptr;
 static uint64_t s_tf_queue_next_sequence = 0;
 static std::atomic<uint32_t> s_ntp_most_requests_per_second{0};
-static char s_mqtt_uri[64] = "";
+static char s_mqtt_uri[WEB_MQTT_URI_SIZE] = "";
 static char s_mqtt_report_topic[128] = "";
 static char s_mqtt_status_topic[128] = "";
 
@@ -1732,6 +1767,9 @@ static void display_line(uint8_t row, const char *text)
 
     // LCD rows once displayed are cached and only updated when changed
 
+    if (!s_lcd_on)
+        return; // LCD switched off in the settings
+
     char padded[lcdColumns + 1];
     memset(padded, ' ', sizeof(padded) - 1);
     padded[lcdColumns] = '\0';
@@ -1972,9 +2010,16 @@ static void display_selected_ip_address(int seconds)
     }
 }
 
+// Sets the time zone of the settings (at the start and when it is changed on the web admin page)
 static void apply_timezone_settings()
 {
-    setenv("TZ", timeZoneSpec, 1);
+    char time_zone[WEB_TZ_SIZE];
+    if (s_live_settings_mutex != nullptr)
+        xSemaphoreTake(s_live_settings_mutex, portMAX_DELAY);
+    snprintf(time_zone, sizeof(time_zone), "%s", s_time_zone[0] != '\0' ? s_time_zone : timeZoneSpec);
+    if (s_live_settings_mutex != nullptr)
+        xSemaphoreGive(s_live_settings_mutex);
+    setenv("TZ", time_zone, 1);
     tzset();
 }
 
@@ -1990,8 +2035,10 @@ static void format_local_date_time(time_t utc_time, char *date_string, size_t da
     const unsigned int day = static_cast<unsigned int>(local_tm.tm_mday) % 100u;
     snprintf(date_string, date_size, "%04u-%02u-%02u", year, month, day);
 
+    const bool hour_24 = s_lcd_24_hour.load(std::memory_order_relaxed);
+    const bool show_zone = s_lcd_show_time_zone.load(std::memory_order_relaxed);
     unsigned int hour_value = static_cast<unsigned int>(local_tm.tm_hour) % 24u;
-    if (!display24HourFormat)
+    if (!hour_24)
     {
         hour_value %= 12;
         if (hour_value == 0)
@@ -2000,18 +2047,18 @@ static void format_local_date_time(time_t utc_time, char *date_string, size_t da
 
     char zone[8] = "";
 
-    if (displayTimeZone)
+    if (show_zone)
         strftime(zone, sizeof(zone), "%Z", &local_tm);
 
     const unsigned int minute = static_cast<unsigned int>(local_tm.tm_min) % 60u;
     const unsigned int second = static_cast<unsigned int>(local_tm.tm_sec) % 61u; // 60 = leap second
-    const char *hour_format = displayHoursWithPaddedZero ? "%02u:%02u:%02u" : "%u:%02u:%02u";
+    const char *hour_format = s_lcd_pad_hour.load(std::memory_order_relaxed) ? "%02u:%02u:%02u" : "%u:%02u:%02u";
     int len = snprintf(time_string, time_size, hour_format, hour_value, minute, second);
 
-    if (!display24HourFormat && len >= 0 && static_cast<size_t>(len) < time_size)
+    if (!hour_24 && len >= 0 && static_cast<size_t>(len) < time_size)
         len += snprintf(time_string + len, time_size - len, " %s", local_tm.tm_hour < 12 ? "AM" : "PM");
 
-    if (displayTimeZone && zone[0] != '\0' && len >= 0 && static_cast<size_t>(len) < time_size)
+    if (show_zone && zone[0] != '\0' && len >= 0 && static_cast<size_t>(len) < time_size)
         snprintf(time_string + len, time_size - len, " %s", zone);
 }
 
@@ -2969,12 +3016,15 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     if (authentication_result != ntp_auth_result_t::unauthenticated && authentication_result != ntp_auth_result_t::valid)
     {
 #if MQTT_ENABLED
-        s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-        if (version == 4)
-            s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-        else
-            s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-        s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+        if (s_mqtt_on)
+        {
+            s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+            if (version == 4)
+                s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+            else
+                s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+            s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+        }
 #endif
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
@@ -2998,27 +3048,33 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
 
     const uint64_t receive_time = ntp64_from_hardware_timestamp(receive_timestamp);
 #if MQTT_ENABLED
-    struct sockaddr_storage source_address{};
-    auto *source_ipv4_address = reinterpret_cast<struct sockaddr_in *>(&source_address);
-    source_ipv4_address->sin_family = AF_INET;
-    source_ipv4_address->sin_port = htons(client_port);
-    memcpy(&source_ipv4_address->sin_addr, frame + ip_offset + 12, sizeof(source_ipv4_address->sin_addr));
-    s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
-    if (authenticated_request)
-        s_ntp_authenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
-    else
-        s_ntp_unauthenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
-    mqtt_enqueue_ntp_request(source_address);
+    if (s_mqtt_on)
+    {
+        struct sockaddr_storage source_address{};
+        auto *source_ipv4_address = reinterpret_cast<struct sockaddr_in *>(&source_address);
+        source_ipv4_address->sin_family = AF_INET;
+        source_ipv4_address->sin_port = htons(client_port);
+        memcpy(&source_ipv4_address->sin_addr, frame + ip_offset + 12, sizeof(source_ipv4_address->sin_addr));
+        s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
+        if (authenticated_request)
+            s_ntp_authenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
+        else
+            s_ntp_unauthenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
+        mqtt_enqueue_ntp_request(source_address);
+    }
 #endif
     uint8_t reply[NTP_MAX_PACKET_SIZE] = {};
     const ntp_reply_status_t status = get_ntp_reply_status();
 #if MQTT_ENABLED
-    if (status.gnss_synchronized && status.pps_disciplined)
-        s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
-    if (!status.gnss_synchronized)
-        s_ntp_responses_gnss_unsynchronized.fetch_add(1, std::memory_order_relaxed);
-    if (!status.pps_disciplined)
-        s_ntp_responses_pps_undisciplined.fetch_add(1, std::memory_order_relaxed);
+    if (s_mqtt_on)
+    {
+        if (status.gnss_synchronized && status.pps_disciplined)
+            s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
+        if (!status.gnss_synchronized)
+            s_ntp_responses_gnss_unsynchronized.fetch_add(1, std::memory_order_relaxed);
+        if (!status.pps_disciplined)
+            s_ntp_responses_pps_undisciplined.fetch_add(1, std::memory_order_relaxed);
+    }
 #endif
     build_ntp_reply(request, reply, version, receive_time, status);
 
@@ -3131,7 +3187,10 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
         s_last_ntp_response_us.store(response_us, std::memory_order_relaxed);
 #if MQTT_ENABLED
-        s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
+        if (s_mqtt_on)
+        {
+            s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
+        }
 #endif
     }
 
@@ -3179,12 +3238,15 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
     if (authentication_result != ntp_auth_result_t::unauthenticated && authentication_result != ntp_auth_result_t::valid)
     {
 #if MQTT_ENABLED
-        s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-        if (version == 4)
-            s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-        else
-            s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-        s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+        if (s_mqtt_on)
+        {
+            s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+            if (version == 4)
+                s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+            else
+                s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+            s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+        }
 #endif
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
@@ -3206,28 +3268,34 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
 
     const uint64_t receive_time = ntp64_from_hardware_timestamp(receive_timestamp);
 #if MQTT_ENABLED
-    struct sockaddr_storage source_address{};
-    auto *source_ipv6_address = reinterpret_cast<struct sockaddr_in6 *>(&source_address);
-    source_ipv6_address->sin6_family = AF_INET6;
-    source_ipv6_address->sin6_port = htons(client_port);
-    source_ipv6_address->sin6_scope_id = esp_netif_get_netif_impl_index(static_cast<esp_netif_t *>(netif));
-    source_ipv6_address->sin6_addr = client_ip;
-    s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
-    if (authenticated_request)
-        s_ntp_authenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
-    else
-        s_ntp_unauthenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
-    mqtt_enqueue_ntp_request(source_address);
+    if (s_mqtt_on)
+    {
+        struct sockaddr_storage source_address{};
+        auto *source_ipv6_address = reinterpret_cast<struct sockaddr_in6 *>(&source_address);
+        source_ipv6_address->sin6_family = AF_INET6;
+        source_ipv6_address->sin6_port = htons(client_port);
+        source_ipv6_address->sin6_scope_id = esp_netif_get_netif_impl_index(static_cast<esp_netif_t *>(netif));
+        source_ipv6_address->sin6_addr = client_ip;
+        s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
+        if (authenticated_request)
+            s_ntp_authenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
+        else
+            s_ntp_unauthenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
+        mqtt_enqueue_ntp_request(source_address);
+    }
 #endif
     uint8_t reply[NTP_MAX_PACKET_SIZE] = {};
     const ntp_reply_status_t status = get_ntp_reply_status();
 #if MQTT_ENABLED
-    if (status.gnss_synchronized && status.pps_disciplined)
-        s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
-    if (!status.gnss_synchronized)
-        s_ntp_responses_gnss_unsynchronized.fetch_add(1, std::memory_order_relaxed);
-    if (!status.pps_disciplined)
-        s_ntp_responses_pps_undisciplined.fetch_add(1, std::memory_order_relaxed);
+    if (s_mqtt_on)
+    {
+        if (status.gnss_synchronized && status.pps_disciplined)
+            s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
+        if (!status.gnss_synchronized)
+            s_ntp_responses_gnss_unsynchronized.fetch_add(1, std::memory_order_relaxed);
+        if (!status.pps_disciplined)
+            s_ntp_responses_pps_undisciplined.fetch_add(1, std::memory_order_relaxed);
+    }
 #endif
     build_ntp_reply(request, reply, version, receive_time, status);
 
@@ -3318,7 +3386,10 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
         s_last_ntp_response_us.store(response_us, std::memory_order_relaxed);
 #if MQTT_ENABLED
-        s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
+        if (s_mqtt_on)
+        {
+            s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
+        }
 #endif
     }
 
@@ -3365,7 +3436,10 @@ static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uin
     }
 
 #if MQTT_ENABLED
-    s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+    if (s_mqtt_on)
+    {
+        s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+    }
 #endif
     if (!admit_ntp_request())
     {
@@ -3610,8 +3684,11 @@ static void ethernet_transport_recovery_task(void *parameter)
                                   (xEventGroupGetBits(s_net_event_group) & ETH_GOT_IP_BIT) == 0;
         bool mqtt_unavailable = false;
 #if MQTT_ENABLED
-        mqtt_unavailable = s_mqtt_has_connected.load(std::memory_order_relaxed) &&
-                           !s_mqtt_connected.load(std::memory_order_relaxed);
+        if (s_mqtt_on)
+        {
+            mqtt_unavailable = s_mqtt_has_connected.load(std::memory_order_relaxed) &&
+                               !s_mqtt_connected.load(std::memory_order_relaxed);
+        }
 #endif
         if (recovery_verification_us > 0)
         {
@@ -3715,7 +3792,8 @@ static bool IRAM_ATTR ptp_pps_capture_callback(mcpwm_cap_channel_handle_t,
 // reads the same pad back. Nothing has to be wired.
 static void setup_ptp_pps_loopback(esp_eth_mac_t *mac)
 {
-    if (PTPPPSLoopbackPin < 0)
+    const int loopback_pin = s_cfg->ptp_loopback_pin;
+    if (loopback_pin < 0)
         return;
     if (s_ptp_loopback_active.load(std::memory_order_acquire))
     {
@@ -3723,25 +3801,25 @@ static void setup_ptp_pps_loopback(esp_eth_mac_t *mac)
         esp_eth_mac_set_pps_out_freq(mac, 0);
         return;
     }
-    if (PTPPPSLoopbackPin == PPSPin || s_pps_capture_timer == nullptr)
+    if (loopback_pin == s_cfg->gnss_pps_pin || s_pps_capture_timer == nullptr)
     {
-        ESP_LOGW(TAG, "PTP PPS loopback: GPIO %d cannot be used (it must not be the PPS pin)", PTPPPSLoopbackPin);
+        ESP_LOGW(TAG, "PTP PPS loopback: GPIO %d cannot be used (it must not be the PPS pin)", loopback_pin);
         return;
     }
 
     // 1 PPS output: rising edge at every second of the PTP clock
-    esp_err_t err = esp_eth_mac_set_pps_out_gpio(mac, PTPPPSLoopbackPin);
+    esp_err_t err = esp_eth_mac_set_pps_out_gpio(mac, loopback_pin);
     if (err == ESP_OK)
         err = esp_eth_mac_set_pps_out_freq(mac, 0);
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "PTP PPS loopback: PPS output on GPIO %d failed (%s), software measurement is used",
-                 PTPPPSLoopbackPin, esp_err_to_name(err));
+                 loopback_pin, esp_err_to_name(err));
         return;
     }
 
     mcpwm_capture_channel_config_t channel_config{};
-    channel_config.gpio_num = PTPPPSLoopbackPin; // also enables the input of the pad, the output stays connected
+    channel_config.gpio_num = loopback_pin; // also enables the input of the pad, the output stays connected
     channel_config.prescale = 1;
     channel_config.flags.pos_edge = true;
     mcpwm_cap_channel_handle_t channel = nullptr;
@@ -3757,13 +3835,13 @@ static void setup_ptp_pps_loopback(esp_eth_mac_t *mac)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "PTP PPS loopback: capture channel on GPIO %d failed (%s), software measurement is used",
-                 PTPPPSLoopbackPin, esp_err_to_name(err));
+                 loopback_pin, esp_err_to_name(err));
         if (channel != nullptr)
             mcpwm_del_capture_channel(channel);
         return;
     }
     s_ptp_loopback_active.store(true, std::memory_order_release);
-    ESP_LOGI(TAG, "PTP PPS loopback on GPIO %d: the PTP clock is measured against the PPS in hardware", PTPPPSLoopbackPin);
+    ESP_LOGI(TAG, "PTP PPS loopback on GPIO %d: the PTP clock is measured against the PPS in hardware", loopback_pin);
 }
 #endif
 
@@ -4006,32 +4084,35 @@ static bool parse_nmea_uint8_field(const char *sentence, int field_index, uint8_
 static void publish_nmea_gsv_satellite_count(uint32_t now_ms)
 {
 #if MQTT_ENABLED
-    bool has_constellation_specific_group = false;
-    bool has_reportable_group = false;
-    for (const nmea_gsv_group_t &group : s_nmea_gsv_groups)
+    if (s_mqtt_on)
     {
-        if (!group.published || (now_ms - group.last_updated_ms) > NMEA_GSV_GROUP_EXPIRY_MS)
-            continue;
-
-        has_reportable_group = true;
-        if (strcmp(group.talker, "GN") != 0)
+        bool has_constellation_specific_group = false;
+        bool has_reportable_group = false;
+        for (const nmea_gsv_group_t &group : s_nmea_gsv_groups)
         {
-            has_constellation_specific_group = true;
-            break;
+            if (!group.published || (now_ms - group.last_updated_ms) > NMEA_GSV_GROUP_EXPIRY_MS)
+                continue;
+
+            has_reportable_group = true;
+            if (strcmp(group.talker, "GN") != 0)
+            {
+                has_constellation_specific_group = true;
+                break;
+            }
         }
-    }
 
-    if (!has_reportable_group)
-        return;
+        if (!has_reportable_group)
+            return;
 
-    uint16_t total_satellites = 0;
-    for (const nmea_gsv_group_t &group : s_nmea_gsv_groups)
-    {
-        if (group.published && (now_ms - group.last_updated_ms) <= NMEA_GSV_GROUP_EXPIRY_MS &&
-            (!has_constellation_specific_group || strcmp(group.talker, "GN") != 0))
-            total_satellites += group.satellites_in_view;
+        uint16_t total_satellites = 0;
+        for (const nmea_gsv_group_t &group : s_nmea_gsv_groups)
+        {
+            if (group.published && (now_ms - group.last_updated_ms) <= NMEA_GSV_GROUP_EXPIRY_MS &&
+                (!has_constellation_specific_group || strcmp(group.talker, "GN") != 0))
+                total_satellites += group.satellites_in_view;
+        }
+        mqtt_note_satellite_count(static_cast<uint8_t>(std::min<uint16_t>(total_satellites, UINT8_MAX)));
     }
-    mqtt_note_satellite_count(static_cast<uint8_t>(std::min<uint16_t>(total_satellites, UINT8_MAX)));
 #else
     (void)now_ms;
 #endif
@@ -4212,8 +4293,11 @@ static bool current_gnss_timing_is_valid()
 
     uint8_t fix_type = s_gnss.getFixType(status_query_timeout_ms); // 0 - No fix; 1 - Dead reckoning only; 2 - 2D-fix; 3: 3D-fix; 4 - GNSS + dead reckoning combined; 5 - Time only fix
 #if MQTT_ENABLED
-    uint8_t satellites = s_gnss.getSIV(status_query_timeout_ms);
-    mqtt_note_satellite_count(satellites);
+    if (s_mqtt_on)
+    {
+        uint8_t satellites = s_gnss.getSIV(status_query_timeout_ms);
+        mqtt_note_satellite_count(satellites);
+    }
 #endif
     bool gnss_fix_ok = s_gnss.getGnssFixOk(status_query_timeout_ms);
     bool date_valid = s_gnss.getDateValid(status_query_timeout_ms);
@@ -4256,7 +4340,7 @@ static gnss_probe_result_t probe_gnss_uart(uint32_t baud)
     uint8_t ubx_received_checksum_a = 0;
 
     s_gnss_serial.end();
-    s_gnss_serial.begin(baud, SERIAL_8N1, RXPin, TXPin);
+    s_gnss_serial.begin(baud, SERIAL_8N1, s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
     vTaskDelay(pdMS_TO_TICKS(150));
 
     uint32_t start_ms = millis();
@@ -4373,7 +4457,7 @@ static bool try_gnss_begin(uint32_t baud, bool assume_success, bool *saw_serial_
 #endif
 
     s_gnss_serial.end();
-    s_gnss_serial.begin(baud, SERIAL_8N1, RXPin, TXPin);
+    s_gnss_serial.begin(baud, SERIAL_8N1, s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
     vTaskDelay(pdMS_TO_TICKS(150));
 
     bool begin_result = s_gnss.begin(s_gnss_serial, gnssBeginMaxWaitMs, assume_success);
@@ -4578,7 +4662,7 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
     if (saw_any_serial_data)
         ESP_LOGW(TAG, "GNSS serial data was detected, but SparkFun u-blox GNSS v3 could not initialize the module. The module may be an older NEO-6/7/M8 variant.");
     else
-        ESP_LOGW(TAG, "No GNSS serial data was detected on GPIO%d/GPIO%d at any tested baud rate. Check power, TX/RX wiring, and signal levels.", RXPin, TXPin);
+        ESP_LOGW(TAG, "No GNSS serial data was detected on GPIO%d/GPIO%d at any tested baud rate. Check power, TX/RX wiring, and signal levels.", s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
 #endif
 
     return false;
@@ -4710,7 +4794,7 @@ static void setup_pps_input()
 #endif
 
     mcpwm_capture_channel_config_t channel_config{};
-    channel_config.gpio_num = PPSPin;
+    channel_config.gpio_num = s_cfg->gnss_pps_pin;
     channel_config.prescale = 1;
     channel_config.flags.pos_edge = true;
     ESP_ERROR_CHECK(mcpwm_new_capture_channel(s_pps_capture_timer, &channel_config, &s_pps_capture_channel));
@@ -5003,12 +5087,15 @@ static bool wait_for_pps_capture_event(PpsCaptureEvent *event, TickType_t timeou
 static void finish_ntp_request_rate_second()
 {
 #if MQTT_ENABLED
-    const uint32_t requests_this_second = s_ntp_requests_this_second.exchange(0, std::memory_order_relaxed);
-    uint32_t most_requests_per_second = s_ntp_most_requests_per_second.load(std::memory_order_relaxed);
-    while (most_requests_per_second < requests_this_second &&
-           !s_ntp_most_requests_per_second.compare_exchange_weak(most_requests_per_second, requests_this_second,
-                                                                 std::memory_order_relaxed, std::memory_order_relaxed))
+    if (s_mqtt_on)
     {
+        const uint32_t requests_this_second = s_ntp_requests_this_second.exchange(0, std::memory_order_relaxed);
+        uint32_t most_requests_per_second = s_ntp_most_requests_per_second.load(std::memory_order_relaxed);
+        while (most_requests_per_second < requests_this_second &&
+               !s_ntp_most_requests_per_second.compare_exchange_weak(most_requests_per_second, requests_this_second,
+                                                                     std::memory_order_relaxed, std::memory_order_relaxed))
+        {
+        }
     }
 #endif
 }
@@ -5677,7 +5764,7 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
         {
             warned = true;
             ESP_LOGW(TAG, "PTP PPS loopback on GPIO %d: no usable pulses (%lu missing, %lu implausible); is the pin free and unconnected?",
-                     PTPPPSLoopbackPin, static_cast<unsigned long>(st.loopback_missing), static_cast<unsigned long>(st.loopback_rejected));
+                     s_cfg->ptp_loopback_pin, static_cast<unsigned long>(st.loopback_missing), static_cast<unsigned long>(st.loopback_rejected));
         }
     }
     st.last_measurement_ns = measurement_ns;
@@ -5918,7 +6005,10 @@ static void pps_discipline_task(void *parameter)
             last_pps_us = edge_us;
             s_pps_discipline_active.store(true);
 #if MQTT_ENABLED
-            s_pps_pulses.fetch_add(1);
+            if (s_mqtt_on)
+            {
+                s_pps_pulses.fetch_add(1);
+            }
 #endif
             sync_state_note_pps_edge(edge_us);
             finish_ntp_request_rate_second();
@@ -6309,7 +6399,7 @@ static void setup_gnss()
     uint32_t highest_candidate_baud = get_highest_candidate_gnss_baud();
 #else
     bool first_time_initial_setup = false;
-    uint32_t highest_candidate_baud = baudRateForUbloxNonCompliantGNSSReceiver;
+    uint32_t highest_candidate_baud = s_cfg->gnss_baud;
 #endif
 
 #if DEBUG_ENABLED
@@ -6446,7 +6536,7 @@ static void setup_gnss()
     bool assume_success = false;
 
     s_gnss_serial.end();
-    s_gnss_serial.begin(baud, SERIAL_8N1, RXPin, TXPin);
+    s_gnss_serial.begin(baud, SERIAL_8N1, s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
     vTaskDelay(pdMS_TO_TICKS(150));
 
     bool begin_result = s_gnss.begin(s_gnss_serial, gnssBeginMaxWaitMs, assume_success);
@@ -6709,6 +6799,9 @@ static void mqtt_note_ntp_request(const struct sockaddr_storage &source_address)
 
     s_mqtt_client_table_overflown = true;
 
+#else
+    (void)address;
+    (void)address_size;
 #endif
 
     xSemaphoreGive(s_mqtt_stats_mutex);
@@ -6805,7 +6898,7 @@ static bool mqtt_tf_write_report(const char *payload)
 
 static bool mqtt_enqueue_report(const char *payload)
 {
-    if (MQTT_QOS == 0)
+    if (MQTT_QOS == 0 || s_mqtt_reports == nullptr)
         return false;
 
     if (s_tf_queue_available.load())
@@ -6862,7 +6955,7 @@ static bool mqtt_publish_queued_report(const char *payload)
 
 static void mqtt_send_queued_messages()
 {
-    if (MQTT_QOS == 0 || !s_mqtt_connected.load() || s_mqtt_queued_messages_count.load() == 0)
+    if (MQTT_QOS == 0 || !s_mqtt_connected.load() || s_mqtt_queued_messages_count.load() == 0 || s_mqtt_reports == nullptr)
         return;
 
     if (!s_tf_queue_available.load())
@@ -7180,7 +7273,9 @@ static void mqtt_publish_final_report()
     if (!s_mqtt_connected.load())
         return;
 
-    mqtt_build_report(s_mqtt_final_payload, sizeof(s_mqtt_final_payload));
+    if (s_mqtt_final_payload == nullptr)
+        return;
+    mqtt_build_report(s_mqtt_final_payload, MQTT_REPORT_SIZE);
 
     s_mqtt_restart_publish_id.store(-1);
     s_mqtt_restart_publish_completed.store(false);
@@ -7279,7 +7374,7 @@ static void mqtt_service_task(void *parameter)
 
         if (xTaskGetTickCount() >= next_report)
         {
-            mqtt_build_report(s_mqtt_payload, sizeof(s_mqtt_payload));
+            mqtt_build_report(s_mqtt_payload, MQTT_MAX_REPORT_SIZE);
             if (!mqtt_publish_report(s_mqtt_payload))
                 mqtt_enqueue_report(s_mqtt_payload);
             next_report += pdMS_TO_TICKS(MQTTReportingPeriod * 1000UL);
@@ -7329,79 +7424,82 @@ static void controlled_restart(const char *reason)
 #endif
 
 #if MQTT_ENABLED
-
-    mqtt_publish_final_report();
-
-    char payload[128] = "";
-    snprintf(payload, sizeof(payload), "{\"event\":\"controlled_restart\",\"reason\":\"%s\"}", reason);
-
-    bool published = false;
-    if (s_mqtt_connected.load())
+    if (s_mqtt_on)
     {
-        if (MQTT_QOS == 0)
+
+        mqtt_publish_final_report();
+
+        char payload[128] = "";
+        snprintf(payload, sizeof(payload), "{\"event\":\"controlled_restart\",\"reason\":\"%s\"}", reason);
+
+        bool published = false;
+        if (s_mqtt_connected.load())
         {
-            published = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain) >= 0;
-            if (published)
-                vTaskDelay(pdMS_TO_TICKS(MQTT_RESTART_PUBLISH_TIMEOUT_MS));
+            if (MQTT_QOS == 0)
+            {
+                published = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain) >= 0;
+                if (published)
+                    vTaskDelay(pdMS_TO_TICKS(MQTT_RESTART_PUBLISH_TIMEOUT_MS));
+            }
+            else
+            {
+                s_mqtt_restart_publish_id.store(-1);
+                s_mqtt_restart_publish_completed.store(false);
+                int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain);
+                if (message_id >= 0)
+                {
+                    s_mqtt_restart_publish_id.store(message_id);
+                    TickType_t wait_started = xTaskGetTickCount();
+                    while (!s_mqtt_restart_publish_completed.load() && s_mqtt_connected.load() &&
+                           (xTaskGetTickCount() - wait_started) < pdMS_TO_TICKS(MQTT_RESTART_PUBLISH_TIMEOUT_MS))
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    published = s_mqtt_restart_publish_completed.load();
+                }
+                s_mqtt_restart_publish_id.store(-1);
+            }
+        }
+
+        if (published)
+        {
+#if DEBUG_ENABLED
+            ESP_LOGI(TAG, "Published from controlled restart:");
+            ESP_LOGI(TAG, "%s", payload);
+            vTaskDelay(pdMS_TO_TICKS(200));
+#endif
         }
         else
         {
-            s_mqtt_restart_publish_id.store(-1);
-            s_mqtt_restart_publish_completed.store(false);
-            int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain);
-            if (message_id >= 0)
+
+            if (MQTT_QOS > 0)
             {
-                s_mqtt_restart_publish_id.store(message_id);
-                TickType_t wait_started = xTaskGetTickCount();
-                while (!s_mqtt_restart_publish_completed.load() && s_mqtt_connected.load() &&
-                       (xTaskGetTickCount() - wait_started) < pdMS_TO_TICKS(MQTT_RESTART_PUBLISH_TIMEOUT_MS))
-                    vTaskDelay(pdMS_TO_TICKS(10));
-                published = s_mqtt_restart_publish_completed.load();
-            }
-            s_mqtt_restart_publish_id.store(-1);
-        }
-    }
-
-    if (published)
-    {
-#if DEBUG_ENABLED
-        ESP_LOGI(TAG, "Published from controlled restart:");
-        ESP_LOGI(TAG, "%s", payload);
-        vTaskDelay(pdMS_TO_TICKS(200));
-#endif
-    }
-    else
-    {
-
-        if (MQTT_QOS > 0)
-        {
-            if (!mqtt_enqueue_report(payload))
-            {
-#if DEBUG_ENABLED
-                ESP_LOGW(TAG, "Failed to enqueue restart report, falling back to NVS storage");
-                vTaskDelay(pdMS_TO_TICKS(200));
-#endif
-
-                nvs_handle_t handle = 0;
-                esp_err_t result = nvs_open(restart_NVS_NAMESPACE, NVS_READWRITE, &handle);
-                if (result == ESP_OK)
+                if (!mqtt_enqueue_report(payload))
                 {
-                    result = nvs_set_str(handle, restart_NVS_KEY_PENDING, payload);
-                    if (result == ESP_OK)
-                        result = nvs_commit(handle);
-                    nvs_close(handle);
-                }
-
 #if DEBUG_ENABLED
-
-                if (result != ESP_OK)
-                {
-                    ESP_LOGE(TAG, "Restart notification could not be published or queued:");
-                    ESP_LOGE(TAG, "%s", payload);
+                    ESP_LOGW(TAG, "Failed to enqueue restart report, falling back to NVS storage");
                     vTaskDelay(pdMS_TO_TICKS(200));
-                }
+#endif
+
+                    nvs_handle_t handle = 0;
+                    esp_err_t result = nvs_open(restart_NVS_NAMESPACE, NVS_READWRITE, &handle);
+                    if (result == ESP_OK)
+                    {
+                        result = nvs_set_str(handle, restart_NVS_KEY_PENDING, payload);
+                        if (result == ESP_OK)
+                            result = nvs_commit(handle);
+                        nvs_close(handle);
+                    }
+
+#if DEBUG_ENABLED
+
+                    if (result != ESP_OK)
+                    {
+                        ESP_LOGE(TAG, "Restart notification could not be published or queued:");
+                        ESP_LOGE(TAG, "%s", payload);
+                        vTaskDelay(pdMS_TO_TICKS(200));
+                    }
 
 #endif
+                }
             }
         }
     }
@@ -7420,186 +7518,214 @@ static void setup_mqtt_tf_queue()
 {
 
 #if MQTT_ENABLED
-
-    if (MQTT_QOS == 0)
-        return;
-
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    sd_pwr_ctrl_ldo_config_t ldo_config{};
-    ldo_config.ldo_chan_id = 4;
-    sd_pwr_ctrl_handle_t power_control = nullptr;
-    esp_err_t result = sd_pwr_ctrl_new_on_chip_ldo(&ldo_config, &power_control);
-    if (result != ESP_OK)
+    if (s_mqtt_on)
     {
-#if DEBUG_ENABLED
-        ESP_LOGW(TAG, "Unable to enable TF card power: %s. Queued MQTT messages will be stored in ram.", esp_err_to_name(result));
-#endif
-        return;
-    }
-    host.pwr_ctrl_handle = power_control;
-    auto cleanup_power_control = [&power_control]()
-    {
-        if (power_control != nullptr)
+        // Report buffers: only allocated when MQTT is on for this boot
+        s_mqtt_reports = new (std::nothrow) mqtt_report_t[MQTT_REPORT_QUEUE_DEPTH]();
+        s_mqtt_payload = static_cast<char *>(calloc(MQTT_MAX_REPORT_SIZE, 1));
+        s_mqtt_final_payload = static_cast<char *>(calloc(MQTT_REPORT_SIZE, 1));
+        s_mqtt_clients = new (std::nothrow) mqtt_client_request_t[MQTT_TF_Client_Limit]();
+        if (s_mqtt_reports == nullptr || s_mqtt_payload == nullptr || s_mqtt_final_payload == nullptr || s_mqtt_clients == nullptr)
         {
-            sd_pwr_ctrl_del_on_chip_ldo(power_control);
-            power_control = nullptr;
+            ESP_LOGE(TAG, "MQTT: not enough memory for the report buffers, MQTT is off for this start");
+            delete[] s_mqtt_reports;
+            free(s_mqtt_payload);
+            free(s_mqtt_final_payload);
+            delete[] s_mqtt_clients;
+            s_mqtt_reports = nullptr;
+            s_mqtt_payload = nullptr;
+            s_mqtt_final_payload = nullptr;
+            s_mqtt_clients = nullptr;
+            s_mqtt_setup_failed.store(true);
+            s_mqtt_on = false;
+            return;
         }
-    };
 
-    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot.width = 4;
-    slot.clk = static_cast<gpio_num_t>(TFCardClockPin);
-    slot.cmd = static_cast<gpio_num_t>(TFCardCommandPin);
-    slot.d0 = static_cast<gpio_num_t>(TFCardData0Pin);
-    slot.d1 = static_cast<gpio_num_t>(TFCardData1Pin);
-    slot.d2 = static_cast<gpio_num_t>(TFCardData2Pin);
-    slot.d3 = static_cast<gpio_num_t>(TFCardData3Pin);
-    slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-    esp_vfs_fat_mount_config_t mount_config{};
-    mount_config.format_if_mount_failed = false;
-    mount_config.max_files = 4;
-    mount_config.allocation_unit_size = 16 * 1024;
+        if (MQTT_QOS == 0)
+            return;
 
-    result = esp_vfs_fat_sdmmc_mount(TF_MOUNT_POINT, &host, &slot, &mount_config, &s_tf_card);
-    if (result != ESP_OK)
-    {
-#if DEBUG_ENABLED
-        ESP_LOGW(TAG, "TF card unavailable: %s. Queued MQTT messages will be stored in ram.", esp_err_to_name(result));
-#endif
-        cleanup_power_control();
-        return;
-    }
-
-    FATFS *filesystem = nullptr;
-    DWORD free_clusters = 0;
-    if (f_getfree("0:", &free_clusters, &filesystem) != FR_OK || filesystem == nullptr || filesystem->fs_type != FS_FAT32)
-    {
-#if DEBUG_ENABLED
-        ESP_LOGW(TAG, "TF card is not FAT32. Queued MQTT messages will be stored in ram.");
-#endif
-        esp_vfs_fat_sdcard_unmount(TF_MOUNT_POINT, s_tf_card);
-        s_tf_card = nullptr;
-        cleanup_power_control();
-        return;
-    }
-
-    mqtt_log_tf_directory(TF_MOUNT_POINT);
-    bool queue_directory_created = mkdir(TF_QUEUE_DIRECTORY, 0775) == 0;
-    if (!queue_directory_created && errno != EEXIST)
-    {
-#if DEBUG_ENABLED
-        ESP_LOGW(TAG, "Unable to create TF MQTT queue directory. Queued MQTT messages will be stored in ram.");
-#endif
-        esp_vfs_fat_sdcard_unmount(TF_MOUNT_POINT, s_tf_card);
-        s_tf_card = nullptr;
-        cleanup_power_control();
-        return;
-    }
-#if DEBUG_ENABLED
-    if (queue_directory_created)
-        ESP_LOGI(TAG, "%s", TF_QUEUE_DIRECTORY);
-#endif
-
-    char probe_path[128] = "";
-    snprintf(probe_path, sizeof(probe_path), "%s/PROBE.TMP", TF_QUEUE_DIRECTORY);
-    FILE *probe = fopen(probe_path, "wb+");
-    char probe_value = 0;
-    bool usable = probe != nullptr && fwrite("T", 1, 1, probe) == 1 && fflush(probe) == 0 &&
-                  fseek(probe, 0, SEEK_SET) == 0 && fread(&probe_value, 1, 1, probe) == 1 && probe_value == 'T';
-    if (probe != nullptr)
-        fclose(probe);
-    unlink(probe_path);
-    if (!usable)
-    {
-#if DEBUG_ENABLED
-        ESP_LOGW(TAG, "TF card read/write verification failed. Queued MQTT messages will be stored in ram.");
-#endif
-        esp_vfs_fat_sdcard_unmount(TF_MOUNT_POINT, s_tf_card);
-        s_tf_card = nullptr;
-        cleanup_power_control();
-        return;
-    }
-
-    std::vector<std::string> files = mqtt_tf_queue_files();
-    for (const std::string &path : files)
-    {
-        unsigned long high = 0;
-        unsigned long low = 0;
-        if (sscanf(path.c_str(), "/tfcard/Queue/R%7lX.%3lX", &high, &low) == 2)
+        sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+        sd_pwr_ctrl_ldo_config_t ldo_config{};
+        ldo_config.ldo_chan_id = 4;
+        sd_pwr_ctrl_handle_t power_control = nullptr;
+        esp_err_t result = sd_pwr_ctrl_new_on_chip_ldo(&ldo_config, &power_control);
+        if (result != ESP_OK)
         {
-            uint64_t sequence = (static_cast<uint64_t>(high) << 12) | low;
-            if (sequence >= s_tf_queue_next_sequence)
-                s_tf_queue_next_sequence = sequence + 1;
-        }
-    }
-    s_mqtt_queued_messages_count.store(files.size());
-    s_tf_queue_available.store(true);
 #if DEBUG_ENABLED
-    ESP_LOGI(TAG, "TF card MQTT queue enabled");
-    if (files.empty())
-        ESP_LOGI(TAG, "No queued messages found");
+            ESP_LOGW(TAG, "Unable to enable TF card power: %s. Queued MQTT messages will be stored in ram.", esp_err_to_name(result));
+#endif
+            return;
+        }
+        host.pwr_ctrl_handle = power_control;
+        auto cleanup_power_control = [&power_control]()
+        {
+            if (power_control != nullptr)
+            {
+                sd_pwr_ctrl_del_on_chip_ldo(power_control);
+                power_control = nullptr;
+            }
+        };
+
+        sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+        slot.width = 4;
+        slot.clk = static_cast<gpio_num_t>(TFCardClockPin);
+        slot.cmd = static_cast<gpio_num_t>(TFCardCommandPin);
+        slot.d0 = static_cast<gpio_num_t>(TFCardData0Pin);
+        slot.d1 = static_cast<gpio_num_t>(TFCardData1Pin);
+        slot.d2 = static_cast<gpio_num_t>(TFCardData2Pin);
+        slot.d3 = static_cast<gpio_num_t>(TFCardData3Pin);
+        slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+        esp_vfs_fat_mount_config_t mount_config{};
+        mount_config.format_if_mount_failed = false;
+        mount_config.max_files = 4;
+        mount_config.allocation_unit_size = 16 * 1024;
+
+        result = esp_vfs_fat_sdmmc_mount(TF_MOUNT_POINT, &host, &slot, &mount_config, &s_tf_card);
+        if (result != ESP_OK)
+        {
+#if DEBUG_ENABLED
+            ESP_LOGW(TAG, "TF card unavailable: %s. Queued MQTT messages will be stored in ram.", esp_err_to_name(result));
+#endif
+            cleanup_power_control();
+            return;
+        }
+
+        FATFS *filesystem = nullptr;
+        DWORD free_clusters = 0;
+        if (f_getfree("0:", &free_clusters, &filesystem) != FR_OK || filesystem == nullptr || filesystem->fs_type != FS_FAT32)
+        {
+#if DEBUG_ENABLED
+            ESP_LOGW(TAG, "TF card is not FAT32. Queued MQTT messages will be stored in ram.");
+#endif
+            esp_vfs_fat_sdcard_unmount(TF_MOUNT_POINT, s_tf_card);
+            s_tf_card = nullptr;
+            cleanup_power_control();
+            return;
+        }
+
+        mqtt_log_tf_directory(TF_MOUNT_POINT);
+        bool queue_directory_created = mkdir(TF_QUEUE_DIRECTORY, 0775) == 0;
+        if (!queue_directory_created && errno != EEXIST)
+        {
+#if DEBUG_ENABLED
+            ESP_LOGW(TAG, "Unable to create TF MQTT queue directory. Queued MQTT messages will be stored in ram.");
+#endif
+            esp_vfs_fat_sdcard_unmount(TF_MOUNT_POINT, s_tf_card);
+            s_tf_card = nullptr;
+            cleanup_power_control();
+            return;
+        }
+#if DEBUG_ENABLED
+        if (queue_directory_created)
+            ESP_LOGI(TAG, "%s", TF_QUEUE_DIRECTORY);
 #endif
 
+        char probe_path[128] = "";
+        snprintf(probe_path, sizeof(probe_path), "%s/PROBE.TMP", TF_QUEUE_DIRECTORY);
+        FILE *probe = fopen(probe_path, "wb+");
+        char probe_value = 0;
+        bool usable = probe != nullptr && fwrite("T", 1, 1, probe) == 1 && fflush(probe) == 0 &&
+                      fseek(probe, 0, SEEK_SET) == 0 && fread(&probe_value, 1, 1, probe) == 1 && probe_value == 'T';
+        if (probe != nullptr)
+            fclose(probe);
+        unlink(probe_path);
+        if (!usable)
+        {
+#if DEBUG_ENABLED
+            ESP_LOGW(TAG, "TF card read/write verification failed. Queued MQTT messages will be stored in ram.");
+#endif
+            esp_vfs_fat_sdcard_unmount(TF_MOUNT_POINT, s_tf_card);
+            s_tf_card = nullptr;
+            cleanup_power_control();
+            return;
+        }
+
+        std::vector<std::string> files = mqtt_tf_queue_files();
+        for (const std::string &path : files)
+        {
+            unsigned long high = 0;
+            unsigned long low = 0;
+            if (sscanf(path.c_str(), "/tfcard/Queue/R%7lX.%3lX", &high, &low) == 2)
+            {
+                uint64_t sequence = (static_cast<uint64_t>(high) << 12) | low;
+                if (sequence >= s_tf_queue_next_sequence)
+                    s_tf_queue_next_sequence = sequence + 1;
+            }
+        }
+        s_mqtt_queued_messages_count.store(files.size());
+        s_tf_queue_available.store(true);
+#if DEBUG_ENABLED
+        ESP_LOGI(TAG, "TF card MQTT queue enabled");
+        if (files.empty())
+            ESP_LOGI(TAG, "No queued messages found");
+#endif
+
+    }
 #endif
 }
 
 static void setup_mqtt()
 {
 #if MQTT_ENABLED
+    if (s_mqtt_on)
+    {
 
-    // static assertions report the error if the condition is not true at compile time
-    static_assert(MQTT_QOS >= 0, "MQTT_QOS must be 0, 1, or 2");
-    static_assert(MQTT_QOS <= 2, "MQTT_QOS must be 0, 1, or 2");
+        // static assertions report the error if the condition is not true at compile time
+        static_assert(MQTT_QOS >= 0, "MQTT_QOS must be 0, 1, or 2");
+        static_assert(MQTT_QOS <= 2, "MQTT_QOS must be 0, 1, or 2");
 
-    if (MQTTServerIPAddress[0] == '\0' || MQTT_QOS < 0 || MQTT_QOS > 2)
-    {
-        s_mqtt_setup_failed.store(true);
-        return;
-    }
+        if (s_cfg->mqtt_uri[0] == '\0' || s_mqtt_payload == nullptr || MQTT_QOS < 0 || MQTT_QOS > 2)
+        {
+            s_mqtt_setup_failed.store(true);
+            return;
+        }
 
-    s_mqtt_stats_mutex = xSemaphoreCreateMutex();
-    s_mqtt_ntp_event_queue = xQueueCreate(MQTT_NTP_EVENT_QUEUE_DEPTH, sizeof(struct sockaddr_storage));
-    if (s_mqtt_stats_mutex == nullptr || s_mqtt_ntp_event_queue == nullptr)
-    {
-        s_mqtt_setup_failed.store(true);
-        return;
-    }
-    snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "mqtt://%s:%u", MQTTServerIPAddress, static_cast<unsigned int>(MQTTPort));
-    snprintf(s_mqtt_report_topic, sizeof(s_mqtt_report_topic), "%s/report", MQTTTopic);
-    snprintf(s_mqtt_status_topic, sizeof(s_mqtt_status_topic), "%s/status", MQTTTopic);
+        s_mqtt_stats_mutex = xSemaphoreCreateMutex();
+        s_mqtt_ntp_event_queue = xQueueCreate(MQTT_NTP_EVENT_QUEUE_DEPTH, sizeof(struct sockaddr_storage));
+        if (s_mqtt_stats_mutex == nullptr || s_mqtt_ntp_event_queue == nullptr)
+        {
+            s_mqtt_setup_failed.store(true);
+            return;
+        }
+        snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "%s", s_cfg->mqtt_uri); // validated: mqtt:// or mqtts://, host and port
+        snprintf(s_mqtt_report_topic, sizeof(s_mqtt_report_topic), "%s/report", MQTTTopic);
+        snprintf(s_mqtt_status_topic, sizeof(s_mqtt_status_topic), "%s/status", MQTTTopic);
 
-    esp_mqtt_client_config_t config{};
-    config.broker.address.uri = s_mqtt_uri;
-    config.credentials.username = MQTTUsername;
-    config.credentials.authentication.password = MQTTPassword;
-    config.session.keepalive = MQTTFrequencyOfKeepAliveRequest;
-    config.session.last_will.topic = s_mqtt_status_topic;
-    config.session.last_will.msg = "offline";
-    config.session.last_will.qos = MQTT_QOS;
-    config.session.last_will.retain = 1;
-    config.task.priority = 23;
-    s_mqtt_client = esp_mqtt_client_init(&config);
-    if (s_mqtt_client == nullptr)
-    {
-        s_mqtt_setup_failed.store(true);
-        return;
-    }
-    if (esp_mqtt_client_register_event(s_mqtt_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr) != ESP_OK)
-    {
-        s_mqtt_setup_failed.store(true);
-        return;
-    }
-    if (esp_mqtt_client_start(s_mqtt_client) != ESP_OK)
-    {
-        s_mqtt_setup_failed.store(true);
-        return;
-    }
+        esp_mqtt_client_config_t config{};
+        config.broker.address.uri = s_mqtt_uri;
+        config.credentials.username = s_cfg->mqtt_username;
+        config.credentials.authentication.password = s_cfg->mqtt_password;
+        if (strncmp(s_mqtt_uri, "mqtts://", 8) == 0)
+            config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach; // broker certificate checked against the IDF CA bundle
+        config.session.keepalive = MQTTFrequencyOfKeepAliveRequest;
+        config.session.last_will.topic = s_mqtt_status_topic;
+        config.session.last_will.msg = "offline";
+        config.session.last_will.qos = MQTT_QOS;
+        config.session.last_will.retain = 1;
+        config.task.priority = 23;
+        s_mqtt_client = esp_mqtt_client_init(&config);
+        if (s_mqtt_client == nullptr)
+        {
+            s_mqtt_setup_failed.store(true);
+            return;
+        }
+        if (esp_mqtt_client_register_event(s_mqtt_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr) != ESP_OK)
+        {
+            s_mqtt_setup_failed.store(true);
+            return;
+        }
+        if (esp_mqtt_client_start(s_mqtt_client) != ESP_OK)
+        {
+            s_mqtt_setup_failed.store(true);
+            return;
+        }
 
 #if DEBUG_ENABLED
-    ESP_LOGI(TAG, "MQTT setup. Keep alive set at %u seconds", MQTTFrequencyOfKeepAliveRequest);
+        ESP_LOGI(TAG, "MQTT setup. Keep alive set at %u seconds", MQTTFrequencyOfKeepAliveRequest);
 #endif
-    if (xTaskCreatePinnedToCore(mqtt_service_task, "mqtt_service", MQTT_Service_Task_Stack_Size, nullptr, 5, nullptr, 0) != pdPASS)
-        s_mqtt_setup_failed.store(true);
+        if (xTaskCreatePinnedToCore(mqtt_service_task, "mqtt_service", MQTT_Service_Task_Stack_Size, nullptr, 5, nullptr, 0) != pdPASS)
+            s_mqtt_setup_failed.store(true);
+    }
 #endif
 }
 
@@ -7611,7 +7737,7 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
 #if DEBUG_ENABLED
         ESP_LOGI(TAG, "Ethernet driver started");
 #endif
-        ETH.setHostname(DeviceName);
+        ETH.setHostname(s_hostname);
         display_line(1, "Ethernet started");
         break;
     case ARDUINO_EVENT_ETH_CONNECTED:
@@ -7624,9 +7750,12 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
             refresh_network_ipv6_addresses();
         }
 #if MQTT_ENABLED
-        s_eth_link_connected_us.store(esp_timer_get_time());
-        if (s_mqtt_has_connected.load(std::memory_order_acquire))
-            s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        if (s_mqtt_on)
+        {
+            s_eth_link_connected_us.store(esp_timer_get_time());
+            if (s_mqtt_has_connected.load(std::memory_order_acquire))
+                s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        }
 #endif
 #if DEBUG_ENABLED
         ESP_LOGI(TAG, "Ethernet link connected");
@@ -7639,9 +7768,18 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
             break;
         s_ipv4_ever_acquired.store(true, std::memory_order_relaxed);
         set_network_ipv4_address(info.got_ip.ip_info.ip);
+        {
+            // A DHCP lease replaces the DNS servers: the servers of the settings (if any) take precedence
+            char dns_servers[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
+            web_settings_get_running_dns(dns_servers);
+            web_net_reapply_dns(ETH.netif(), dns_servers);
+        }
 #if MQTT_ENABLED
-        if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
-            s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        if (s_mqtt_on)
+        {
+            if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
+                s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        }
 #endif
 #if DEBUG_ENABLED
         ESP_LOGI(TAG,
@@ -7659,8 +7797,11 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
             break;
         const bool routable_ipv6_acquired = set_network_ipv6_address(info.got_ip6.ip6_info.ip);
 #if MQTT_ENABLED
-        if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
-            s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        if (s_mqtt_on)
+        {
+            if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
+                s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        }
 #endif
 #if DEBUG_ENABLED
         const network_address_snapshot_t addresses = get_network_address_snapshot();
@@ -7690,7 +7831,10 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
         s_first_ntp_input_us.store(0, std::memory_order_relaxed);
         s_last_ntp_response_us.store(0, std::memory_order_relaxed);
 #if MQTT_ENABLED
-        mqtt_note_ethernet_disconnected();
+        if (s_mqtt_on)
+        {
+            mqtt_note_ethernet_disconnected();
+        }
 #endif
 #if DEBUG_ENABLED
         ESP_LOGW(TAG, "Ethernet link disconnected");
@@ -7705,7 +7849,10 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
         s_first_ntp_input_us.store(0, std::memory_order_relaxed);
         s_last_ntp_response_us.store(0, std::memory_order_relaxed);
 #if MQTT_ENABLED
-        mqtt_note_ethernet_disconnected();
+        if (s_mqtt_on)
+        {
+            mqtt_note_ethernet_disconnected();
+        }
 #endif
 #if DEBUG_ENABLED
         ESP_LOGW(TAG, "Ethernet driver stopped");
@@ -7718,65 +7865,6 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
     default:
         break;
     }
-}
-
-// Apply the optional static IP address configuration from ESP32TimeServerSettings.h.
-// When StaticIPAddress is empty this is a no-op and the Ethernet interface falls back
-// to DHCP (the default behaviour). Returns true when a static IP was applied, false otherwise.
-static bool configure_static_ip()
-{
-    // An empty StaticIPAddress means DHCP should be used - nothing to do here
-    if (StaticIPAddress[0] == '\0')
-        return false;
-
-    IPAddress local_ip, gateway, subnet;
-    if (!local_ip.fromString(StaticIPAddress))
-    {
-        ESP_LOGE(TAG, "Configured StaticIPAddress is invalid: %s", StaticIPAddress);
-        return false;
-    }
-    if (!gateway.fromString(Gateway))
-    {
-        ESP_LOGE(TAG, "Configured Gateway is invalid: %s", Gateway);
-        return false;
-    }
-    if (!subnet.fromString(SubnetMask))
-    {
-        ESP_LOGE(TAG, "Configured SubnetMask is invalid: %s", SubnetMask);
-        return false;
-    }
-
-    // DNS servers are optional; default to 0.0.0.0 (unset) when left blank
-    IPAddress dns1, dns2;
-    if (PrimaryDNS[0] != '\0')
-    {
-        if (!dns1.fromString(PrimaryDNS))
-        {
-            ESP_LOGE(TAG, "Configured PrimaryDNS is invalid: %s", PrimaryDNS);
-            return false;
-        }
-    }
-    if (SecondaryDNS[0] != '\0')
-    {
-        if (!dns2.fromString(SecondaryDNS))
-        {
-            ESP_LOGE(TAG, "Configured SecondaryDNS is invalid: %s", SecondaryDNS);
-            return false;
-        }
-    }
-
-    if (!ETH.config(local_ip, gateway, subnet, dns1, dns2))
-    {
-        ESP_LOGE(TAG, "ETH.config() failed to apply the static IP configuration");
-        return false;
-    }
-
-#if DEBUG_ENABLED
-    ESP_LOGI(TAG,
-             "Static IP configuration applied: ip=%s, mask=%s, gw=%s",
-             StaticIPAddress, SubnetMask, Gateway);
-#endif
-    return true;
 }
 
 static bool start_ethernet_driver()
@@ -7863,9 +7951,15 @@ static void setup_ethernet()
         ESP_LOGE(TAG, "Unable to configure Ethernet hardware timestamping");
     }
 
-    // Apply the optional static IP address (if configured). When StaticIPAddress is
-    // left empty this is a no-op and DHCP is used as usual.
-    bool static_ip_applied = configure_static_ip();
+    // Network settings of this boot (web settings, defaults from ESP32TimeServerSettings.h): IPv4 DHCP or static,
+    // IPv6 SLAAC and an optional static IPv6 address with gateway, DNS servers
+    if (!web_net_apply(ETH.netif(), *s_cfg, nullptr))
+        ESP_LOGE(TAG, "Some network settings could not be applied");
+    const bool static_ip_applied = !s_cfg->ipv4_dhcp;
+
+    // The web admin page is started here (before the wait below), so it is reachable even if the GNSS setup
+    // never finishes, e.g. because of wrong GNSS pins
+    web_admin_start();
 
 #if DEBUG_ENABLED
     ESP_LOGI(TAG,
@@ -7905,18 +7999,6 @@ void write_opening_messages_to_the_console()
     ESP_LOGW(TAG, "Debug: Disabled");
 #endif
 
-#if RBG_LED_KY_016_MODULE_ENABLED || RBG_LED_WS2812_MODULE_ENABLED
-    ESP_LOGI(TAG, "LED support: Enabled");
-#else
-    ESP_LOGW(TAG, "LED support: Disabled");
-#endif
-
-#if LIQUID_CRYSTAL_DISPLAY_ENABLED
-    ESP_LOGI(TAG, "LCD support: Enabled");
-#else
-    ESP_LOGW(TAG, "LCD support: Disabled");
-#endif
-
 #if UPTIME_RESTART_BUTTON_ENABLED
     ESP_LOGI(TAG, "Uptime / Reset button support: Enabled");
 #else
@@ -7929,43 +8011,58 @@ void write_opening_messages_to_the_console()
     ESP_LOGW(TAG, "Over the Ethernet update support: Disabled");
 #endif
 
-#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
-    ESP_LOGI(TAG, "Symmetric-key authentication support: Enabled");
-#else
-    ESP_LOGW(TAG, "Symmetric-key authentication support: Disabled");
-#endif
+    ESP_LOGI(TAG, "");
+}
 
-#if MQTT_ENABLED
-    ESP_LOGI(TAG, "MQTT support: Enabled");
+// Features that the web admin can switch (state of this boot; written after the settings were loaded)
+void write_settings_messages_to_the_console()
+{
+    // Note: like the opening messages these are always written
+    const web_settings_t &cfg = *s_cfg;
+    if (s_led_type != web_led_type_t::none)
+        ESP_LOGI(TAG, "LED support: Enabled (%s, brightness %u %%)", s_led_type == web_led_type_t::ky016 ? "KY-016" : "WS2812",
+                 static_cast<unsigned int>(cfg.led_brightness_percent));
+    else
+        ESP_LOGW(TAG, "LED support: Disabled");
 
+    if (s_lcd_on)
+        ESP_LOGI(TAG, "LCD support: Enabled");
+    else
+        ESP_LOGW(TAG, "LCD support: Disabled");
+
+    if (cfg.ntp_auth_enabled)
+        ESP_LOGI(TAG, "Symmetric-key authentication support: Enabled (%s)", cfg.ntp_key_override ? "key of the web settings" : "compiled keys");
+    else
+        ESP_LOGW(TAG, "Symmetric-key authentication support: Disabled");
+
+    if (s_mqtt_on)
+    {
+        ESP_LOGI(TAG, "MQTT support: Enabled");
 #if MQTT_CLIENT_REPORTING_ENABLED
-    ESP_LOGI(TAG, "MQTT client reporting: Enabled");
+        ESP_LOGI(TAG, "MQTT client reporting: Enabled");
 #else
-    ESP_LOGW(TAG, "MQTT client reporting: Disabled");
+        ESP_LOGW(TAG, "MQTT client reporting: Disabled");
 #endif
-
 #if MQTT_MEMORY_REPORTING_ENABLED
-    ESP_LOGI(TAG, "MQTT memory reporting: Enabled");
+        ESP_LOGI(TAG, "MQTT memory reporting: Enabled");
 #else
-    ESP_LOGW(TAG, "MQTT memory reporting: Disabled");
+        ESP_LOGW(TAG, "MQTT memory reporting: Disabled");
 #endif
-
 #if MQTT_HISTORICAL_REPORTING_ENABLED
-    ESP_LOGI(TAG, "MQTT historical reporting: Enabled");
+        ESP_LOGI(TAG, "MQTT historical reporting: Enabled");
 #else
-    ESP_LOGW(TAG, "MQTT historical reporting: Disabled");
+        ESP_LOGW(TAG, "MQTT historical reporting: Disabled");
 #endif
-
-#else
-    ESP_LOGW(TAG, "MQTT support: Disabled");
-#endif
-
 #if MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED
-    ESP_LOGI(TAG, "MQTT distinguish authenticated and unauthenticated reporting: Enabled");
+        ESP_LOGI(TAG, "MQTT distinguish authenticated and unauthenticated reporting: Enabled");
 #else
-    ESP_LOGW(TAG, "MQTT distinguish authenticated and unauthenticated reporting: Disabled");
+        ESP_LOGW(TAG, "MQTT distinguish authenticated and unauthenticated reporting: Disabled");
 #endif
+    }
+    else
+        ESP_LOGW(TAG, "MQTT support: Disabled");
 
+    ESP_LOGI(TAG, "Host name: %s", cfg.fqdn);
     ESP_LOGI(TAG, "");
 }
 
@@ -7974,15 +8071,27 @@ void setup_NVS_storage(void)
     if (!initialize_nvs_storage())
     {
         ESP_LOGE(TAG, "NVS initialization failed. GNSS module settings persistence is unavailable.");
-        return;
     }
-
+    else
+    {
 #if PPS_ISR_LATENCY_AUTO
-    load_pps_isr_latency_from_nvs();
+        load_pps_isr_latency_from_nvs();
 #endif
 #if PTP_LATENCY_AUTO
-    load_ptp_write_latency_from_nvs();
+        load_ptp_write_latency_from_nvs();
 #endif
+    }
+
+    // Settings of this boot: compiled defaults, saved web settings, one-shot web settings (without NVS: defaults)
+    web_settings_load_boot();
+    s_cfg = &web_settings_boot();
+    s_lcd_on = s_cfg->lcd_enabled;
+    s_mqtt_on = s_cfg->mqtt_enabled;
+    s_led_type = s_cfg->led_type;
+    web_settings_hostname(*s_cfg, s_hostname, sizeof(s_hostname));
+    s_live_settings_mutex = xSemaphoreCreateMutex();
+    ntp_auth_initialize();
+    app_apply_live_settings(*s_cfg);
 }
 
 void setup_mutexes_and_semaphores(void)
@@ -8005,70 +8114,74 @@ void setup_mutexes_and_semaphores(void)
 #endif
 }
 
+// RGB LED module of the settings (KY-016 or WS2812). Nothing is set up when no module is selected.
+// A driver error switches the LED off for this boot instead of stopping the server.
 static void setup_the_RGB_LED()
 {
-
-#if RBG_LED_KY_016_MODULE_ENABLED && RBG_LED_WS2812_MODULE_ENABLED
-#error "KY-016 and WS2812 RGB LED modules cannot both be enabled at the same time"
-#endif
-
-#if RBG_LED_KY_016_MODULE_ENABLED
-    ledc_timer_config_t timer_config{};
-    timer_config.speed_mode = LEDC_LOW_SPEED_MODE;
-    timer_config.duty_resolution = LEDC_TIMER_8_BIT;
-    timer_config.timer_num = LEDC_TIMER_0;
-    timer_config.freq_hz = 5000;
-    timer_config.clk_cfg = LEDC_AUTO_CLK;
-    ESP_ERROR_CHECK(ledc_timer_config(&timer_config));
-
-    const int led_pins[] = {LEDRedPin, LEDGreenPin, LEDBluePin};
-    for (int channel = 0; channel < 3; ++channel)
+    esp_err_t err = ESP_OK;
+    if (s_led_type == web_led_type_t::ky016)
     {
-        ledc_channel_config_t channel_config{};
-        channel_config.gpio_num = led_pins[channel];
-        channel_config.speed_mode = LEDC_LOW_SPEED_MODE;
-        channel_config.channel = static_cast<ledc_channel_t>(channel);
-        channel_config.intr_type = LEDC_INTR_DISABLE;
-        channel_config.timer_sel = LEDC_TIMER_0;
-        channel_config.duty = 0;
-        channel_config.hpoint = 0;
-        ESP_ERROR_CHECK(ledc_channel_config(&channel_config));
+        ledc_timer_config_t timer_config{};
+        timer_config.speed_mode = LEDC_LOW_SPEED_MODE;
+        timer_config.duty_resolution = LEDC_TIMER_8_BIT;
+        timer_config.timer_num = LEDC_TIMER_0;
+        timer_config.freq_hz = 5000;
+        timer_config.clk_cfg = LEDC_AUTO_CLK;
+        err = ledc_timer_config(&timer_config);
+
+        const int led_pins[] = {s_cfg->led_red_pin, s_cfg->led_green_pin, s_cfg->led_blue_pin};
+        for (int channel = 0; channel < 3 && err == ESP_OK; ++channel)
+        {
+            ledc_channel_config_t channel_config{};
+            channel_config.gpio_num = led_pins[channel];
+            channel_config.speed_mode = LEDC_LOW_SPEED_MODE;
+            channel_config.channel = static_cast<ledc_channel_t>(channel);
+            channel_config.timer_sel = LEDC_TIMER_0;
+            channel_config.duty = 0;
+            channel_config.hpoint = 0;
+            err = ledc_channel_config(&channel_config);
+        }
     }
-#endif
-#if RBG_LED_WS2812_MODULE_ENABLED
-    static_assert(RGB_LED_Brightness_Percent >= 0 && RGB_LED_Brightness_Percent <= 100);
-    s_ws2812_brightness = static_cast<uint8_t>((255 * RGB_LED_Brightness_Percent + 50) / 100);
+    else if (s_led_type == web_led_type_t::ws2812)
+    {
+        led_strip_config_t strip_config{};
+        strip_config.strip_gpio_num = s_cfg->led_ws2812_pin;
+        strip_config.max_leds = 1;
+        strip_config.led_model = LED_MODEL_WS2812;
+        strip_config.color_component_format.format.g_pos = 0;
+        strip_config.color_component_format.format.r_pos = 1;
+        strip_config.color_component_format.format.b_pos = 2;
+        strip_config.color_component_format.format.num_components = 3;
 
-    led_strip_config_t strip_config{};
-    strip_config.strip_gpio_num = WS2812DataPin;
-    strip_config.max_leds = 1;
-    strip_config.led_model = LED_MODEL_WS2812;
-    strip_config.color_component_format.format.g_pos = 0;
-    strip_config.color_component_format.format.r_pos = 1;
-    strip_config.color_component_format.format.b_pos = 2;
-    strip_config.color_component_format.format.num_components = 3;
+        led_strip_rmt_config_t rmt_config{};
+        rmt_config.resolution_hz = 10000000;
+        err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_ws2812_strip);
+    }
+    else
+        return;
 
-    led_strip_rmt_config_t rmt_config{};
-    rmt_config.resolution_hz = 10000000;
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &s_ws2812_strip));
-#endif
-#if RBG_LED_KY_016_MODULE_ENABLED || RBG_LED_WS2812_MODULE_ENABLED
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "RGB LED setup failed (%s): the LED is not used", esp_err_to_name(err));
+        s_led_type = web_led_type_t::none;
+        return;
+    }
     control_RGB_LED(LED_startup, true);
-#endif
 }
 
 void setup_the_LCD(void)
 {
+    if (!s_lcd_on)
+        return;
 
-#if LIQUID_CRYSTAL_DISPLAY_ENABLED
-
-    // static assertions report the error if the condition is not true at compile time
-    static_assert(sizeof(lcdTopLineTitle) - 1 > 0, "lcdTopLineTitle is missing or not populated in settings, recommend value is 'ESP32 Time Server'");
-    static_assert(sizeof(lcdTopLineTitle) - 1 <= 17, "lcdTopLineTitle must be at most 17 characters");
+    char title[WEB_LCD_TITLE_SIZE];
+    xSemaphoreTake(s_live_settings_mutex, portMAX_DELAY);
+    snprintf(title, sizeof(title), "%s", s_lcd_title);
+    xSemaphoreGive(s_live_settings_mutex);
 
     if (setup_lcd() == ESP_OK)
     {
-        display_line(0, lcdTopLineTitle);
+        display_line(0, title);
         display_line(1, "");
         display_line(2, "");
         display_line(3, "");
@@ -8079,7 +8192,6 @@ void setup_the_LCD(void)
         ESP_LOGE(TAG, "LCD setup failed");
 #endif
     }
-#endif
 }
 
 static void setup_the_button()
@@ -8093,6 +8205,33 @@ static void setup_the_button()
     config.pull_down_en = GPIO_PULLDOWN_DISABLE;
     config.intr_type = GPIO_INTR_DISABLE;
     ESP_ERROR_CHECK(gpio_config(&config));
+
+    // Recovery of a forgotten web admin password: holding the button for 10 s while the device starts erases the
+    // web settings, the password and the allow-list (like the factory reset on the page) and restarts
+    vTaskDelay(pdMS_TO_TICKS(20));
+    if (gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) != 0)
+        return;
+    ESP_LOGW(TAG, "Button pressed at start: keep it pressed for 10 s to reset the web settings and password");
+    display_line(1, "Hold 10 s: reset");
+    display_line(2, "web settings");
+    for (int tenths = 0; tenths < 100; ++tenths)
+    {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) != 0)
+        {
+            ESP_LOGI(TAG, "Button released: no reset");
+            display_line(1, "");
+            display_line(2, "");
+            return;
+        }
+    }
+    const esp_err_t err = web_settings_factory_reset();
+    ESP_LOGW(TAG, "Web settings, password and allow-list erased by the button (%s), restarting", esp_err_to_name(err));
+    display_line(1, "Web settings reset");
+    display_line(2, "Release the button");
+    while (gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) == 0)
+        vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
 #endif
 }
 
@@ -8410,13 +8549,13 @@ static void setup_ota()
 
     ESP_LOGI(TAG,
              "Configuring ArduinoOTA: host=%s, port=%u, password_length=%u",
-             DeviceName,
+             s_hostname,
              static_cast<unsigned int>(OTEPort),
              static_cast<unsigned int>(strlen(OTEPassword)));
 #endif
 
     ArduinoOTA.setPort(OTEPort);
-    ArduinoOTA.setHostname(DeviceName);
+    ArduinoOTA.setHostname(s_hostname);
     ArduinoOTA.setPassword(OTEPassword);
     ArduinoOTA.setRebootOnSuccess(false);
     ArduinoOTA.onStart([]()
@@ -8454,7 +8593,7 @@ static void setup_ota()
     const network_address_snapshot_t ota_addresses = get_network_address_snapshot();
     ESP_LOGI(TAG,
              "ArduinoOTA.begin() returned, listener should be available on %s:%u",
-             ota_addresses.selected[0] == '\0' ? DeviceName : ota_addresses.selected,
+             ota_addresses.selected[0] == '\0' ? s_hostname : ota_addresses.selected,
              static_cast<unsigned int>(OTEPort));
 #endif
 }
@@ -9106,14 +9245,17 @@ static void ntp_server_task(void *parameter)
                 if (len < static_cast<int>(NTP_PACKET_SIZE) || len > static_cast<int>(NTP_MAX_PACKET_SIZE))
                 {
 #if MQTT_ENABLED
-                    s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                    if (s_mqtt_on)
+                    {
+                        s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
-                    if (len > static_cast<int>(NTP_PACKET_SIZE) && ((request[0] >> 3) & 0x07) == 4)
-                        s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-                    else
+                        if (len > static_cast<int>(NTP_PACKET_SIZE) && ((request[0] >> 3) & 0x07) == 4)
+                            s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                        else
 #endif
-                        s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-                    s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                            s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                        s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                    }
 #endif
 #if CALCULATE_STACK_SIZES_ENABLED
                     report_current_task_stack_usage(NTP_Server);
@@ -9126,14 +9268,17 @@ static void ntp_server_task(void *parameter)
                 if (ntp_version < 3 || ntp_version > 4 || ntp_mode != 3)
                 {
 #if MQTT_ENABLED
-                    s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                    if (s_mqtt_on)
+                    {
+                        s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
-                    if (len > static_cast<int>(NTP_PACKET_SIZE) && ntp_version == 4)
-                        s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-                    else
+                        if (len > static_cast<int>(NTP_PACKET_SIZE) && ntp_version == 4)
+                            s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                        else
 #endif
-                        s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-                    s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                            s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                        s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                    }
 #endif
 #if CALCULATE_STACK_SIZES_ENABLED
                     report_current_task_stack_usage(NTP_Server);
@@ -9147,12 +9292,15 @@ static void ntp_server_task(void *parameter)
                 if (authentication_result != ntp_auth_result_t::unauthenticated && authentication_result != ntp_auth_result_t::valid)
                 {
 #if MQTT_ENABLED
-                    s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-                    if (ntp_version == 4)
-                        s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-                    else
-                        s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-                    s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                    if (s_mqtt_on)
+                    {
+                        s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                        if (ntp_version == 4)
+                            s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                        else
+                            s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
+                        s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                    }
 #endif
                     continue;
                 }
@@ -9167,19 +9315,25 @@ static void ntp_server_task(void *parameter)
                 if (!internal_request && !admit_ntp_request())
                 {
 #if MQTT_ENABLED
-                    s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                    if (s_mqtt_on)
+                    {
+                        s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                    }
 #endif
                     continue;
                 }
 
 #if MQTT_ENABLED
-                s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
-                s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
-                if (authenticated_request)
-                    s_ntp_authenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
-                else
-                    s_ntp_unauthenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
-                mqtt_enqueue_ntp_request(source_addr);
+                if (s_mqtt_on)
+                {
+                    s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                    s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
+                    if (authenticated_request)
+                        s_ntp_authenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
+                    else
+                        s_ntp_unauthenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
+                    mqtt_enqueue_ntp_request(source_addr);
+                }
 #endif
                 const struct sockaddr_in *source_ipv4 = nullptr;
                 const struct in6_addr *client_ipv6 = nullptr;
@@ -9200,12 +9354,15 @@ static void ntp_server_task(void *parameter)
 
                 ntp_reply_status_t status = get_ntp_reply_status();
 #if MQTT_ENABLED
-                if (status.gnss_synchronized && status.pps_disciplined)
-                    s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
-                if (!status.gnss_synchronized)
-                    s_ntp_responses_gnss_unsynchronized.fetch_add(1, std::memory_order_relaxed);
-                if (!status.pps_disciplined)
-                    s_ntp_responses_pps_undisciplined.fetch_add(1, std::memory_order_relaxed);
+                if (s_mqtt_on)
+                {
+                    if (status.gnss_synchronized && status.pps_disciplined)
+                        s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
+                    if (!status.gnss_synchronized)
+                        s_ntp_responses_gnss_unsynchronized.fetch_add(1, std::memory_order_relaxed);
+                    if (!status.pps_disciplined)
+                        s_ntp_responses_pps_undisciplined.fetch_add(1, std::memory_order_relaxed);
+                }
 #endif
                 build_ntp_reply(request, reply, ntp_version, receive_time, status);
                 const uint64_t client_receive_timestamp =
@@ -9271,8 +9428,11 @@ static void ntp_server_task(void *parameter)
                     }
                 }
 #if MQTT_ENABLED
-                if (sent == static_cast<int>(reply_length))
-                    s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
+                if (s_mqtt_on)
+                {
+                    if (sent == static_cast<int>(reply_length))
+                        s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
+                }
 #else
                 (void)sent;
 #endif
@@ -9865,11 +10025,11 @@ static int get_required_top_line_message()
              !has_usable_network_address(xEventGroupGetBits(s_net_event_group)))
         required_top_line_message = 13;
 #if MQTT_ENABLED
-    else if (s_mqtt_queued_messages_count.load() > 0)
+    else if (s_mqtt_on && s_mqtt_queued_messages_count.load() > 0)
         required_top_line_message = 3;
-    else if (s_mqtt_setup_failed.load())
+    else if (s_mqtt_on && s_mqtt_setup_failed.load())
         required_top_line_message = 2;
-    else if (!s_mqtt_connected.load())
+    else if (s_mqtt_on && !s_mqtt_connected.load())
         required_top_line_message = 11;
 #endif
     if (s_ntp_transport_health.load(std::memory_order_relaxed) == ntp_transport_health_t::stalled &&
@@ -9935,35 +10095,33 @@ static void control_RGB_LED(RGB_LED_Colour Colour, bool enabled)
         }
     }
 
-#if RBG_LED_KY_016_MODULE_ENABLED
-    static_assert(RGB_LED_Brightness_Percent >= 0 && RGB_LED_Brightness_Percent <= 100);
-    static constexpr uint8_t brightness = static_cast<uint8_t>((255 * RGB_LED_Brightness_Percent + 50) / 100);
+    // Brightness of the settings (live), applied to both module types
+    const uint32_t brightness = (255u * s_led_brightness_percent.load(std::memory_order_relaxed) + 50u) / 100u;
     red_duty = static_cast<uint8_t>((red_duty * brightness + 127) / 255);
     green_duty = static_cast<uint8_t>((green_duty * brightness + 127) / 255);
     blue_duty = static_cast<uint8_t>((blue_duty * brightness + 127) / 255);
 
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, red_duty));
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, green_duty));
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, blue_duty));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2));
-#endif
-#if RBG_LED_WS2812_MODULE_ENABLED
-    red_duty = static_cast<uint8_t>((red_duty * s_ws2812_brightness + 127) / 255);
-    green_duty = static_cast<uint8_t>((green_duty * s_ws2812_brightness + 127) / 255);
-    blue_duty = static_cast<uint8_t>((blue_duty * s_ws2812_brightness + 127) / 255);
-
     static uint32_t last_rgb = UINT32_MAX;
     const uint32_t rgb = (static_cast<uint32_t>(red_duty) << 16) |
                          (static_cast<uint32_t>(green_duty) << 8) | blue_duty;
-    if (rgb != last_rgb)
+    if (rgb == last_rgb)
+        return;
+    last_rgb = rgb;
+
+    if (s_led_type == web_led_type_t::ky016)
     {
-        ESP_ERROR_CHECK(led_strip_set_pixel(s_ws2812_strip, 0, red_duty, green_duty, blue_duty));
-        ESP_ERROR_CHECK(led_strip_refresh(s_ws2812_strip));
-        last_rgb = rgb;
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, red_duty);
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, green_duty);
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, blue_duty);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2);
     }
-#endif
+    else if (s_led_type == web_led_type_t::ws2812 && s_ws2812_strip != nullptr)
+    {
+        led_strip_set_pixel(s_ws2812_strip, 0, red_duty, green_duty, blue_duty);
+        led_strip_refresh(s_ws2812_strip);
+    }
 }
 
 static void update_RGB_LED()
@@ -10042,15 +10200,37 @@ static void update_RGB_LED()
 static void update_LED_LCD_Button_task(void *parameter)
 
 {
-#if LIQUID_CRYSTAL_DISPLAY_ENABLED
+    if (!s_lcd_on)
+    {
+        // Without LCD: only the LED and the button
+        for (;;)
+        {
+            if (s_led_type != web_led_type_t::none)
+                update_RGB_LED();
+#if UPTIME_RESTART_BUTTON_ENABLED
+            (void)check_uptime_request();
+#endif
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+
     int previous_top_line_message = -1;
     int previous_second = -1;
+    char title[WEB_LCD_TITLE_SIZE] = "";
 #if UPTIME_RESTART_BUTTON_ENABLED
     int display_uptime_seconds_counter = 0;
 #endif
 
     for (;;)
     {
+        // The title can be changed on the web admin page
+        if (title[0] == '\0' || s_lcd_title_changed.exchange(false, std::memory_order_acq_rel))
+        {
+            xSemaphoreTake(s_live_settings_mutex, portMAX_DELAY);
+            snprintf(title, sizeof(title), "%s", s_lcd_title);
+            xSemaphoreGive(s_live_settings_mutex);
+            previous_top_line_message = -1;
+        }
 
 #if OTE_UPDATES_ENABLED
         if (render_ote_display())
@@ -10126,7 +10306,7 @@ static void update_LED_LCD_Button_task(void *parameter)
             if (required_top_line_message != previous_top_line_message)
             {
                 char top_line_message[21]; // 20 chars + null
-                snprintf(top_line_message, sizeof(top_line_message), "%-20s", lcdTopLineTitle);
+                snprintf(top_line_message, sizeof(top_line_message), "%-20s", title);
 
                 if (required_top_line_message == 98)
                 {
@@ -10141,7 +10321,7 @@ static void update_LED_LCD_Button_task(void *parameter)
                 else if (required_top_line_message == 99)
                 {
                     // when button pushed: "ESP32 Time Server's"
-                    memcpy(top_line_message + sizeof(lcdTopLineTitle) - 1, "'s", 2);
+                    memcpy(top_line_message + strlen(title), "'s", 2); // title: at most 17 characters
                 }
                 else if (required_top_line_message >= 11 && required_top_line_message <= 14)
                 {
@@ -10197,9 +10377,8 @@ static void update_LED_LCD_Button_task(void *parameter)
             }
         }
 
-#if RBG_LED_KY_016_MODULE_ENABLED || RBG_LED_WS2812_MODULE_ENABLED
-        update_RGB_LED();
-#endif
+        if (s_led_type != web_led_type_t::none)
+            update_RGB_LED();
 
         vTaskDelay(pdMS_TO_TICKS(50));
 
@@ -10207,34 +10386,96 @@ static void update_LED_LCD_Button_task(void *parameter)
         report_current_task_stack_usage(LED_LCD_Button);
 #endif
     }
-#else
-    for (;;)
-    {
-#if RBG_LED_KY_016_MODULE_ENABLED || RBG_LED_WS2812_MODULE_ENABLED
-        update_RGB_LED();
-#endif
-#if UPTIME_RESTART_BUTTON_ENABLED
-        (void)check_uptime_request();
-#endif
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-#endif
 }
 
 void start_RGB_LED_LCD_and_Button_refresh()
 {
+    // No task at all when neither the LCD, the LED nor the button is used
+    if (!s_lcd_on && s_led_type == web_led_type_t::none && !UPTIME_RESTART_BUTTON_ENABLED)
+        return;
 
     xTaskCreatePinnedToCore(update_LED_LCD_Button_task, "LED_LCD_Button_service", LED_LCD_Button_Task_Stack_Size, nullptr, 10, nullptr, tskNO_AFFINITY);
 }
 
 void setup_symmetric_key_authentication()
 {
-#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
-    if (ntp_auth_initialize())
-        ESP_LOGI(TAG, "NTP symmetric-key authentication is available");
+    // ntp_auth_initialize() and ntp_auth_configure() ran with the settings in setup_NVS_storage()
+    if (ntp_auth_available())
+        ESP_LOGI(TAG, "NTP symmetric-key authentication is available (%u key(s))", static_cast<unsigned int>(ntp_auth_key_count()));
+    else if (s_cfg->ntp_auth_enabled)
+        ESP_LOGW(TAG, "NTP symmetric-key authentication is enabled but unavailable (no valid key)");
+}
+
+// ---- Interface to the web admin (web/web_settings.h, web/web_server.h) ----
+
+// Live settings: time zone, LCD text options, LED brightness, NTP authentication
+void app_apply_live_settings(const web_settings_t &settings)
+{
+    if (s_live_settings_mutex != nullptr)
+        xSemaphoreTake(s_live_settings_mutex, portMAX_DELAY);
+    snprintf(s_lcd_title, sizeof(s_lcd_title), "%s", settings.lcd_title);
+    snprintf(s_time_zone, sizeof(s_time_zone), "%s", settings.time_zone);
+    if (s_live_settings_mutex != nullptr)
+        xSemaphoreGive(s_live_settings_mutex);
+    s_lcd_title_changed.store(true, std::memory_order_release);
+    s_lcd_24_hour.store(settings.lcd_24_hour, std::memory_order_relaxed);
+    s_lcd_pad_hour.store(settings.lcd_pad_hour, std::memory_order_relaxed);
+    s_lcd_show_time_zone.store(settings.lcd_show_time_zone, std::memory_order_relaxed);
+    s_led_brightness_percent.store(settings.led_brightness_percent, std::memory_order_relaxed);
+    apply_timezone_settings();
+    ntp_auth_configure(settings.ntp_auth_enabled, settings.ntp_key_override, settings.ntp_key_id, settings.ntp_key);
+}
+
+void app_controlled_restart(const char *reason)
+{
+    controlled_restart(reason);
+}
+
+esp_netif_t *app_eth_netif()
+{
+    return ETH.netif();
+}
+
+// The addresses of the interface were changed by the web admin: read them again (the cache only ever upgrades the
+// IPv6 address, so a removed static address would otherwise stay on the LCD)
+void app_network_settings_changed()
+{
+    esp_netif_t *netif = ETH.netif();
+    if (netif == nullptr)
+        return;
+    esp_netif_ip_info_t info{};
+    if (esp_netif_get_ip_info(netif, &info) == ESP_OK && info.ip.addr != 0)
+        set_network_ipv4_address(info.ip);
     else
-        ESP_LOGW(TAG, "NTP symmetric-key authentication is unavailable");
-#endif
+        clear_network_ipv4_address();
+    if (s_network_address_mutex != nullptr && xSemaphoreTake(s_network_address_mutex, portMAX_DELAY) == pdTRUE)
+    {
+        s_ipv6_address[0] = '\0';
+        s_ipv6_address_priority = ipv6_address_priority_t::none;
+        update_selected_ip_address_locked();
+        xSemaphoreGive(s_network_address_mutex);
+    }
+    refresh_network_ipv6_addresses();
+}
+
+void app_get_status(web_app_status_t &status)
+{
+    status = web_app_status_t{};
+    const app_metadata_t *meta = get_app_metadata();
+    snprintf(status.firmware_version, sizeof(status.firmware_version), "v%s", meta->version);
+    snprintf(status.build, sizeof(status.build), "%s %s %s", meta->build_date, meta->build_time, meta->git_sha);
+    status.time_set = s_time_has_been_set.load(std::memory_order_acquire);
+    status.pps_active = s_pps_discipline_active.load(std::memory_order_acquire);
+    status.gnss_locked = s_gnss_locked.load(std::memory_order_acquire);
+    status.stratum_one = get_ntp_reply_status().stratum == 1;
+    status.ublox_receiver = UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED != 0;
+    status.gnss_baud_in_use = s_detected_gnss_baud;
+    status.lcd_present = s_lcd_ready;
+    status.led_active = s_led_type != web_led_type_t::none;
+    status.mqtt_connected = s_mqtt_on && s_mqtt_connected.load(std::memory_order_acquire);
+    status.ntp_auth_available = ntp_auth_available();
+    status.ntp_auth_compiled_keys = ntp_auth_compiled_key_count();
+    status.free_heap = esp_get_free_heap_size();
 }
 
 void setup_ntp_server()
@@ -10375,15 +10616,19 @@ void write_open_for_business_messages_to_the_console()
 extern "C" void app_main()
 {
 
+    // The settings of this boot (compiled defaults, NVS, one-shot set of the web admin) are needed by everything
+    // below, the PPS pin included
+    setup_NVS_storage();
+
     setup_pps_input(); // (keep this at the very beginning of the setup sequence)
 
     initArduino();
 
     write_opening_messages_to_the_console();
 
-    setup_mqtt_tf_queue();
+    write_settings_messages_to_the_console();
 
-    setup_NVS_storage();
+    setup_mqtt_tf_queue();
 
     setup_mutexes_and_semaphores();
 

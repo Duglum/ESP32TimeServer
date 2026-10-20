@@ -2,7 +2,7 @@
 
 This file combines `Sonnet_CHANGELOG.md` (precision and stability work done earlier) and `Review_2026-10-19_CHANGELOG.md` (review of 2026-10-19 and its follow-ups). Where the later review changed or replaced something from the earlier work, only the current state is described.
 
-State described here: the files in the repository on 2026-10-19 after the review, including the stack sizes set by the user afterwards (section 4.15), and the follow-up of the same evening: fine local timebase and free-running, frequency disciplined PTP clock with optional PPS loopback (sections 4.19 to 4.21, results in 7.6), and of 2026-10-20: PTP clock from the 80 MHz PLL, root dispersion 1 (section 4.22).
+State described here: the files in the repository on 2026-10-19 after the review, including the stack sizes set by the user afterwards (section 4.15), and the follow-up of the same evening: fine local timebase and free-running, frequency disciplined PTP clock with optional PPS loopback (sections 4.19 to 4.21, results in 7.6), of 2026-10-20: PTP clock from the 80 MHz PLL, root dispersion 1 (section 4.22), and of 2026-10-21: HTTPS web admin page (section 4.23).
 
 Contents
 
@@ -51,6 +51,7 @@ Contents
 | 22 | **Free-running PTP clock**: set once, then only its frequency is steered (EMAC fine addend); offset and rate are estimated once per second and the hardware time stamps are converted with a continuous mapping | no per-second clock write: the rare errors of up to 33 µs for frames that straddle a write are gone, no write latency in the result, holdover on the learned rate |
 | 23 | **Optional PTP PPS loopback** (`PTPPPSLoopbackPin`): the EMAC PPS output is captured by the same MCPWM timer as the GNSS PPS | PTP clock measured against the PPS in hardware: the constant read delay error of the software measurement (some 100 ns) is removed; simulated error of T2 / hardware T3 16 ns RMS |
 | 24 | **PTP clock from the 80 MHz PLL** instead of the 40 MHz crystal (2026-10-20) | time stamp steps 13 ns instead of 40 ns |
+| 25 | **Web admin page** (HTTPS, TCP 443, 2026-10-21): network, GNSS / PPS, LCD, time zone, LED, MQTT and NTP authentication settings; Apply / Save (NVS) / Factory reset; LCD, LED, MQTT and NTP authentication always compiled in and switched at run time | common settings without rebuilding; per-device TLS key, salted password hash, sessions with CSRF protection, allow-list |
 
 No memory leak was found in the review (section 4.13).
 
@@ -331,6 +332,92 @@ Other cases:
 - `NTP_ROOT_DISPERSION` 2 → 1 (15.3 µs, smallest non-zero value). Only the error bound shown by the clients changes (chrony `+/-` about 15 µs smaller), not the time.
 - `PTP_LATENCY_CODE_VERSION` fingerprint (only with `PTP_FREE_RUNNING 0`) contains `PTP_CLOCK_FROM_PLL`.
 
+### 4.23 Web admin page: HTTPS settings page (2026-10-21)
+
+A settings page on the board replaces `ESP32TimeServerSettings.h` / `ESP32TimeServerSettingsSecrets.h` for the common settings. HTTPS on TCP 443 only, no port 80, no redirect, no option to change that.
+
+**Settings on the page**
+
+| Group | Settings | Takes effect |
+|---|---|---|
+| Network | FQDN (host name and domain, one field), IPv4 DHCP or address/prefix and gateway (the address received by DHCP is shown), IPv6 SLAAC on/off (the addresses in use are shown), one additional static IPv6 address/prefix with gateway, up to 3 DNS servers (one per line) | at once, with confirmation (FQDN: restart) |
+| GNSS / PPS | TX, RX and PPS pin, baud rate (fixed list 4800 to 921600; only used with `UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED 0`, the page says so), PTP PPS loopback pin (empty = off; the page notes that the pin has to be empty: a free GPIO with nothing connected, it is driven as an output) | restart |
+| LCD | on/off (restart), top line title, 24-hour clock, hour with leading zero, show time zone, POSIX time zone | at once |
+| RGB LED | none / KY-016 / WS2812 and their pins (restart), brightness (at once) | see left |
+| MQTT | on/off, broker URI (`mqtt://` or `mqtts://`, host, port), user name, password | restart |
+| NTP authentication | on/off, key ID and key (32 letters or digits) or the compiled keys | at once |
+| Security | web admin password, allow-list of source networks | at once, stored at once |
+
+Every field shows its compiled default; fields that differ from it are marked. Fields that need a restart carry a "restart" badge.
+
+**Apply / Save / Factory reset**
+
+- **Apply**: the values are in effect at once and are not stored; a restart returns to the saved state.
+  - Live settings (time zone, LCD text options, LED brightness, NTP authentication) are switched immediately. The NTP key set is replaced lock-free (seqlock in `ntp_auth.cpp`, the NTP path copies the key it needs and never waits).
+  - Network settings (IPv4, IPv6, DNS) are applied at once and have to be **confirmed within 120 s** from the page. With a new static address the confirmation is only accepted over that address (the page lists the URLs; the session cookie is bound to the host name, so the user logs in again there). Without confirmation the previous network settings come back automatically.
+  - Settings that need a restart (FQDN, GPIO pins, GNSS baud rate, LED type, LCD on/off, MQTT): Apply writes them as a **one-shot set** (NVS `webcfg/oneshot`) and restarts once. The one-shot set is erased at the start that uses it, before it is used: if it makes the device crash, the next start is back on the saved settings. If the one-shot set also changed the network, the confirmation runs after the start; without it the device restarts with the saved settings.
+- **Save**: stores the form values in NVS (`webcfg/saved`, versioned blob with CRC); they are loaded at every start. Network values are only saved if they are the ones in use (apply and confirm them first), so a typo cannot lock the device out at the next start.
+- **Factory reset** (needs the current password): erases `webcfg` (saved and one-shot settings) and `webauth` (password, allow-list), keeps the TLS identity (`webtls`) and the calibrations (`isr_latency`, `ptp_latency`, `gnss_state`), then restarts with the compiled settings and the compiled password.
+- Order at the start: compiled defaults, then the saved settings (if valid for this firmware), then a one-shot set. A saved set from another firmware version (layout change) or one that fails the validation is ignored with a warning.
+
+**TLS**
+
+- Per-device ECDSA P-256 key, generated on the device at the first start (PSA, hardware RNG), and a self-signed certificate (CN and subjectAltName = FQDN, validity 2026-01-01 to 2099-12-31 because the time may not be known yet). Both in NVS (`webtls`). No private key is compiled into the firmware. A changed FQDN issues a new certificate with the same key.
+- The SHA-256 fingerprint of the certificate is printed at every start (`Web admin certificate SHA-256 fingerprint: ...`) and shown on the page.
+- TLS 1.2 and 1.3 only (mbedTLS 4 has nothing older), cipher suites TLS 1.3 AES-GCM and TLS 1.2 ECDHE-ECDSA with AES-GCM, no renegotiation, no TLS 1.3 PSK modes, handshake timeout 5 s.
+- No HSTS: with a self-signed certificate it would prevent clicking through the browser warning.
+- The transport is set up in `web_server.cpp` on `esp_http_server` with `esp-tls` (instead of `esp_https_server`, which does the TLS handshake before the application can look at the connection): the **allow-list is checked before the TLS handshake**, rejected sources cost no TLS work.
+
+**Login, session, CSRF**
+
+- Login form, no HTTP Basic authentication. Password only stored as salted PBKDF2-HMAC-SHA256 (10000 iterations, 16 byte salt, about 0.3 s per check; the iteration count is stored with the hash). Comparison in constant time. The compiled `WebAdminPassword` ("password" by default, `ESP32TimeServerSettingsSecrets.h`) is hashed with a random salt at every start and checked the same way.
+- While the factory password is in use: red banner on the page and a console warning at every start.
+- Session: random 256-bit token in the cookie `__Host-sid` (`Secure; HttpOnly; SameSite=Strict; Path=/`), only its SHA-256 is kept on the device; 15 min idle timeout, 12 h maximum, at most 4 sessions, logout button.
+- CSRF: SameSite=Strict, a per-session token in the `X-CSRF-Token` header, the `Origin` header must equal `https://` + `Host`, `Sec-Fetch-Site` (if sent) must be `same-origin`, and the body must be `application/json` on every state-changing request.
+- Login throttling per source address (after 5 failures 30 s, doubling up to 15 min; forgotten after an hour without failures) and global (20 failures in a minute block all logins for 60 s, doubling up to 15 min). It only affects the web admin, never NTP. Checks of the current password (password change, factory reset) count as well.
+- Password change and factory reset need the current password. A new password (12 to 128 characters, no control characters) is stored at once and closes all other sessions.
+- Secrets (MQTT password, NTP key, admin password) are never sent to the browser and never logged; the page shows "set / not set". An empty field keeps the stored value, a separate check box clears it (MQTT password) or returns to the compiled keys (NTP key).
+
+**Page hardening and resources**
+
+- HTML, CSS and JavaScript are separate files embedded with `EMBED_TXTFILES`; no inline script or style. The JavaScript writes values only with `textContent` / `.value`.
+- Headers: `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: no-store` for the API.
+- Dark mode with CSS variables, the toggle is stored in the browser (localStorage).
+- At most 3 sockets with LRU purge, request body at most 4 kB, receive / send timeout 5 s, request headers up to 2 kB (`CONFIG_HTTPD_MAX_REQ_HDR_LEN`, browsers send long headers), mbedTLS dynamic buffers (`CONFIG_MBEDTLS_DYNAMIC_BUFFER`).
+- The server task runs at priority 3 on core 0: below every timing task (PPS 14, GNSS 15, hardware NTP 17 on core 1, NTP sockets 20, Ethernet recovery 6, MQTT 5). Stack 10 kB (TLS handshake, PBKDF2, JSON); a one-time start task (8 kB) creates the key. The task stacks of `main.cpp` are unchanged.
+- Strict validation on the device (`web_settings_validate`): `inet_pton`, IPv4 prefix 8 to 30, address not the network / broadcast / loopback / multicast / link-local address, gateway another host of the subnet; IPv6 address global or unique local, prefix 64 to 128 (lwIP decides on-link with the first 64 bits), gateway link-local or in the /64 of the address; DNS unicast; FQDN after RFC 1123 (host name label at most 32 characters, the esp_netif limit); time zone parsed as POSIX TZ; LCD title 1 to 17 printable characters; MQTT URI scheme, host and port, no user, path or spaces; GPIOs 0 to 54, not used twice and not one of: Ethernet RMII / MDC / MDIO / PHY reset (28, 29, 30, 31, 34, 35, 49, 50, 51, 52), strapping and UART0 console (36, 37, 38), USB Serial/JTAG (24, 25), TF card (39 to 44), LCD I2C (7, 8), the button pin if the button is enabled. Empty PTP PPS loopback pin = off.
+- Physical recovery: with `UPTIME_RESTART_BUTTON_ENABLED 1`, holding the button for 10 s while the device starts does the factory reset (the LCD says so).
+
+**Network implementation (`web_net.cpp`)**
+
+- IPv4 through `esp_netif` (DHCP client stop/start, `esp_netif_set_ip_info`); the raw NTP path compares against the own IPv4 address, which was already a lock-free atomic and is updated by the got-IP event.
+- Static IPv6 address with `esp_netif_add_ip6_address`. lwIP has no API for a static IPv6 default gateway: `CONFIG_LWIP_HOOK_ND6_GET_GW_CUSTOM` with `lwip_hook_nd6_get_gw()`, which reads the gateway lock-free (seqlock) in the lwIP thread; the destination cache is cleared after a change. `CONFIG_LWIP_IPV6_NUM_ADDRESSES` 3 → 5 (link-local, SLAAC global and unique local, static, spare).
+- SLAAC off: autoconfiguration is switched off on the lwIP netif and the addresses it created are removed (link-local and static stay).
+- DNS: up to 3 servers (lwIP default `DNS_MAX_SERVERS`). A DHCP lease overwrites the DNS servers, so the configured ones are set again after every lease; with an empty list the servers of the lease are used.
+- The page is started right after the Ethernet driver, before the wait for an address and independent of the GNSS setup: it stays reachable when wrong GNSS pins stop the start.
+
+**Features compiled in, idle when off**
+
+- LCD, KY-016, WS2812, MQTT and NTP authentication are always compiled in (`main/CMakeLists.txt` no longer reads the settings file); the `*_ENABLED` values in `ESP32TimeServerSettings.h` are now their run-time defaults. In `main.cpp` the five macros are set to 1 after the settings file is included, and the boot settings decide at run time (`s_lcd_on`, `s_led_type`, `s_mqtt_on`, `ntp_auth_configure()`).
+- When off: no task, no driver, no buffers. The MQTT report buffers (about 76 kB) are allocated only when MQTT is on (`setup_mqtt_tf_queue()`); the per-request MQTT counters in the NTP paths are skipped; the LED/LCD/button task is not created when neither is used; I2C, LEDC and RMT are not initialised.
+- MQTT and the LCD switch need a restart (the MQTT client, its TF card queue and the I2C bus have no clean stop in this code); the page marks them. A failing LED driver (e.g. wrong pin) switches the LED off for that start instead of stopping the server.
+- New on the page for MQTT: on/off and the broker URI (was `MQTTServerIPAddress` + `MQTTPort`); `mqtts://` brokers are checked against the ESP-IDF CA bundle. New for NTP authentication: on/off.
+- `NTP_MAX_PACKET_SIZE` is now always 72 bytes (the raw path buffers grow by 24 bytes each). With authentication off an authenticated request is dropped as before (it is counted as invalid).
+
+**Open points decided**
+
+- Allow-list of source networks: implemented (decision of 2026-10-21): at most 8 addresses or CIDR networks, IPv4 and IPv6, empty = all; a list that would lock out the current client is refused.
+- NVS encryption: not enabled (decision of 2026-10-21), the steps are in 13.
+
+**First start, fingerprint check, recovery**
+
+1. Delete `sdkconfig` (the new options in `sdkconfig.defaults` are only used for a new `sdkconfig`), then `idf.py build` and flash. The build stops with an error in `web_net.cpp` if the ND6 hook option is missing.
+2. At the first start the device creates its TLS key (about 1 s) and prints `Web admin certificate SHA-256 fingerprint: AB:CD:...`. Note it.
+3. Open `https://<address>/` (IPv4 or `https://[IPv6]/`). The browser warns about the self-signed certificate: open the certificate details and compare the SHA-256 fingerprint with the console line before accepting it. After a factory reset the fingerprint stays the same; it changes only with a new FQDN or when `webtls` is erased.
+4. Log in with `password` (or the `WebAdminPassword` of the secrets file) and change the password at once (red banner until then).
+5. Change settings, **Apply**, check, **Save**. Network changes: confirm within 120 s (over the new address if a static one was set), then Save.
+6. Forgotten password: factory reset with the button (hold 10 s during the start, `UPTIME_RESTART_BUTTON_ENABLED 1` needed), or `idf.py erase-flash` + flash (erases all NVS data including the calibrations and the TLS key), or erase only the `webauth` namespace with the NVS partition tool.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -340,9 +427,11 @@ With the current settings (OTE, MQTT off):
 | Protocol | Port | Who | Remark |
 |---|---|---|---|
 | UDP | 123 | raw NTP path (hardware time stamps) and lwIP sockets (IPv4 `0.0.0.0`, IPv6 `::`, IPv6 link-local) | the sockets get what the raw path leaves to lwIP |
+| **TCP** | **443** | **web admin page (HTTPS only, IPv4 and IPv6 on one dual-stack socket)** | **new on 2026-10-21 (4.23); TLS 1.2 / 1.3, allow-list checked before the handshake, at most 3 connections** |
 | UDP | 68 | lwIP DHCP client | only while DHCP is used |
+| UDP | 32769 | control socket of `esp_http_server` | bound to 127.0.0.1 only, not reachable from the network |
 | ICMP / ICMPv6 | - | lwIP | ping replies, IPv6 neighbour discovery, MLD; ARP |
-| TCP | - | none | a SYN gets a RST |
+| TCP | all others | none | a SYN gets a RST |
 
 With `OTE_UPDATES_ENABLED 1` additionally UDP 3232 (ArduinoOTA) and UDP 5353 (mDNS), plus a TCP connection the device opens to the uploading PC. With `MQTT_ENABLED 1` only an outgoing TCP connection to the broker. Check: `nmap -sU -p 1-65535 <ip>`, `nmap -sT -p 1-65535 <ip>`, the same with `-6`.
 
@@ -363,7 +452,8 @@ Everything else is handed to lwIP, which applies its own rules (broadcast reques
 - Flooding: global load shedding (8500 or 14500 requests per second depending on the chip revision) and the Ethernet recovery task. A single flooding host triggers drops for all clients; a flood with spoofed sources pushes real clients out of the interleaved cache (fallback to basic mode). No per-client rate limiting.
 - Time spoofing: possible on the path without authentication; NTPv4 symmetric keys are available (SHA-256 truncated to 160 bit, constant time comparison). Unauthenticated requests are still answered when authentication is enabled (by design).
 - OTE (if enabled): MD5 challenge on the password, image unencrypted and unsigned. Use a long random password, a separate VLAN, consider Secure Boot V2 and flash encryption.
-- MQTT (if enabled): `mqtt://` sends the credentials in clear text; prefer `mqtts://`.
+- MQTT (if enabled): `mqtt://` sends the credentials in clear text; prefer `mqtts://` (the broker certificate is checked against the ESP-IDF CA bundle).
+- Web admin (4.23): whoever knows the password can change every setting on the page, including the network and the NTP key. Change the default password at once, use the allow-list, keep the device in a management network. The password hash, the settings with the MQTT password and NTP key, and the TLS private key are stored in NVS without encryption (as the compiled secrets are stored in the firmware): someone with physical access can read them with a USB cable (see 13 for NVS and flash encryption). Login attempts are throttled; a flood of TLS connections can keep the page busy (3 connections, LRU purge) but does not affect NTP (priority 3, core 0).
 
 ## 6. Review of the original clock correction code
 
@@ -520,6 +610,12 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `NTP_CACHE_MATCH_PORT` | `ntp_cache.c` | 0 | 1 = also compare the client source port |
 | `CACHE_TIMEOUT_MS_IPV4/IPV6` | `ntp_cache.h` | 1800000 | lifetime of a cache entry |
 | `CONFIG_COMPILER_OPTIMIZATION_PERF` | `sdkconfig.defaults`, `sdkconfig` | y | -O2 |
+| `WebAdminPassword` | `ESP32TimeServerSettingsSecrets.h` | "password" | password of the web admin page until one is set on the page; again after a factory reset |
+| `DeviceName` | `ESP32TimeServerSettings.h` | "ESP32TimeServer" | default FQDN of the page (host name for DHCP and OTE, certificate name) |
+| `*_ENABLED` of LCD, LED, MQTT, NTP authentication, the pins, the network values, `timeZoneSpec`, `lcdTopLineTitle`, `display*`, `RGB_LED_Brightness_Percent`, `MQTTServerIPAddress` / `MQTTPort`, `MQTTUsername` / `MQTTPassword`, `symmetric_keys` | settings files | as before | defaults of the web admin page (4.23); saved page settings take precedence |
+| `NETWORK_CONFIRM_TIMEOUT_US`, `MAX_SOCKETS`, `MAX_BODY`, `TASK_PRIORITY`, `TASK_CORE` | `main/web/web_server.cpp` | 120 s, 3, 4 kB, 3, 0 | network confirmation, connections, request body, server task |
+| `PBKDF2_ITERATIONS`, `MAX_SESSIONS`, `FAILURES_BEFORE_LOCKOUT`, `FIRST_LOCKOUT_US`, `MAX_LOCKOUT_US` | `main/web/web_auth.cpp` | 10000, 4, 5, 30 s, 15 min | password hash and login throttling |
+| `CONFIG_MBEDTLS_X509_CREATE_C`, `..._X509_CRT_WRITE_C`, `..._SSL_PROTO_TLS1_3`, `..._DYNAMIC_BUFFER`, `CONFIG_HTTPD_MAX_REQ_HDR_LEN`, `CONFIG_LWIP_HOOK_ND6_GET_GW_CUSTOM`, `CONFIG_LWIP_IPV6_NUM_ADDRESSES` | `sdkconfig.defaults` | y, y, y, y, 2048, y, 5 | needed by the web admin (4.23) |
 
 ## 9. Data stored in NVS
 
@@ -529,6 +625,16 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `ptp_latency` | `ns` (int32), `fp` (uint32) | PTP write latency in ns, fingerprint of the configuration (only read and written with `PTP_FREE_RUNNING 0`) |
 
 A value is only used if its fingerprint matches and it is within 0.5 to 20 µs; otherwise it is measured again. Other namespaces (`gnss_state`, `restart_evt`) are unchanged from the original project.
+
+Web admin (4.23):
+
+| Namespace | Key | Content | Factory reset |
+|---|---|---|---|
+| `webcfg` | `saved` (blob) | settings saved with "Save": magic, layout version, size, flags, all settings incl. MQTT password and NTP key, CRC-32 | erased |
+| `webcfg` | `oneshot` (blob) | settings of "Apply" that need a restart; erased at the start that uses them | erased |
+| `webauth` | `pw` (blob) | admin password: PBKDF2-HMAC-SHA256 hash, salt, iterations, CRC-32 | erased |
+| `webauth` | `allow` (blob) | allow-list (at most 8 entries), CRC-32 | erased |
+| `webtls` | `key`, `crt` (blob), `name` (string) | TLS private key (DER), self-signed certificate (DER), FQDN it was issued for | kept |
 
 ## 10. Console messages
 
@@ -542,6 +648,9 @@ Always printed (brief):
 - `PTP_FREE_RUNNING 0` only: `PTP write latency: N ns read from NVS (calibration skipped)` / `no stored value for this configuration, using the default 3850 ns until the calibration has finished ...`
 - `PTP write latency calibration: PPS locked, warm-up started (10 min)`, `warm-up done, measuring (about 30 to 40 min)`, `finished: N ns (default was D ns), stored in NVS`
 - Failures: calibration not stable, result outside the range, NVS errors, out of memory, task could not be started, `Hardware TX time stamping disabled after repeated errors`.
+
+- Web admin (always): `Settings: compiled defaults` / `saved settings (NVS)` / `one-shot settings of the web admin (valid for this boot only)`, warnings for saved settings that are ignored, `Web admin certificate SHA-256 fingerprint: ...`, `Web admin: https://<fqdn>/ (TCP 443, IPv4 and IPv6)`, `Web admin: the default password is in use - change it on the settings page`, `Web admin: failed login from <address>`, `too many failed logins, all logins blocked for N s`, `password changed`, `allow-list changed`, `settings applied`, `settings saved to NVS`, `network settings confirmed`, `Network settings were not confirmed within 120 s: ...`, `factory reset ...`, the TLS key and certificate creation at the first start. Secrets are never logged.
+- The feature lines at the start (`LED support`, `LCD support`, `Symmetric-key authentication support`, `MQTT support`, `Host name`) now show the state of the boot settings.
 
 Only with `DEBUG_ENABLED`:
 
@@ -572,6 +681,8 @@ Only with `DEBUG_ENABLED`:
 | Follow-up: fine timebase, free-running PTP clock, loopback | `-fsyntax-only` against stubs (extended by the PTP PPS and frequency functions) in 8 combinations incl. `PTP_FREE_RUNNING 0` and `FINE_LOCAL_TIMEBASE 0`, -O2 with the IDF warning flags; servo simulation with 12 cases and 8 seeds (7.6); the existing host tests (frames, checksums, TX delay, legacy PTP mapping) | yes: built with ESP-IDF 6.1, loopback on GPIO 23 active on all four boards, stack sizes measured, overnight chrony run (13 h) and all boards within about 2 µs on the DiskStation |
 | PLL clock source, root dispersion 1 (2026-10-20) | `-fsyntax-only` in 7 combinations incl. `PTP_CLOCK_FROM_PLL 0`, -O2 with the IDF warning flags; unit test of the source selection (PLL works / fails at the start / fails at a recovery, increment and addend headroom); servo simulation with 13 ns steps | **not yet** |
 
+| Web admin page (2026-10-21) | `idf.py build` with ESP-IDF 6.1, -O2 and the IDF warning flags, `sdkconfig` regenerated from `sdkconfig.defaults` (no new warnings in the project code); the page (login, status, apply with network confirmation, dark / light mode) in a browser against a local mock of the JSON API | **not yet** (nothing of 4.23 has run on the board yet) |
+
 The transmit delay compensation of basic mode responses was measured on the board (7.4) but not checked with a basic mode client (chrony uses the interleaved mode).
 
 ## 12. Known limitations and open points
@@ -587,8 +698,21 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - After a PPS loss the server goes to stratum 16 after 3.5 s (no holdover at stratum 1), although the PTP clock now keeps the learned rate (simulated: below 1 µs in 5 minutes with a constant crystal).
 - Leap second warnings (LI) from the GNSS are not passed on.
 - If the GNSS receiver stops answering at run time, the recovery can end in `halt_with_display()`; the sync task then waits forever (stratum 16, no reboot).
+- Web admin (4.23): not tested on the board yet. Points to check first: TLS handshake time and heap with two browsers, the ND6 gateway hook with a static IPv6 address and SLAAC off, the 120 s rollback, the one-shot restart with changed pins, the button recovery.
+- The certificate is self-signed: every browser warns, the fingerprint has to be compared by hand. The certificate names the FQDN only (no IP addresses, they can change).
+- The IPv6 prefix length is stored and shown, but lwIP decides on-link with the first 64 bits; prefixes shorter than 64 are refused.
+- Changing the time zone at run time calls `setenv()` / `tzset()` while other tasks may call `localtime_r()`; newlib guards both, a reading during the switch may use the old zone once.
+- The settings blob has a layout version: after a firmware update that changes `web_settings_t` the saved settings are ignored (compiled defaults) until they are saved again.
+- PreferIPvX, MACAddress, OTE and the MQTT reporting details stay compile-time settings.
 
 ## 13. Recommendations that are not in the code
+
+NVS encryption (not enabled, decision of 2026-10-21; it burns an eFuse key block permanently):
+
+1. Build once with `CONFIG_NVS_ENCRYPTION=y` and `CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y` (key protection with the HMAC peripheral), `CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID` = a free key block (0 to 5).
+2. At the first start the firmware generates the HMAC key and burns it into that eFuse block (purpose HMAC_UP); this cannot be undone and the block is lost for other uses. Without flash encryption the eFuse key is still readable with JTAG unless read protection is set.
+3. The NVS partition is then encrypted (XTS-AES); existing plain NVS data is not readable any more: erase the `nvs` partition before (all calibrations, the TLS key and the web settings are created again).
+4. Use it together with flash encryption and Secure Boot V2 for real protection against an attacker with physical access; otherwise the firmware with the compiled secrets stays readable.
 
 - Per-client rate limiting (like chrony's `ratelimit`) to protect the other clients from a single flooding host.
 - Holdover at stratum 1 after a PPS loss: not wanted (decision of 2026-10-20); the server goes to stratum 16 after 3.5 s as before.
@@ -607,13 +731,22 @@ Current files of the changes:
 | `CMakeLists.txt` (root) | -O2 warning handling for third-party components |
 | `sdkconfig.defaults`, `sdkconfig` | `CONFIG_COMPILER_OPTIMIZATION_PERF=y` |
 | `main/CHANGELOG.md` | this file |
+| `main/web/web_settings.*` | web settings: defaults, NVS (saved, one-shot), validation (4.23) |
+| `main/web/web_auth.*` | password hash, sessions, CSRF, login throttling, allow-list |
+| `main/web/web_tls.*` | TLS key and self-signed certificate |
+| `main/web/web_net.*` | network settings at run time, ND6 gateway hook |
+| `main/web/web_server.*` | HTTPS server, TLS transport, JSON API |
+| `main/web/www/index.html`, `app.css`, `app.js` | the page (embedded) |
+| `main/custom/ntp_auth.*` | always compiled; keys and on/off at run time (lock-free) |
+| `main/CMakeLists.txt`, `main/idf_component.yml`, `sdkconfig.defaults` | all features compiled in, web sources, cJSON, TLS / lwIP options |
+| `main/ESP32TimeServerSettings.h`, `main/ESP32TimeServerSettingsSecrets.h` | note on the web admin, `WebAdminPassword` |
 | `main/Sonnet_CHANGELOG.md`, `main/Review_2026-10-19_CHANGELOG.md` | the two source changelogs (kept for reference) |
 | `main/Review_2026-10-19_main.cpp.patch` | diff of the review against the earlier `main.cpp` (does not contain the stack sizes set afterwards) |
 | `main/Followup_2026-10-19_main.cpp.patch` | diff of the follow-up (fine timebase, free-running PTP clock, loopback) against the `main.cpp` before it |
 
 Build and first start:
 
-1. `idf.py build` (ESP-IDF 6.1). After the optimization change `idf.py fullclean` once if old objects are used.
+1. `idf.py build` (ESP-IDF 6.1). After the optimization change `idf.py fullclean` once if old objects are used. For the web admin (4.23) delete `sdkconfig` first, so that it is created again from `sdkconfig.defaults` (otherwise the stored values stay in effect and the build stops in `web_net.cpp`).
 2. Flash. At the first start the interrupt latency (about 2 minutes) and the PTP write latency (about 50 minutes) are measured again because the fingerprints changed; until then the defaults are used.
 3. Optional: `DEBUG_ENABLED 1` for a while to see the `PTP:` line (write error and transmit delay on this board), then back to 0.
 4. Compare the chrony statistics with the previous firmware (`chronyc sourcestats`, `chronyc ntpdata`).

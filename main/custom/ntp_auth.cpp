@@ -7,9 +7,11 @@
 #include "ntp_auth.h"
 #include "ESP32TimeServerSettings.h"
 
+#include <atomic>
 #include <cinttypes>
 #include <cstring>
 #include <iterator>
+#include <mutex>
 
 #include "esp_log.h"
 #include "psa/crypto.h"
@@ -23,10 +25,22 @@ namespace
 
     static constexpr unsigned int number_of_symmetric_keys = std::size(symmetric_keys);
 
-    static ntp_auth_key_t s_keys[NTP_AUTH_MAX_KEYS]{};
-    static size_t s_key_count = 0;
+    struct key_set_t
+    {
+        size_t count;
+        ntp_auth_key_t keys[NTP_AUTH_MAX_KEYS];
+    };
+
+    // Keys of ESP32TimeServerSettingsSecrets.h (validated once)
+    static key_set_t s_compiled{};
+    // Key set in use. Written by ntp_auth_configure() (web admin or start), read for every authenticated NTP
+    // request: seqlock, so the NTP path never blocks and never sees a half written key.
+    static key_set_t s_active{};
+    static std::atomic<uint32_t> s_sequence{0};
+    static std::atomic<bool> s_available{false};
     static bool s_initialized = false;
-    static bool s_available = false;
+    static bool s_crypto_ready = false;
+    static std::mutex s_writer_mutex;
 
     static uint32_t read_u32_be(const uint8_t *value)
     {
@@ -50,14 +64,56 @@ namespace
         return difference == 0;
     }
 
-    static const ntp_auth_key_t *find_key(uint32_t key_id)
+    // Copies the key with this ID out of the active set (consistent copy, see s_sequence)
+    static bool find_key(uint32_t key_id, ntp_auth_key_t &key)
     {
-        for (size_t index = 0; index < s_key_count; ++index)
+        bool found = false;
+        uint32_t s1, s2;
+        do
         {
-            if (s_keys[index].key_id == key_id && s_keys[index].lifecycle == NTP_AUTH_KEY_ACTIVE)
-                return &s_keys[index];
+            found = false;
+            s1 = s_sequence.load(std::memory_order_acquire);
+            const size_t count = s_active.count <= NTP_AUTH_MAX_KEYS ? s_active.count : 0;
+            for (size_t index = 0; index < count; ++index)
+            {
+                if (s_active.keys[index].key_id == key_id && s_active.keys[index].lifecycle == NTP_AUTH_KEY_ACTIVE)
+                {
+                    key = s_active.keys[index];
+                    found = true;
+                    break;
+                }
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            s2 = s_sequence.load(std::memory_order_relaxed);
+        } while (s1 != s2 || (s1 & 1u));
+        return found;
+    }
+
+    // Consistent copy of the whole active set (status and debug output only)
+    static void snapshot(key_set_t &out)
+    {
+        uint32_t s1, s2;
+        do
+        {
+            s1 = s_sequence.load(std::memory_order_acquire);
+            out = s_active;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            s2 = s_sequence.load(std::memory_order_relaxed);
+        } while (s1 != s2 || (s1 & 1u));
+        if (out.count > NTP_AUTH_MAX_KEYS)
+            out.count = 0;
+    }
+
+    static bool key_value_is_valid(const char *value, size_t capacity)
+    {
+        size_t length = 0;
+        while (length < capacity && value[length] != '\0')
+        {
+            const char character = value[length++];
+            if (!((character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z')))
+                return false;
         }
-        return nullptr;
+        return length == SYMMETRIC_KEY_LENGTH && (length == capacity || value[length] == '\0');
     }
 
     static bool calculate_digest(const ntp_auth_key_t &key, const uint8_t *input, size_t input_length, uint8_t digest[NTP_AUTH_DIGEST_SIZE])
@@ -85,102 +141,139 @@ namespace
 bool ntp_auth_initialize()
 {
     if (s_initialized)
-        return s_available;
+        return s_crypto_ready;
 
     s_initialized = true;
-
-#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
 
     if (number_of_symmetric_keys < 1 || number_of_symmetric_keys > NTP_AUTH_MAX_KEYS)
     {
         ESP_LOGE(TAG, "Invalid number of symmetric keys: %u (1 to %u are supported)", number_of_symmetric_keys,
                  static_cast<unsigned int>(NTP_AUTH_MAX_KEYS));
-        return false;
     }
-
-    for (size_t index = 0; index < number_of_symmetric_keys; ++index)
+    else
     {
-        const symmetric_key_t &source = symmetric_keys[index];
-        bool valid = true;
-        if (source.key_id < 1 || source.key_id > 65535)
+        for (size_t index = 0; index < number_of_symmetric_keys; ++index)
         {
-            ESP_LOGE(TAG, "Symmetric key %zu: key_id must be between 1 and 65535 (inclusive)(got %" PRIu32 ")", index + 1, source.key_id);
-            valid = false;
-        }
-        size_t actual_length = 0;
-        bool alphanumeric = true;
-        while (actual_length < sizeof(source.key_value) && source.key_value[actual_length] != '\0')
-        {
-            const char character = source.key_value[actual_length++];
-            if (!((character >= '0' && character <= '9') ||
-                  (character >= 'A' && character <= 'Z') ||
-                  (character >= 'a' && character <= 'z')))
-                alphanumeric = false;
-        }
-        if (!alphanumeric)
-        {
-            ESP_LOGE(TAG, "Symmetric key %zu: key_value must contain only alphanumeric characters", index + 1);
-            valid = false;
-        }
-        if (actual_length != SYMMETRIC_KEY_LENGTH || source.key_value[SYMMETRIC_KEY_LENGTH] != '\0')
-        {
-            ESP_LOGE(TAG, "Symmetric key %zu: key_value must contain exactly %zu characters (got %zu)",
-                     index + 1, SYMMETRIC_KEY_LENGTH, actual_length);
-            valid = false;
-        }
-        for (size_t other = 0; other < s_key_count; ++other)
-        {
-            if (s_keys[other].key_id == source.key_id)
+            const symmetric_key_t &source = symmetric_keys[index];
+            bool valid = true;
+            if (source.key_id < 1 || source.key_id > 65535)
             {
-                ESP_LOGE(TAG, "Symmetric key %zu: duplicate key_id %" PRIu32, index + 1, source.key_id);
+                ESP_LOGE(TAG, "Symmetric key %zu: key_id must be between 1 and 65535 (inclusive)(got %" PRIu32 ")", index + 1, source.key_id);
                 valid = false;
-                break;
             }
-        }
-        if (!valid)
-            continue;
+            if (!key_value_is_valid(source.key_value, sizeof(source.key_value)))
+            {
+                ESP_LOGE(TAG, "Symmetric key %zu: key_value must contain exactly %zu letters or digits", index + 1, SYMMETRIC_KEY_LENGTH);
+                valid = false;
+            }
+            for (size_t other = 0; other < s_compiled.count; ++other)
+            {
+                if (s_compiled.keys[other].key_id == source.key_id)
+                {
+                    ESP_LOGE(TAG, "Symmetric key %zu: duplicate key_id %" PRIu32, index + 1, source.key_id);
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid)
+                continue;
 
-        s_keys[s_key_count++] = {source.key_id, NTP_AUTH_ALGORITHM_SHA256_160, static_cast<uint8_t>(SYMMETRIC_KEY_LENGTH), NTP_AUTH_KEY_ACTIVE, {}};
-        memcpy(s_keys[s_key_count - 1].key, source.key_value, SYMMETRIC_KEY_LENGTH);
+            ntp_auth_key_t &key = s_compiled.keys[s_compiled.count++];
+            key = {source.key_id, NTP_AUTH_ALGORITHM_SHA256_160, static_cast<uint8_t>(SYMMETRIC_KEY_LENGTH), NTP_AUTH_KEY_ACTIVE, {}};
+            memcpy(key.key, source.key_value, SYMMETRIC_KEY_LENGTH);
+        }
     }
-#endif
-    if (psa_crypto_init() != PSA_SUCCESS)
-        return false;
-    s_available = s_key_count != 0;
-    return s_available;
+    s_crypto_ready = psa_crypto_init() == PSA_SUCCESS;
+    return s_crypto_ready;
+}
+
+bool ntp_auth_configure(bool enabled, bool use_override_key, uint32_t override_key_id, const char *override_key)
+{
+    key_set_t next{};
+    if (use_override_key)
+    {
+        if (override_key_id >= 1 && override_key_id <= 65535 && override_key != nullptr &&
+            key_value_is_valid(override_key, SYMMETRIC_KEY_LENGTH + 1))
+        {
+            next.count = 1;
+            next.keys[0] = {override_key_id, NTP_AUTH_ALGORITHM_SHA256_160, static_cast<uint8_t>(SYMMETRIC_KEY_LENGTH), NTP_AUTH_KEY_ACTIVE, {}};
+            memcpy(next.keys[0].key, override_key, SYMMETRIC_KEY_LENGTH);
+        }
+        else
+            ESP_LOGE(TAG, "The NTP key of the web settings is not valid; no key is in use");
+    }
+    else
+        next = s_compiled;
+
+    const bool available = enabled && s_crypto_ready && next.count != 0;
+    {
+        std::lock_guard<std::mutex> lock(s_writer_mutex);
+        // Switch off first, so no request is answered with a key that is half replaced
+        s_available.store(false, std::memory_order_release);
+        const uint32_t s = s_sequence.load(std::memory_order_relaxed);
+        s_sequence.store(s + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        s_active = next;
+        s_sequence.store(s + 2, std::memory_order_release);
+        s_available.store(available, std::memory_order_release);
+    }
+    memset(&next, 0, sizeof(next));
+    return available;
 }
 
 bool ntp_auth_available()
 {
-    return s_available;
+    return s_available.load(std::memory_order_acquire);
+}
+
+size_t ntp_auth_compiled_key_count()
+{
+    return s_compiled.count;
 }
 
 size_t ntp_auth_key_count()
 {
-    return s_available ? s_key_count : 0;
+    if (!ntp_auth_available())
+        return 0;
+    key_set_t keys{};
+    snapshot(keys);
+    const size_t count = keys.count;
+    memset(&keys, 0, sizeof(keys));
+    return count;
 }
 
 uint32_t ntp_auth_default_key_id()
 {
-    return s_available ? s_keys[0].key_id : 0;
+    if (!ntp_auth_available())
+        return 0;
+    key_set_t keys{};
+    snapshot(keys);
+    const uint32_t key_id = keys.count != 0 ? keys.keys[0].key_id : 0;
+    memset(&keys, 0, sizeof(keys));
+    return key_id;
 }
 
 bool ntp_auth_key_hex(size_t index, uint32_t *key_id, char *output, size_t output_size)
 {
-    if (!s_available || index >= s_key_count || key_id == nullptr || output == nullptr ||
-        output_size < s_keys[index].key_length * 2 + 1)
+    if (!ntp_auth_available() || key_id == nullptr || output == nullptr)
         return false;
-
-    const ntp_auth_key_t &key = s_keys[index];
-    static constexpr char hex_digits[] = "0123456789ABCDEF";
-    for (size_t character_index = 0; character_index < key.key_length; ++character_index)
+    key_set_t keys{};
+    snapshot(keys);
+    bool ok = index < keys.count && output_size >= static_cast<size_t>(keys.keys[index].key_length) * 2 + 1;
+    if (ok)
     {
-        output[character_index * 2] = hex_digits[key.key[character_index] >> 4];
-        output[character_index * 2 + 1] = hex_digits[key.key[character_index] & 0x0F];
+        const ntp_auth_key_t &key = keys.keys[index];
+        static constexpr char hex_digits[] = "0123456789ABCDEF";
+        for (size_t character_index = 0; character_index < key.key_length; ++character_index)
+        {
+            output[character_index * 2] = hex_digits[key.key[character_index] >> 4];
+            output[character_index * 2 + 1] = hex_digits[key.key[character_index] & 0x0F];
+        }
+        output[key.key_length * 2] = '\0';
+        *key_id = key.key_id;
     }
-    output[key.key_length * 2] = '\0';
-    *key_id = key.key_id;
-    return true;
+    memset(&keys, 0, sizeof(keys));
+    return ok;
 }
 
 bool ntp_auth_default_key_hex(char *output, size_t output_size)
@@ -191,18 +284,23 @@ bool ntp_auth_default_key_hex(char *output, size_t output_size)
 
 bool ntp_auth_default_key_ascii(char *output, size_t output_size)
 {
-    if (!s_available || output == nullptr || output_size < s_keys[0].key_length + 1)
+    if (!ntp_auth_available() || output == nullptr)
         return false;
-
-    for (size_t index = 0; index < s_keys[0].key_length; ++index)
+    key_set_t keys{};
+    snapshot(keys);
+    bool ok = keys.count != 0 && output_size >= static_cast<size_t>(keys.keys[0].key_length) + 1;
+    for (size_t index = 0; ok && index < keys.keys[0].key_length; ++index)
     {
-        const uint8_t character = s_keys[0].key[index];
+        const uint8_t character = keys.keys[0].key[index];
         if (character < 0x21 || character > 0x7E)
-            return false;
-        output[index] = static_cast<char>(character);
+            ok = false;
+        else
+            output[index] = static_cast<char>(character);
     }
-    output[s_keys[0].key_length] = '\0';
-    return true;
+    if (ok)
+        output[keys.keys[0].key_length] = '\0';
+    memset(&keys, 0, sizeof(keys));
+    return ok;
 }
 
 ntp_auth_result_t ntp_auth_verify_request(const uint8_t *packet, size_t packet_length, uint8_t version, uint32_t *key_id)
@@ -215,18 +313,20 @@ ntp_auth_result_t ntp_auth_verify_request(const uint8_t *packet, size_t packet_l
         return ntp_auth_result_t::unauthenticated;
     if (version != 4 || packet_length != 48 + NTP_AUTH_TRAILER_SIZE)
         return ntp_auth_result_t::malformed;
-    if (!s_available)
+    if (!ntp_auth_available())
         return ntp_auth_result_t::unavailable;
 
     const size_t key_id_offset = packet_length - NTP_AUTH_TRAILER_SIZE;
     const uint32_t requested_key_id = read_u32_be(packet + key_id_offset);
-    const ntp_auth_key_t *key = find_key(requested_key_id);
-    if (key == nullptr)
+    ntp_auth_key_t key{};
+    if (!find_key(requested_key_id, key))
         return ntp_auth_result_t::unknown_key;
 
     uint8_t digest[NTP_AUTH_DIGEST_SIZE] = {};
-    if (!calculate_digest(*key, packet, key_id_offset, digest) ||
-        !constant_time_equal(digest, packet + key_id_offset + NTP_AUTH_KEY_ID_SIZE, NTP_AUTH_DIGEST_SIZE))
+    const bool valid = calculate_digest(key, packet, key_id_offset, digest) &&
+                       constant_time_equal(digest, packet + key_id_offset + NTP_AUTH_KEY_ID_SIZE, NTP_AUTH_DIGEST_SIZE);
+    memset(&key, 0, sizeof(key));
+    if (!valid)
         return ntp_auth_result_t::invalid_mac;
 
     if (key_id != nullptr)
@@ -236,15 +336,17 @@ ntp_auth_result_t ntp_auth_verify_request(const uint8_t *packet, size_t packet_l
 
 bool ntp_auth_append_response(uint8_t *packet, size_t packet_capacity, size_t *packet_length, uint32_t key_id)
 {
-    if (packet == nullptr || packet_length == nullptr || *packet_length != 48 || packet_capacity < 48 + NTP_AUTH_TRAILER_SIZE || !s_available)
+    if (packet == nullptr || packet_length == nullptr || *packet_length != 48 || packet_capacity < 48 + NTP_AUTH_TRAILER_SIZE || !ntp_auth_available())
         return false;
 
-    const ntp_auth_key_t *key = find_key(key_id);
-    if (key == nullptr)
+    ntp_auth_key_t key{};
+    if (!find_key(key_id, key))
         return false;
 
     write_u32_be(packet + 48, key_id);
-    if (!calculate_digest(*key, packet, 48, packet + 48 + NTP_AUTH_KEY_ID_SIZE))
+    const bool ok = calculate_digest(key, packet, 48, packet + 48 + NTP_AUTH_KEY_ID_SIZE);
+    memset(&key, 0, sizeof(key));
+    if (!ok)
         return false;
     *packet_length = 48 + NTP_AUTH_TRAILER_SIZE;
     return true;

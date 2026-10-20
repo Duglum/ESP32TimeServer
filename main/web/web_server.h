@@ -1,0 +1,44 @@
+// ESP32 Time Server
+// Copyright Rob Latour, 2026
+// License: MIT
+// Website: https://github.com/roblatour/ESP32TimeServer
+//
+// Web admin page: HTTPS on TCP 443 only (IPv4 and IPv6), self-signed per-device certificate.
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+#include "web_settings.h"
+
+typedef struct esp_netif_obj esp_netif_t;
+
+struct web_app_status_t
+{
+    char firmware_version[24];
+    char build[48];
+    bool time_set;
+    bool pps_active;
+    bool gnss_locked;
+    bool stratum_one;
+    bool ublox_receiver;          // UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED: the baud rate is detected automatically
+    uint32_t gnss_baud_in_use;
+    bool lcd_present;
+    bool led_active;
+    bool mqtt_connected;
+    bool ntp_auth_available;
+    size_t ntp_auth_compiled_keys;
+    uint32_t free_heap;
+};
+
+// Starts the web admin in its own task (TLS identity, password hash, HTTPS server). Call once the Ethernet
+// interface exists. If the settings of this boot came from a one-shot set that changed the network, the 120 s
+// confirmation starts as well.
+void web_admin_start();
+
+// Implemented in main.cpp
+void app_get_status(web_app_status_t &status);
+esp_netif_t *app_eth_netif();
+// The network configuration of the interface changed: refresh the address cache used by the NTP and LCD code
+void app_network_settings_changed();

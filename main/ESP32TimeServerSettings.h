@@ -5,6 +5,13 @@
 //
 // Note: some additional settings are defined in the ESP32TimeServerSettingsSecrets.h file
 //
+// Web admin page (https://<address>/, TCP 443): the network settings, the GNSS and PPS pins, the GNSS baud rate,
+// the PTP PPS loopback pin, the LCD, time zone, RGB LED, MQTT and NTP authentication settings below can also be
+// changed on the page. Settings saved there (NVS) take precedence over the values in this file; the values here
+// are the defaults and are used again after a factory reset. The features LCD, RGB LED, MQTT and NTP
+// authentication are always compiled in: their *_ENABLED values below only decide whether they are on by default.
+// DeviceName is the default host name (FQDN) of the page.
+//
 
 #pragma once
 #include <cstddef>
@@ -211,8 +218,6 @@ static constexpr int TXPin = 22;  // note: prior to release 2.4 pin 16 was used 
 static constexpr int RXPin = 21;  // note: prior to release 2.4 pin 17 was used for RX
 static constexpr int PPSPin = 20; // note: prior to release 2.4 pin 18 was used for PPS
 
-<<<<<<< Updated upstream
-=======
 // (optional) GPIO pin for the PTP PPS loopback, -1 = not used
 // The Ethernet MAC outputs one pulse per second of its PTP clock on this pin, and the pin is read back by the same
 // MCPWM capture timer that captures the GNSS PPS. This compares the PTP clock with the GNSS PPS in hardware
@@ -222,7 +227,6 @@ static constexpr int PPSPin = 20; // note: prior to release 2.4 pin 18 was used 
 // Requires PTP_FREE_RUNNING 1 in main.cpp and an ESP32-P4 of revision v3.0 or newer.
 static constexpr int PTPPPSLoopbackPin = 23;
 
->>>>>>> Stashed changes
 // (required) GPIO pin definitions for the Waveshare:
 // ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH, ESP32-P4-WIFI-POE-ETH
 // if your using this board do not change these
