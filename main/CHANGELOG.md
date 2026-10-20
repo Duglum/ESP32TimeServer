@@ -2,7 +2,7 @@
 
 This file combines `Sonnet_CHANGELOG.md` (precision and stability work done earlier) and `Review_2026-10-19_CHANGELOG.md` (review of 2026-10-19 and its follow-ups). Where the later review changed or replaced something from the earlier work, only the current state is described.
 
-State described here: the files in the repository on 2026-10-19 after the review, including the stack sizes set by the user afterwards (section 4.15), and the follow-up of the same evening: fine local timebase and free-running, frequency disciplined PTP clock with optional PPS loopback (sections 4.19 to 4.21, results in 7.6).
+State described here: the files in the repository on 2026-10-19 after the review, including the stack sizes set by the user afterwards (section 4.15), and the follow-up of the same evening: fine local timebase and free-running, frequency disciplined PTP clock with optional PPS loopback (sections 4.19 to 4.21, results in 7.6), and of 2026-10-20: PTP clock from the 80 MHz PLL, root dispersion 1 (section 4.22).
 
 Contents
 
@@ -39,7 +39,7 @@ Contents
 | 10 | Hardware TX time stamps for the interleaved mode | T3 of interleaved responses is the real transmit time |
 | 11 | **Transmit delay compensation for basic mode T3** (running mean of hardware TX time - software T3) | basic clients (Windows, ntpd, phones) no longer see half the transmit delay as offset |
 | 12 | Interleaved mode fixes: cache by client IP, lifetime 30 minutes, correct T3 caching | chrony runs in interleaved mode on IPv4 and IPv6 |
-| 13 | Precision -20, root dispersion 2 | chrony sees the real delay and selects the server |
+| 13 | Precision -24 (was -20), root dispersion 1 (was 2) | chrony sees the real delay and selects the server; error bound 15 µs smaller |
 | 14 | **No clock step at the periodic GNSS check** when the clock already shows the right second; no stratum 16 window during the check | no disturbance every 10 minutes |
 | 15 | **Robust second label** (label data only from after the PPS edge, confirmation of a 1 s difference, consistency check at the first sync) | no risk of a 1 s error from an old NMEA sentence or an early UBX poll |
 | 16 | **Raw NTP path only answers well-formed unicast requests to the own address**; everything else goes to lwIP | no replies with broadcast, multicast or foreign source addresses |
@@ -50,6 +50,7 @@ Contents
 | 21 | **Fine local timebase**: the raw 16 MHz systimer counter instead of the 1 µs `esp_timer_get_time()` for all time critical readings | 62.5 ns resolution instead of 1 µs (0.29 µs RMS rounding noise removed from software T3, PPS anchor, PTP measurements, interrupt latency test) |
 | 22 | **Free-running PTP clock**: set once, then only its frequency is steered (EMAC fine addend); offset and rate are estimated once per second and the hardware time stamps are converted with a continuous mapping | no per-second clock write: the rare errors of up to 33 µs for frames that straddle a write are gone, no write latency in the result, holdover on the learned rate |
 | 23 | **Optional PTP PPS loopback** (`PTPPPSLoopbackPin`): the EMAC PPS output is captured by the same MCPWM timer as the GNSS PPS | PTP clock measured against the PPS in hardware: the constant read delay error of the software measurement (some 100 ns) is removed; simulated error of T2 / hardware T3 16 ns RMS |
+| 24 | **PTP clock from the 80 MHz PLL** instead of the 40 MHz crystal (2026-10-20) | time stamp steps 13 ns instead of 40 ns |
 
 No memory leak was found in the review (section 4.13).
 
@@ -215,7 +216,7 @@ This is the mode before the follow-up; it is kept as an option. The default is t
 ### 4.13 NTP header fields
 
 - `NTP_PRECISION_EXPONENT = -24` (60 ns, the resolution of the fine local timebase, 4.19; -20 = 0.95 µs with `FINE_LOCAL_TIMEBASE 0`; originally -13 = 122 µs).
-- `NTP_ROOT_DISPERSION = 2` (2/65536 s = 30.5 µs; was 66 = 1.007 ms). The server only reports stratum 1 with active PPS.
+- `NTP_ROOT_DISPERSION = 1` (1/65536 s = 15.3 µs, the smallest non-zero value of the field; 2 = 30.5 µs until 2026-10-20, originally 66 = 1.007 ms). The server only reports stratum 1 with active PPS. The field only enters the error bound of the clients (root distance, chrony's `+/-`), not the time.
 
 ### 4.14 GNSS time synchronisation (review)
 
@@ -259,7 +260,7 @@ This is the mode before the follow-up; it is kept as an option. The default is t
 | OTE service | 3560 |
 | PPS discipline | 3584 (follow-up: was 3135; the PTP servo runs in this task) |
 
-Check the values with `CALCULATE_STACK_SIZES_ENABLED` after every change of a task. The PPS discipline value of the follow-up is an estimate with margin and has not been measured yet.
+Check the values with `CALCULATE_STACK_SIZES_ENABLED` after every change of a task. The PPS discipline value of the follow-up was checked by the user with `CALCULATE_STACK_SIZES_ENABLED` (well within the limit).
 
 ### 4.16 Unused code removed (review)
 
@@ -320,7 +321,15 @@ Other cases:
 - The pin is driven as an output: it must be free and connected to nothing. It must not be `PPSPin`. The PTP PPS output exists from chip revision v3.0 (the board has v3.2, `CONFIG_ESP32P4_REV_MIN_301`).
 - The PPS task pairs the GNSS edge with the PTP pulse within ±0.5 s (waits up to 300 µs for a pulse that follows closely). If a pulse is missing or implausible the software measurement of that second is used; after 30 seconds without any usable pulse a warning is printed once (`is the pin free and unconnected?`).
 - `PTP_PPS_LOOPBACK_DELAY_NS` (0): delay of the loopback path minus that of the GNSS PPS input; both go through a pad and the GPIO matrix, the difference is a few ns.
-- Remaining errors: the PPS jitter of the GNSS module (filtered), 12.5 ns capture resolution, 40 ns steps of the PTP clock (the pulse comes at the first step after the second, the time stamps show the last step before the frame: on average both are half a step late/early and cancel).
+- Remaining errors: the PPS jitter of the GNSS module (filtered), 12.5 ns capture resolution, 13 ns steps of the PTP clock with the PLL source, 40 ns from the crystal (4.22) (the pulse comes at the first step after the second, the time stamps show the last step before the frame: on average both are half a step late/early and cancel).
+
+### 4.22 PTP clock from the 80 MHz PLL, root dispersion 1 (2026-10-20)
+
+- `PTP_CLOCK_FROM_PLL 1`: `esp_eth_clock_init()` starts the PTP clock from the 40 MHz crystal (ESP-IDF default, sub-second increment 86 × 2^-31 s = 40.05 ns). `configure_hardware_timestamps()` then calls `ptp_mac_enable()`: the clock gate of `SOC_MOD_CLK_PLL_F80M` is requested (`esp_clk_tree_enable_src()`, kept for good) and the PTP block is started again with `EMAC_PTP_CLK_SRC_PLL_F80M`, period 12.5 ns, `required_accuracy_ns` 13.1. The HAL makes the increment (uint8_t)(13.1 / 0.465) = 28 units = 13.04 ns, addend 0.959 × 2^32 (with the largest frequency command of the HAL, +0.512 %, 0.964 × 2^32: no overflow). PLL_F80M is derived from the 40 MHz crystal, so the servo sees the same rate as before.
+- Check after the switch: over 20 ms the PTP clock has to advance like the local timebase within 0.1 %. If not (clock gate, wrong frequency), the crystal configuration is used and a warning is printed. The source chosen at the start is kept: the Ethernet recovery starts the PTP block with the same source (if the PLL then fails, the recovery reports a time stamp failure instead of switching), because the absolute frequency command of the servo (`esp_eth_mac_adj_ptp_time()`) refers to the base addend captured at its first call.
+- Effect: time stamp quantization 3.8 ns RMS instead of 11.6 ns per time stamp. The 50 MHz RMII interface (20 ns) now limits the receive time stamps; the gain is not visible to clients with 0.2 µs noise.
+- `NTP_ROOT_DISPERSION` 2 → 1 (15.3 µs, smallest non-zero value). Only the error bound shown by the clients changes (chrony `+/-` about 15 µs smaller), not the time.
+- `PTP_LATENCY_CODE_VERSION` fingerprint (only with `PTP_FREE_RUNNING 0`) contains `PTP_CLOCK_FROM_PLL`.
 
 ## 5. Security and open ports
 
@@ -458,7 +467,7 @@ Results:
 
 ### 7.6 Simulation of the free-running PTP clock (follow-up)
 
-Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.06 ppm, systimer 16 MHz, EMAC PTP clock with 40 ns steps, fine addend (integer arithmetic of the HAL) and the two-register read, GNSS PPS jitter 20 ns RMS, error of the PPS anchor +40 ns ± 15 ns, call times with jitter, 1 % interrupted readings, PTP register read 450 ns after the start of the bracket (an assumed value: the real one is not known), PPS task 150 ± 30 ms after the edge. 1800 s per case, error of T2 / hardware T3 at 20 random instants per second after the first 120 s; "in-flight" = frame time stamped 100 µs after the edge and converted after the update of that second. Ranges over 8 random seeds.
+Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.06 ppm, systimer 16 MHz, EMAC PTP clock with 40 ns steps (the table; with the PLL source of 4.22 see the note below it), fine addend (integer arithmetic of the HAL) and the two-register read, GNSS PPS jitter 20 ns RMS, error of the PPS anchor +40 ns ± 15 ns, call times with jitter, 1 % interrupted readings, PTP register read 450 ns after the start of the bracket (an assumed value: the real one is not known), PPS task 150 ± 30 ms after the edge. 1800 s per case, error of T2 / hardware T3 at 20 random instants per second after the first 120 s; "in-flight" = frame time stamped 100 µs after the edge and converted after the update of that second. Ranges over 8 random seeds.
 
 | Case | Per-second write (`PTP_FREE_RUNNING 0`) | Free-running, software measurement | Free-running, loopback |
 |---|---|---|---|
@@ -474,6 +483,7 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 - The mean of about -177 ns in the first two columns is the assumed read position inside the bracket; it is a constant error of the software measurement in both modes (the real value of the board is not known, 7.4 suggests some 100 ns). The loopback measures it (debug `software - loopback`, simulated 175 to 183 ns) and removes it.
 - The noise around that mean is 29 ns RMS with the per-second write and 19 ns with the free-running clock in software mode.
 - The per-second write gives errors of up to the crystal drift of one second (35 µs at -33 ppm) for frames that straddle a write. The simulation has such a frame in every second by construction; on the board it is about 1 in 10000 frames (section 2).
+- With the PTP clock from the PLL (4.22, 13 ns steps) the simulated loopback error drops from 16 to 10 ns RMS (max 38 ns). The simulation does not model the 20 ns granularity of the RMII interface, so the real gain is smaller.
 - These are simulations: the timing values of the board (read position, bus delays) are assumptions. The relative results (no in-flight error, filter noise, loopback removes the constant error) do not depend on them.
 
 ## 8. Settings reference
@@ -490,7 +500,8 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `PTP_SERVO_TIME_CONSTANT_S` | PTP servo | 16 | decay time of the PTP offset under the servo |
 | `ptp_step_threshold_ns` | PTP servo | 100 µs | larger offsets are stepped, smaller ones slewed |
 | `PTP_PPS_LOOPBACK_DELAY_NS` | PTP servo | 0 | delay of the loopback path minus the GNSS PPS input path |
-| `NTP_ROOT_DISPERSION` | `main.cpp`, top | 2 | advertised root dispersion, 1/65536 s per unit |
+| `NTP_ROOT_DISPERSION` | `main.cpp`, top | 1 | advertised root dispersion, 1/65536 s per unit |
+| `PTP_CLOCK_FROM_PLL` | after `PTP_FREE_RUNNING` | 1 | 1 = PTP clock from PLL_F80M (13 ns steps), 0 = 40 MHz crystal (40 ns steps) |
 | `PPS_ISR_LATENCY_DEFAULT_US` | compensation block | 2.6 | used until a value is measured |
 | `PTP_LATENCY_AUTO` | compensation block | 1 (forced to 0 with `PTP_FREE_RUNNING 1`) | calibrate and store the PTP write latency; 0 = always the default |
 | `PTP_LATENCY_FORCE_RECALIBRATION` | compensation block | 0 | 1 = calibrate again at the next start |
@@ -525,6 +536,7 @@ Always printed (brief):
 
 - `PPS ISR latency: using the stored value X us` / `no stored value for this configuration, using X us until it is measured`
 - `PPS ISR latency measurement started ...`, the statistics line, `central value (mean of the lowest 75 %) = X us`, `X us applied (was Y us) and stored in NVS`
+- `PTP clock: 80 MHz PLL source, time stamp steps of 13 ns` or the warning `PTP clock: the 80 MHz PLL source does not work, using the 40 MHz crystal (40 ns steps)`
 - `PTP clock: free-running and frequency disciplined, measured against the PPS by software readings` or `PTP PPS loopback on GPIO n: the PTP clock is measured against the PPS in hardware` (at the Ethernet start)
 - Loopback problems: `PTP PPS loopback: PPS output on GPIO n failed ...`, `... capture channel on GPIO n failed ...`, `... GPIO n cannot be used ...`, `PTP PPS loopback on GPIO n: no usable pulses (...); is the pin free and unconnected?`
 - `PTP_FREE_RUNNING 0` only: `PTP write latency: N ns read from NVS (calibration skipped)` / `no stored value for this configuration, using the default 3850 ns until the calibration has finished ...`
@@ -557,7 +569,8 @@ Only with `DEBUG_ENABLED`:
 | Compilation | `-fsyntax-only` against stubs in 9 feature combinations; host compile with -O2 and the IDF warning flags in 5 combinations; CMake rule tested with mocked IDF functions | build with ESP-IDF 6.1 and -O2 by the user (the build fixes in 4.17 came from those builds) |
 
 | Review changes on the board | debug output of the test board (7.4), 2.7 h chrony comparison against the Sonnet firmware (7.5) | yes |
-| Follow-up: fine timebase, free-running PTP clock, loopback | `-fsyntax-only` against stubs (extended by the PTP PPS and frequency functions) in 8 combinations incl. `PTP_FREE_RUNNING 0` and `FINE_LOCAL_TIMEBASE 0`, -O2 with the IDF warning flags; servo simulation with 12 cases and 8 seeds (7.6); the existing host tests (frames, checksums, TX delay, legacy PTP mapping) | **not yet**: needs a build with ESP-IDF 6.1 and a run on the board |
+| Follow-up: fine timebase, free-running PTP clock, loopback | `-fsyntax-only` against stubs (extended by the PTP PPS and frequency functions) in 8 combinations incl. `PTP_FREE_RUNNING 0` and `FINE_LOCAL_TIMEBASE 0`, -O2 with the IDF warning flags; servo simulation with 12 cases and 8 seeds (7.6); the existing host tests (frames, checksums, TX delay, legacy PTP mapping) | yes: built with ESP-IDF 6.1, loopback on GPIO 23 active on all four boards, stack sizes measured, overnight chrony run (13 h) and all boards within about 2 µs on the DiskStation |
+| PLL clock source, root dispersion 1 (2026-10-20) | `-fsyntax-only` in 7 combinations incl. `PTP_CLOCK_FROM_PLL 0`, -O2 with the IDF warning flags; unit test of the source selection (PLL works / fails at the start / fails at a recovery, increment and addend headroom); servo simulation with 13 ns steps | **not yet** |
 
 The transmit delay compensation of basic mode responses was measured on the board (7.4) but not checked with a basic mode client (chrony uses the interleaved mode).
 
@@ -568,7 +581,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - The measurements are limited by the client: kernel RX time stamps and the OpenVSwitch bridge on the DiskStation add about 18.5 µs noise on the return path (7.5).
 - The PTP clock rate against esp_timer: earlier comparisons showed +0.37 / -0.45 ppm, within what the method resolved. With `PTP_FREE_RUNNING 1` the servo measures the rate of the PTP clock itself, so this no longer matters; with `PTP_FREE_RUNNING 0` the error of T2 would grow by up to 0.4 µs over the second.
 - `PTP_FREE_RUNNING 0` only: a frame time stamped shortly before a PTP write but converted after it uses the new compensation (error up to the drift of one second, about 33 µs with the -33 ppm oscillator of the test board; probability about 1 in 10000 samples, chrony filters it). Late PTP writes: about 15 per hour with a deviation of about -5.7 µs (7.4).
-- The free-running servo and the loopback have only been simulated (7.6). In particular not verified on the board: the pulse of the EMAC PPS output on a pad that is also read by the MCPWM capture, the frequency command through `esp_eth_mac_adj_ptp_time()`, the stack use of the PPS task (3584 bytes set without measurement).
+- The free-running servo and the loopback run on all four boards (loopback on GPIO 23); the board's own error is below what the DiskStation can resolve (about 0.19 µs). The PLL clock source (4.22) is not yet verified on the board.
 - `esp_timer_impl_get_counter_reg()` is an internal function of esp_timer. If a later IDF version renames it, the build fails at the link step; then set `FINE_LOCAL_TIMEBASE 0`.
 - The calibrations assume the board is warm and the PPS locked. A run that does not finish starts again at the next boot.
 - After a PPS loss the server goes to stratum 16 after 3.5 s (no holdover at stratum 1), although the PTP clock now keeps the learned rate (simulated: below 1 µs in 5 minutes with a constant crystal).
@@ -578,7 +591,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 ## 13. Recommendations that are not in the code
 
 - Per-client rate limiting (like chrony's `ratelimit`) to protect the other clients from a single flooding host.
-- Holdover at stratum 1 for a few minutes with growing root dispersion after a PPS loss.
+- Holdover at stratum 1 after a PPS loss: not wanted (decision of 2026-10-20); the server goes to stratum 16 after 3.5 s as before.
 - OTE: Secure Boot V2 and flash encryption if it is enabled; MQTT over TLS.
 
 ## 14. Files and how to build

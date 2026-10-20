@@ -73,6 +73,7 @@ extern "C"
 #include "esp_eth_clock.h"
 #include "esp_eth_driver.h"
 #include "esp_eth_mac_esp.h"
+#include "esp_private/esp_clk_tree_common.h"
 #include "esp_log.h"
 #include "ff.h"
 #include "esp_mac.h"
@@ -515,7 +516,7 @@ static constexpr size_t NTP_MAX_PACKET_SIZE = NTP_PACKET_SIZE;
 #endif
 static constexpr uint64_t NTP_EPOCH_OFFSET = 2208988800ULL;
 // NTP_PRECISION_EXPONENT is defined after the local timebase (it follows its resolution)
-static constexpr uint32_t NTP_ROOT_DISPERSION = 2; // NTP short format, 1/65536 s per unit: 2 = 30.5 us (served at stratum 1 with active PPS only)
+static constexpr uint32_t NTP_ROOT_DISPERSION = 1; // NTP short format, 1/65536 s per unit: 1 = 15.3 us, the smallest non-zero value (served at stratum 1 with active PPS only)
 static constexpr uint64_t NTP_CACHE_TIMESTAMP_MATCH_TOLERANCE = 8;
 static constexpr size_t NTP_SOCKET_BATCH_LIMIT = 16;
 static constexpr EventBits_t ETH_CONNECTED_BIT = BIT0;
@@ -600,6 +601,14 @@ static std::atomic<int32_t> s_pps_isr_latency_ns{static_cast<int32_t>(PPS_ISR_LA
 //     No clock steps every second, no write latency, no time stamp that straddles a write.
 // 0 = previous behaviour: the PTP clock is written from the PPS model every second (see PTP_OFFSET_MEASUREMENT)
 #define PTP_FREE_RUNNING 1
+
+// ---- PTP clock source ----
+// 1 = the EMAC PTP clock runs from the 80 MHz PLL output (PLL_F80M, derived from the 40 MHz crystal): time stamps in
+//     steps of 13.04 ns instead of 40.05 ns. The rate of the clock is checked after the switch; if it is not right
+//     the 40 MHz crystal is used (warning at the start). Once a source has been used it is kept (the frequency
+//     command of the servo refers to its base value).
+// 0 = 40 MHz crystal (ESP-IDF default configuration, 40.05 ns steps)
+#define PTP_CLOCK_FROM_PLL 1
 
 // ---- PTP write latency: calibrated at run time and stored in NVS ----
 // Latency between the local time reading taken just before clock_settime(CLOCK_PTP_SYSTEM) and the instant the new
@@ -781,7 +790,8 @@ static inline __attribute__((always_inline)) uint64_t local_ticks() { return sta
 static inline __attribute__((always_inline)) int64_t local_ticks_to_ns(uint64_t ticks) { return static_cast<int64_t>(ticks) * 1000LL; }
 static constexpr int8_t LOCAL_TIMEBASE_PRECISION_EXPONENT = -20; // 2^-20 s = 0.95 us
 #endif
-// Precision announced in NTP replies: resolution of the software clock (the EMAC time stamps have 40 ns steps)
+// Precision announced in NTP replies: resolution of the software clock (the EMAC time stamps have 13 ns steps with
+// PTP_CLOCK_FROM_PLL, 40 ns from the crystal)
 static constexpr int8_t NTP_PRECISION_EXPONENT = LOCAL_TIMEBASE_PRECISION_EXPONENT;
 
 // Local time in ns since boot on the fine timebase (same zero point as esp_timer_get_time).
@@ -789,6 +799,78 @@ static constexpr int8_t NTP_PRECISION_EXPONENT = LOCAL_TIMEBASE_PRECISION_EXPONE
 static inline __attribute__((always_inline)) int64_t local_now_ns() { return local_ticks_to_ns(local_ticks()); }
 // The same instant on the esp_timer_get_time() scale (whole microseconds, truncated like esp_timer)
 static inline __attribute__((always_inline)) int64_t local_ticks_to_esp_us(uint64_t ticks) { return static_cast<int64_t>(ticks / LOCAL_TICKS_PER_US); }
+
+// ---- Configuration of the EMAC PTP clock (see PTP_CLOCK_FROM_PLL) ----
+static std::atomic<bool> s_ptp_clock_pll{false}; // the PTP clock runs from PLL_F80M
+
+static eth_mac_ptp_config_t ptp_mac_config(bool pll)
+{
+    eth_mac_ptp_config_t config = ETH_MAC_ESP_PTP_DEFAULT_CONFIG(); // 40 MHz crystal, 40.05 ns steps, binary rollover
+#if PTP_CLOCK_FROM_PLL
+    if (pll)
+    {
+        config.clk_src = EMAC_PTP_CLK_SRC_PLL_F80M;
+        config.clk_src_period_ns = 12.5f;
+        // The HAL sets the sub-second increment to (uint8_t)(13.1 / 0.465) = 28 units of 2^-31 s = 13.04 ns.
+        // Addend = 2^32 * 12.5 / 13.04 = 0.959 * 2^32: room for the frequency command (at most +0.5 %).
+        config.required_accuracy_ns = 13.1f;
+    }
+#else
+    (void)pll;
+#endif
+    return config;
+}
+
+// true if the PTP clock advances at its nominal rate: checked over 20 ms against the local timebase (within 0.1 %)
+static bool ptp_clock_rate_plausible(esp_eth_mac_t *mac)
+{
+    eth_mac_time_t t1{};
+    eth_mac_time_t t2{};
+    const int64_t a = local_now_ns();
+    if (esp_eth_mac_get_ptp_time(mac, &t1) != ESP_OK)
+        return false;
+    vTaskDelay(pdMS_TO_TICKS(20));
+    const int64_t b = local_now_ns();
+    if (esp_eth_mac_get_ptp_time(mac, &t2) != ESP_OK)
+        return false;
+    const int64_t ptp_elapsed = (static_cast<int64_t>(t2.seconds) - static_cast<int64_t>(t1.seconds)) * 1000000000LL +
+                                (static_cast<int64_t>(t2.nanoseconds) - static_cast<int64_t>(t1.nanoseconds));
+    const int64_t local_elapsed = b - a;
+    return local_elapsed > 0 && std::llabs(ptp_elapsed - local_elapsed) < local_elapsed / 1000;
+}
+
+// Enables the EMAC PTP clock with the configured source. first = initial setup (the source may still fall back to
+// the crystal); later calls (Ethernet recovery) keep the source chosen at the start.
+static bool ptp_mac_enable(esp_eth_mac_t *mac, bool first)
+{
+#if PTP_CLOCK_FROM_PLL
+    static bool pll_requested = false; // the PLL_F80M clock gate is requested once and kept
+    if (first || s_ptp_clock_pll.load(std::memory_order_acquire))
+    {
+        if (!pll_requested && esp_clk_tree_enable_src(SOC_MOD_CLK_PLL_F80M, true) == ESP_OK)
+            pll_requested = true;
+        if (pll_requested)
+        {
+            const eth_mac_ptp_config_t config = ptp_mac_config(true);
+            if (esp_eth_mac_ptp_enable(mac, &config) == ESP_OK && ptp_clock_rate_plausible(mac))
+            {
+                s_ptp_clock_pll.store(true, std::memory_order_release);
+                if (first)
+                    ESP_LOGI(TAG, "PTP clock: 80 MHz PLL source, time stamp steps of 13 ns");
+                return true;
+            }
+        }
+        if (!first)
+            return false; // keep the source of the start: the frequency command refers to its base value
+        ESP_LOGW(TAG, "PTP clock: the 80 MHz PLL source does not work, using the 40 MHz crystal (40 ns steps)");
+        s_ptp_clock_pll.store(false, std::memory_order_release);
+    }
+#else
+    (void)first;
+#endif
+    const eth_mac_ptp_config_t config = ptp_mac_config(false);
+    return esp_eth_mac_ptp_enable(mac, &config) == ESP_OK;
+}
 
 // ---- Model clock: replaces gettimeofday() for NTP time stamps ----
 // true time = second of the last PPS edge + time since that edge (fine local timebase), corrected by the measured ppb.
@@ -3406,14 +3488,13 @@ static ethernet_recovery_result_t restart_ethernet_transport()
     }
 
     esp_eth_mac_t *mac = nullptr;
-    const eth_mac_ptp_config_t ptp_config = ETH_MAC_ESP_PTP_DEFAULT_CONFIG();
     s_ptp_clock_ready.store(false, std::memory_order_release);
     if (esp_eth_get_mac_instance(handle, &mac) != ESP_OK || mac == nullptr)
     {
         s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
         return ethernet_recovery_result_t::timestamp_failed;
     }
-    if (esp_eth_mac_ptp_enable(mac, &ptp_config) != ESP_OK ||
+    if (!ptp_mac_enable(mac, false) ||
         esp_eth_mac_enable_ts4all(mac, true) != ESP_OK ||
         esp_eth_update_input_path_info(handle, ntp_ethernet_input, ETH.netif()) != ESP_OK)
     {
@@ -3697,8 +3778,14 @@ static bool configure_hardware_timestamps()
         return false;
 
     esp_eth_mac_t *mac = nullptr;
-    if (esp_eth_get_mac_instance(handle, &mac) != ESP_OK ||
-        esp_eth_mac_enable_ts4all(mac, true) != ESP_OK)
+    if (esp_eth_get_mac_instance(handle, &mac) != ESP_OK)
+        return false;
+#if PTP_CLOCK_FROM_PLL
+    // esp_eth_clock_init() started the PTP clock from the crystal: switch to the PLL (or stay on the crystal)
+    if (!ptp_mac_enable(mac, true))
+        return false;
+#endif
+    if (esp_eth_mac_enable_ts4all(mac, true) != ESP_OK)
         return false;
 
 #if PTP_FREE_RUNNING
@@ -4945,6 +5032,7 @@ static uint32_t ptp_write_latency_fingerprint()
     const uint32_t items[] = {
         0x50545031u, // "PTP1": keeps this fingerprint apart from the one of the interrupt latency
         PTP_LATENCY_CODE_VERSION,
+        static_cast<uint32_t>(PTP_CLOCK_FROM_PLL), // the clock source changes the write path timing
         compiler_optimization_id(),
         static_cast<uint32_t>(ESP_IDF_VERSION_MAJOR),
         static_cast<uint32_t>(ESP_IDF_VERSION_MINOR),
