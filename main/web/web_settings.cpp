@@ -466,7 +466,6 @@ void web_settings_defaults(web_settings_t &out)
 
     out.ote_enabled = OTE_UPDATES_ENABLED != 0;
     copy_text(out.ote_device_name, DeviceName);
-    out.ote_port = OTEPort;
     copy_text(out.ote_password, OTEPassword);
 
     out.ntp_auth_enabled = SYMMETRIC_KEY_AUTHENTICATION_ENABLED != 0;
@@ -917,9 +916,6 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         for (size_t i = 0; i < length; ++i)
             if (!isalnum(static_cast<unsigned char>(s.ote_device_name[i])) && s.ote_device_name[i] != '-')
                 FAIL("OTE device name: only letters, digits and '-'");
-        // UDP ports in use on the device: NTP 123, DHCP 68, mDNS 5353, httpd control socket 32768 / 32769
-        if (s.ote_port < 1024 || s.ote_port == 5353 || s.ote_port == 32768 || s.ote_port == 32769)
-            FAIL("OTE port: 1024 to 65535, not 5353, 32768 or 32769");
         const size_t password_length = strnlen(s.ote_password, WEB_OTE_PASSWORD_SIZE);
         if (password_length >= WEB_OTE_PASSWORD_SIZE || !is_printable_ascii(s.ote_password, 0x21, 0x7E))
             FAIL("OTE password: at most 64 printable ASCII characters without spaces");
@@ -965,7 +961,7 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            strcmp(a.mqtt_username, b.mqtt_username) != 0 ||
            !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.mqtt_password),
                                     reinterpret_cast<const uint8_t *>(b.mqtt_password), WEB_MQTT_CREDENTIAL_SIZE) ||
-           a.ote_enabled != b.ote_enabled || strcmp(a.ote_device_name, b.ote_device_name) != 0 || a.ote_port != b.ote_port ||
+           a.ote_enabled != b.ote_enabled || strcmp(a.ote_device_name, b.ote_device_name) != 0 ||
            !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ote_password),
                                     reinterpret_cast<const uint8_t *>(b.ote_password), WEB_OTE_PASSWORD_SIZE);
 }

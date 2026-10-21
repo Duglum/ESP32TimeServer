@@ -19,20 +19,44 @@ In the examples below:
 
 ## 1. Over The Ethernet (OTE) Updates
 
-Here are a couple example command line commands which may be used, following a
-build, to provide for an Over The Ethernet (OTE) update. The path name which
-precedes `ESP32TimeServer.bin` may vary.
+The firmware image is uploaded over the HTTPS web admin server (TCP 443), either on
+the web admin page (section *Firmware update*) or with `tools\ote_upload.py`.
+Over The Ethernet updates have to be switched on (web admin page, section
+*Over The Ethernet updates*, or `OTE_UPDATES_ENABLED` in
+`ESP32TimeServerSettings.h`) and the web admin server has to be enabled
+(`WEB_ADMIN_ENABLED`).
 
+Upload the application image of the build folder (`ESP32TimeServer.bin`), not the
+merged flash image. Use the build profile that matches the chip revision of the
+board (see `README.md`, `Setup Step 3 - Build`): the device refuses an image of
+another project or for another chip revision before it writes anything.
 
+The script checks the self-signed certificate of the device by its SHA-256
+fingerprint (shown on the web admin page under *Status* and on the serial console
+at every start) and sends the OTE password (`OTEPassword` in
+`ESP32TimeServerSettingsSecrets.h`, or the one set on the web admin page) inside
+the TLS connection. It reads the password from the environment variable
+`OTE_PASSWORD`, otherwise it asks for it.
 
 ```cmd
-python tools\espota.py -i ESP32TimeServer.local -p 3232 -P 3232 -a ESP32TimeServerpw -f build-esp32p4-rev-1-3\ESP32TimeServer.bin -r -d
+python tools\ote_upload.py -i ESP32TimeServer.local -f build\ESP32TimeServer.bin --fingerprint AB:CD:...:EF
 ```
 
 or
 
 ```cmd
-python tools\espota.py -i x.x.x.x -p 3232 -P 3232 -a ESP32TimeServerpw -f build-esp32p4-rev-1-3\ESP32TimeServer.bin -r -d
+python tools\ote_upload.py -i x.x.x.x -f build\ESP32TimeServer.bin --fingerprint AB:CD:...:EF
+```
+
+Without `--fingerprint` the script stops and prints the fingerprint the device
+presented; `--insecure` skips the check (trusted LAN only). The device restarts 5
+seconds after it accepted the image.
+
+A device that still runs a firmware with ArduinoOTA (UDP 3232) is updated once
+with `tools\espota.py` (or by USB); after that the upload above is used:
+
+```cmd
+python tools\espota.py -i x.x.x.x -p 3232 -P 3232 -a ESP32TimeServerpw -f build\ESP32TimeServer.bin -r -d
 ```
 
 ## 2. NTP Test Request (ntpdate) - Linux or Windows (with Meinberg)

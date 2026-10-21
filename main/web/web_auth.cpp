@@ -403,6 +403,11 @@ bool web_auth_verify_current_password(const sockaddr_storage &source, const char
     return ok;
 }
 
+void web_auth_record_failed_check(const sockaddr_storage &source)
+{
+    record_failure(source);
+}
+
 esp_err_t web_auth_set_password(const char *password, size_t length, const char *keep_session_token)
 {
     if (length < WEB_PASSWORD_MIN_LEN || length > WEB_PASSWORD_MAX_LEN)

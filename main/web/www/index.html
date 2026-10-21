@@ -100,7 +100,7 @@
           <label class="span2"><span class="lt">Host name and domain (FQDN) <span class="badge restart">restart</span></span>
             <input type="text" name="fqdn" maxlength="253" spellcheck="false" autocomplete="off">
             <small class="def" data-for="fqdn"></small>
-            <small class="note">E.g. ESP32TimeServer.example.com. Without a domain, the domain of the DHCP server applies if DHCP is used. The first part is the host name (DHCP, OTE), the full name is used for the certificate.</small>
+            <small class="note">E.g. ESP32TimeServer.example.com. Without a domain, the domain of the DHCP server applies if DHCP is used. The first part is the host name (DHCP), the full name is used for the certificate.</small>
           </label>
           <label class="switch span2"><input type="checkbox" name="ipv4_dhcp"> IPv4 address by DHCP</label>
           <label><span class="lt">IPv4 address / prefix length</span>
@@ -287,22 +287,18 @@
       <section class="card">
         <h2>Over The Ethernet updates <span class="badge restart">restart</span></h2>
         <div class="grid">
-          <label class="switch span2"><input type="checkbox" name="ote_enabled"> Accept firmware updates over the network (ArduinoOTA, e.g. from the Arduino IDE or espota.py)</label>
-          <label><span class="lt">OTE device name</span>
+          <label class="switch span2"><input type="checkbox" name="ote_enabled"> Accept firmware updates over the network (upload below under <em>Firmware update</em>, or with tools/ote_upload.py; HTTPS on TCP 443)</label>
+          <label><span class="lt">mDNS host name</span>
             <input type="text" name="ote_device_name" maxlength="32" spellcheck="false" autocomplete="off">
-            <small class="note">Announced by mDNS as &lt;name&gt;.local. Letters, digits and '-'.</small>
+            <small class="note">Announced by mDNS as &lt;name&gt;.local, also while OTE updates are off. Letters, digits and '-'.</small>
             <small class="def" data-for="ote_device_name"></small>
           </label>
-          <label><span class="lt">OTE port (UDP)</span>
-            <input type="number" name="ote_port" min="1024" max="65535">
-            <small class="def" data-for="ote_port"></small>
-          </label>
-          <label class="span2"><span class="lt">OTE password</span>
+          <label><span class="lt">OTE password (for tools/ote_upload.py)</span>
             <input type="password" name="ote_password" maxlength="64" autocomplete="new-password" placeholder="unchanged">
             <small class="note" id="ote-password-state"></small>
           </label>
         </div>
-        <p class="hint">An empty password field keeps the stored password (at least 8 characters are needed while OTE is on). ArduinoOTA checks the password with an MD5 challenge and the firmware image is not signed: use a long random password and keep OTE off when it is not needed. While it is on, UDP on the OTE port and mDNS (UDP 5353) are open.</p>
+        <p class="hint">An empty password field keeps the stored password (at least 8 characters are needed while OTE is on). This page uploads with its login; the script sends the OTE password inside the TLS connection, and wrong passwords count for the login lock-out. The firmware image is not signed: anyone who can log in or knows the OTE password can replace the firmware, so use a long random password and keep OTE off when it is not needed.</p>
       </section>
 
       <div class="action-bar">
@@ -326,6 +322,22 @@
           <button type="button" id="factory-cancel">Cancel</button>
         </div>
       </form>
+    </section>
+
+    <section class="card" id="ote-card">
+      <h2>Firmware update</h2>
+      <form id="ote-form" class="stack">
+        <label><span class="lt">Application image (ESP32TimeServer.bin of the build folder)</span>
+          <input type="file" id="ote-file" accept=".bin,application/octet-stream" required>
+        </label>
+        <progress id="ote-progress" max="100" value="0" hidden></progress>
+        <small class="note" id="ote-state"></small>
+        <small class="note bad" id="ote-off" hidden>Over The Ethernet updates are off: switch them on above (Apply restarts the device) to upload a firmware image.</small>
+        <div class="buttons left">
+          <button type="submit" id="ote-upload">Upload and restart</button>
+        </div>
+      </form>
+      <p class="hint">Use the image of the build profile for this board's chip revision (<span id="ote-chip"></span>), not the merged flash image. The device checks the project and the chip revision before it writes the image and verifies the whole image before it switches to it. It restarts 5 seconds after the upload; reload this page in about a minute. The upload pauses the page: other requests wait until it is finished.</p>
     </section>
 
     <section class="card">

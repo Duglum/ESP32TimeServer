@@ -9,7 +9,8 @@
 // The factory reset (page or button) returns to this password.
 static constexpr char WebAdminPassword[] = "password";
 
-// Over The Ethernet password for the ESP32 Time Server
+// Over The Ethernet password for the ESP32 Time Server: firmware uploads with tools/ote_upload.py
+// ("Authorization: Bearer" inside the HTTPS connection; the web page uses its login instead)
 static constexpr char OTEPassword[] = "ESP32TimeServerpw";
 
 // Credentials for the ESP32 Time Server as an MQTT client

@@ -131,11 +131,11 @@ struct web_settings_t
     uint8_t ntp_key_count;   // keys of the web settings (ntp_key_override)
     web_ntp_key_t ntp_keys[WEB_NTP_MAX_KEYS]; // secret (shown on the page: the clients need them)
 
-    // Over The Ethernet updates (ArduinoOTA)
+    // Over The Ethernet updates (firmware upload over the web admin server, see web_ote.h)
     bool ote_enabled;
-    char ote_device_name[WEB_OTE_NAME_SIZE]; // announced by mDNS as <name>.local
-    uint16_t ote_port;
-    char ote_password[WEB_OTE_PASSWORD_SIZE]; // secret
+    char ote_device_name[WEB_OTE_NAME_SIZE]; // mDNS host name: announced as <name>.local (also while OTE is off)
+    uint16_t ote_port_unused;                // was the ArduinoOTA UDP port; kept so that saved settings (version 5) stay valid
+    char ote_password[WEB_OTE_PASSWORD_SIZE]; // secret: "Authorization: Bearer" of scripted uploads
 };
 
 // Compiled defaults

@@ -7,6 +7,7 @@ set(MAIN_SOURCES
         "custom/ntp_cache.c"
         "web/web_auth.cpp"
         "web/web_net.cpp"
+        "web/web_ote.cpp"
         "web/web_server.cpp"
         "web/web_settings.cpp"
         "web/web_tls.cpp"
@@ -20,6 +21,9 @@ set(MAIN_REQUIRES
         esp_timer
         esp_http_server
         esp-tls
+        app_update
+        bootloader_support
+        mdns
         nvs_flash
         driver
         esp_driver_mcpwm

@@ -7,3 +7,5 @@ dependencies:
   espressif/led_strip: "^3.0.3"
   # JSON parser of the web admin API
   espressif/cjson: "^1.7.19"
+  # <name>.local and the web admin service announcement (also pulled in by arduino-esp32)
+  espressif/mdns: "^1.11.2"

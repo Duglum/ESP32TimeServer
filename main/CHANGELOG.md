@@ -2,7 +2,7 @@
 
 This file combines `Sonnet_CHANGELOG.md` (precision and stability work done earlier) and `Review_2026-10-19_CHANGELOG.md` (review of 2026-10-19 and its follow-ups). Where the later review changed or replaced something from the earlier work, only the current state is described.
 
-State described here: the files in the repository on 2026-10-19 after the review, including the stack sizes set by the user afterwards (section 4.15), and the follow-up of the same evening: fine local timebase and free-running, frequency disciplined PTP clock with optional PPS loopback (sections 4.19 to 4.21, results in 7.6), of 2026-10-20: PTP clock from the 80 MHz PLL, root dispersion 1 (section 4.22), and of 2026-10-21: HTTPS web admin page (section 4.23).
+State described here: the files in the repository on 2026-10-19 after the review, including the stack sizes set by the user afterwards (section 4.15), and the follow-up of the same evening: fine local timebase and free-running, frequency disciplined PTP clock with optional PPS loopback (sections 4.19 to 4.21, results in 7.6), of 2026-10-20: PTP clock from the 80 MHz PLL, root dispersion 1 (section 4.22), and of 2026-10-21: HTTPS web admin page (section 4.23), Ethernet recovery, ESP-IDF Ethernet driver and OTE over HTTPS (section 4.24).
 
 Contents
 
@@ -52,6 +52,7 @@ Contents
 | 23 | **Optional PTP PPS loopback** (`PTPPPSLoopbackPin`): the EMAC PPS output is captured by the same MCPWM timer as the GNSS PPS | PTP clock measured against the PPS in hardware: the constant read delay error of the software measurement (some 100 ns) is removed; simulated error of T2 / hardware T3 16 ns RMS |
 | 24 | **PTP clock from the 80 MHz PLL** instead of the 40 MHz crystal (2026-10-20) | time stamp steps 13 ns instead of 40 ns |
 | 25 | **Web admin page** (HTTPS, TCP 443, 2026-10-21): network, GNSS / PPS, LCD, time zone, LED, MQTT and NTP authentication settings; Apply / Save Settings (NVS) / Reboot / Factory reset; LCD, LED, MQTT and NTP authentication always compiled in and switched at run time | common settings without rebuilding; per-device TLS key, salted password hash, sessions with CSRF protection, allow-list |
+| 26 | **Ethernet recovery hardening, ESP-IDF Ethernet driver, OTE over HTTPS** (2026-10-21, from release 3.0.5) | recovery under the time mutex with a 45 s watchdog, PHY link read, more triggers; firmware upload on the page or by script over TLS, image checked before it is written |
 
 No memory leak was found in the review (section 4.13).
 
@@ -249,7 +250,7 @@ This is the mode before the follow-up; it is kept as an option. The default is t
 
 | Task | Stack |
 |---|---|
-| Ethernet transport recovery | 2405 |
+| Ethernet transport recovery | 2405 (3072 since 4.24, also for the recovery worker) |
 | GNSS recovery | 12288 |
 | GNSS time sync | 2412 |
 | Hardware NTP server | 2719 |
@@ -348,7 +349,7 @@ A settings page on the board replaces `ESP32TimeServerSettings.h` / `ESP32TimeSe
 | RGB LED | none / KY-016 / WS2812 and their pins (restart), brightness and the colour of each state (start-up, normal, time sync, warning, alert, critical, button pressed; preset or `#RRGGBB`, defaults `LED_startup` ... `LED_button_push`) (at once) | see left |
 | MQTT | on/off, broker URI (`mqtt://` or `mqtts://`, host, port), user name, password, topic (`MQTTTopic`), QoS (`MQTT_QOS`), retain (`MQTTBrokerRetain`), reporting period (`MQTTReportingPeriod`, 30 to 86400 s), report contents (`MQTT_CLIENT_REPORTING_ENABLED`, `MQTT_MEMORY_REPORTING_ENABLED`, `MQTT_HISTORICAL_REPORTING_ENABLED`, `MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED`), client limit with the TF card queue (`MQTT_TF_Client_Limit`, 50 to 1000), TF card pins (`TFCardCommandPin` ... `TFCardData3Pin`, with the warning not to change them on the Waveshare ESP32-P4-ETH, -POE-ETH, -WIFI-ETH and -WIFI-POE-ETH) | restart |
 | NTP authentication | on/off, up to 8 keys (key ID 1 to 65535 and key of 32 letters or digits, `[0-9A-Za-z]{32}`) in a table with "Add key", "Generate" (random key) and "Remove", or the compiled keys | at once |
-| Over The Ethernet updates | on/off (`OTE_UPDATES_ENABLED`), OTE device name (mDNS `<name>.local`, default `DeviceName`), UDP port (`OTEPort`, 1024 to 65535, not 5353 / 32768 / 32769), password (`OTEPassword`, secret, at least 8 characters while OTE is on) | restart |
+| Over The Ethernet updates | on/off (`OTE_UPDATES_ENABLED`), mDNS host name (`<name>.local`, default `DeviceName`), password (`OTEPassword`, secret, at least 8 characters while OTE is on, used by `tools/ote_upload.py`); the upload itself is the card *Firmware update* (4.24) | restart |
 | Security | web admin password, allow-list of source networks | at once, stored at once |
 
 Every field shows its compiled default; fields that differ from it are marked. Fields that need a restart carry a "restart" badge.
@@ -419,8 +420,8 @@ Every field shows its compiled default; fields that differ from it are marked. F
 
 - LCD, KY-016, WS2812, MQTT, NTP authentication and OTE updates are always compiled in (`main/CMakeLists.txt` no longer reads the settings file); the `*_ENABLED` values in `ESP32TimeServerSettings.h` are now their run-time defaults. In `main.cpp` the five macros are set to 1 after the settings file is included, and the boot settings decide at run time (`s_lcd_on`, `s_led_type`, `s_mqtt_on`, `ntp_auth_configure()`).
 - When off: no task, no driver, no buffers. The MQTT report buffers (about 76 kB) are allocated only when MQTT is on (`setup_mqtt_tf_queue()`); the per-request MQTT counters in the NTP paths are skipped; the LED/LCD/button task is not created when neither is used; I2C, LEDC and RMT are not initialised.
-- MQTT, OTE and the LCD switch need a restart (the MQTT client, its TF card queue, ArduinoOTA and the I2C bus have no clean stop in this code); the page marks them. With OTE off no ArduinoOTA listener, no mDNS and no OTE task are started.
-- `DeviceName` is the default of two fields: the FQDN (network host name, certificate) and the OTE device name (announced by ArduinoOTA via mDNS). A failing LED driver (e.g. wrong pin) switches the LED off for that start instead of stopping the server.
+- MQTT, OTE and the LCD switch need a restart (the MQTT client, its TF card queue and the I2C bus have no clean stop in this code); the page marks them. With OTE off uploads are refused and no OTE task is started (mDNS runs anyway since 4.24).
+- `DeviceName` is the default of two fields: the FQDN (network host name, certificate) and the mDNS host name (`<name>.local`, 4.24). A failing LED driver (e.g. wrong pin) switches the LED off for that start instead of stopping the server.
 - New on the page for MQTT: on/off and the broker URI (was `MQTTServerIPAddress` + `MQTTPort`); `mqtts://` brokers are checked against the ESP-IDF CA bundle. New for NTP authentication: on/off.
 - MQTT settings, TF card pins and MAC address (follow-up, 2026-10-21):
   - The four report content switches are compiled in as well (set to 1 in `main.cpp`) and decided at run time (`s_mqtt_client_reporting`, `s_mqtt_memory_reporting`, `s_mqtt_historical_reporting`, `s_mqtt_distinguish_auth`). Without client reporting the NTP paths queue no client events and the client table is not allocated. QoS, retain, topic and period come from the boot settings (`s_mqtt_qos`, `s_mqtt_retain`, `s_cfg`).
@@ -444,6 +445,46 @@ Every field shows its compiled default; fields that differ from it are marked. F
 5. Change settings, **Apply**, check, **Save Settings**. Network changes: confirm within 120 s (over the new address if a static one was set), then Save Settings.
 6. Forgotten password: factory reset with the button (hold 10 s during the start, `UPTIME_RESTART_BUTTON_ENABLED 1` needed), or `idf.py erase-flash` + flash (erases all NVS data including the calibrations and the TLS key), or erase only the `webauth` namespace with the NVS partition tool.
 
+### 4.24 Ethernet recovery, ESP-IDF Ethernet driver, OTE over HTTPS (2026-10-21)
+
+Taken over from release 3.0.5 of roblatour/ESP32TimeServer (comparison of 2026-10-21), adapted to this fork. Not taken over: the interleaved cache with extra stored time stamps (the cache stays keyed by the client IP, 4.12) and the stratum 1 holdover after a GNSS loss (see 13).
+
+**Ethernet transport recovery** (`ethernet_transport_recovery_task()`, `restart_ethernet_transport()`)
+
+- The PTP clock is enabled, set and read back under `s_time_mutex`. Before, the recovery wrote the PTP clock while the PPS phase correction and the time synchronisation could write it as well.
+- The restart runs in a worker task (`eth_recover`). If it does not report within `ETHERNET_RECOVERY_TIMEOUT_MS` (45 s; e.g. `esp_eth_stop()` hangs), the device restarts (`ethernet_recovery_timeout`) instead of the recovery task hanging for good.
+- `physical_ethernet_link_status()` reads the link bit of the PHY itself (basic status register, read twice because the bit is latch-low): up, down or unknown. Before, `physical_ethernet_link_is_up()` returned the link flag of the driver. It is only read when a decision depends on it (the driver polls the PHY over the same MDIO bus). A restart without link is `link_unavailable` only if the PHY has no link either; a PHY link that the driver does not report is `driver_failed`.
+- New triggers, retried with an interval that doubles from 60 s up to 15 min while they persist (`ETHERNET_RECOVERY_INTERVAL_US`, `ETHERNET_RECOVERY_MAX_INTERVAL_US`), all only after the server is open for business:
+  - link up but no usable address for 35 s (e.g. a lost DHCP lease); the result `no_ip` only retries, it does not restart the device (3.0.5 restarts it);
+  - the driver reports the link down for 35 s while the PHY reports a link (a missed link-up); if the driver still reports no link after the restart, the device restarts (`ethernet_recovery_link_state`);
+  - the hardware TX time stamps were switched off after 5 errors in a row (`s_hw_tx_timestamp_recovery_requested`); the replies use software T3 meanwhile, a successful restart switches the hardware TX time stamps on again; at most `ETHERNET_RECOVERY_TIMESTAMP_ATTEMPTS` (3) per boot, then they stay off until the next boot (before: off until the next boot after the first 5 errors).
+- The existing triggers (confirmed stall, silent transport failure) and their result handling are unchanged.
+- The recovery no longer refuses to run while `s_hardware_ntp_accepting` is false: after a `timestamp_failed` result that flag stayed false, so every later recovery returned `retry_later` and the hardware NTP path stayed off until a restart.
+- Stack of the recovery task and the worker: 3072 bytes (was 2405; the worker runs the code that ran in the recovery task, the recovery task has two new log lines with `DEBUG_ENABLED`).
+
+**Restart deadline**: `controlled_restart()` first arms a 5 s one-shot timer that calls `esp_restart()`, so a hanging MQTT publish or NVS write can no longer stop a restart (the MQTT wait itself is 1 s).
+
+**ESP-IDF Ethernet driver instead of the Arduino Ethernet library** (`start_ethernet_driver()`)
+
+- `esp_eth_mac_new_esp32()` (RMII, external 50 MHz clock on GPIO 50, the pins of the Waveshare boards as constants `ETH_RMII_*_GPIO` in `main.cpp`), `esp_eth_phy_new_generic()` for the IP101 (as the Arduino library did with ESP-IDF 6), `esp_netif_new(ESP_NETIF_DEFAULT_ETH())` with the netif glue. The MAC settings of the Arduino library are kept: software reset timeout 1000 ms, RX task stack 4096 bytes, receive all multicast frames (`ETH_CMD_S_ALL_MULTICAST`, set again after every `esp_eth_start()`, also in the recovery).
+- The host name (first label of the FQDN) is set before the start, so the first DHCP request carries it (before: at the start event).
+- `ethernet_event_handler()` and `ethernet_ip_event_handler()` (default event loop) replace `arduino_eth_event_handler()` with the same behaviour. The default event loop task gets 4096 bytes (`CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE`, was 2304; the Arduino event task had 4096). A new `sdkconfig` is needed for it.
+- `s_eth_handle` / `s_eth_netif` replace `ETH.handle()` / `ETH.netif()`. The Arduino core is still used (`initArduino()`, the u-blox library); only `ETH`, `Network` and `ArduinoOTA` are gone.
+
+**Over The Ethernet updates over the HTTPS web admin server** (`main/web/web_ote.*`, `POST /api/ote`)
+
+- ArduinoOTA (UDP 3232 invitation, then a TCP connection from the device to the PC) is replaced by an upload over the existing HTTPS server on TCP 443. Only the PC connects (no firewall rule on the PC, works over routed networks and VPNs).
+- Authentication: the page uses its login (session cookie, same origin, CSRF header, as every other state changing request); scripts (`tools/ote_upload.py`) send `Authorization: Bearer <OTE password>` inside the TLS connection, compared in constant time; wrong passwords count for the login throttling (`web_auth_record_failed_check()`). Release 3.0.5 sends the OTE password in clear text over plain HTTP on TCP 3232; ArduinoOTA never sent it (challenge response).
+- The image is checked before the first flash write (from the native updater of 3.0.5): image magic and segment header, the application description, the project name of the running firmware and the chip and chip revision range of the build (`bootloader_common_check_chip_validity()`: an image of the pre-v3 build is refused on a v3 chip and the other way round). Then it is written sequentially (`OTA_WITH_SEQUENTIAL_WRITES`), verified by `esp_ota_end()` and selected for the next boot; after that, further uploads are refused (409) until the restart. Limits: 15 s without data, 300 s for the whole upload, image size at most the OTA partition (4 MB).
+- Progress, failure (with the reason) and success are shown on the LCD as before; the OTE service task restarts the device 5 s after an accepted image (`controlled_restart("over_the_ethernet_update")`).
+- The page has a new card *Firmware update* (file, progress bar, upload); it reads the version and project name from the image and shows them in the confirmation. The upload holds the server task: other requests of the page wait until it is finished (the page pauses its refresh).
+- The OTE port setting is gone from the page, the API and the validation (`OTEPort` removed from `ESP32TimeServerSettings.h`). The field stays in `web_settings_t` as `ote_port_unused`, so the saved settings (blob version 5) remain valid.
+- `tools/ote_upload.py`: upload over HTTPS; the self-signed certificate is checked by its SHA-256 fingerprint (`--fingerprint`, as shown on the page and the console; without it the script stops and prints the presented fingerprint, `--insecure` skips the check). See `misc/UsefullPowerShellCommands.md`.
+- Migration: a device that still runs ArduinoOTA is updated once with `tools/espota.py` (or by USB).
+- OTE needs the web admin server: with `WEB_ADMIN_ENABLED 0` no firmware can be uploaded (a warning is printed when OTE is on).
+
+**mDNS**: started at every boot with the ESP-IDF mdns component (`setup_mdns()`): `<OTE device name>.local` and the service `_https._tcp` on port 443 (with the web admin). Before, only ArduinoOTA started mDNS, and only while OTE was on. The page calls the field *mDNS host name*.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -459,7 +500,7 @@ With the current settings (OTE, MQTT off):
 | ICMP / ICMPv6 | - | lwIP | ping replies, IPv6 neighbour discovery, MLD; ARP |
 | TCP | all others | none | a SYN gets a RST |
 
-With `OTE_UPDATES_ENABLED 1` additionally UDP 3232 (ArduinoOTA) and UDP 5353 (mDNS), plus a TCP connection the device opens to the uploading PC. With `MQTT_ENABLED 1` only an outgoing TCP connection to the broker. Check: `nmap -sU -p 1-65535 <ip>`, `nmap -sT -p 1-65535 <ip>`, the same with `-6`.
+UDP 5353 (mDNS) is always open (4.24). OTE updates use TCP 443 (no port of their own since 4.24; before: UDP 3232 and a TCP connection from the device to the PC). With `MQTT_ENABLED 1` only an outgoing TCP connection to the broker. Check: `nmap -sU -p 1-65535 <ip>`, `nmap -sT -p 1-65535 <ip>`, the same with `-6`.
 
 ### 5.2 Raw NTP path filter (review)
 
@@ -477,7 +518,7 @@ Everything else is handed to lwIP, which applies its own rules (broadcast reques
 - Amplification: none worth mentioning (mode 3 → mode 4, same size; no mode 6/7).
 - Flooding: global load shedding (8500 or 14500 requests per second depending on the chip revision) and the Ethernet recovery task. A single flooding host triggers drops for all clients; a flood with spoofed sources pushes real clients out of the interleaved cache (fallback to basic mode). No per-client rate limiting.
 - Time spoofing: possible on the path without authentication; NTPv4 symmetric keys are available (SHA-256 truncated to 160 bit, constant time comparison). Unauthenticated requests are still answered when authentication is enabled (by design).
-- OTE (if enabled): MD5 challenge on the password, image unencrypted and unsigned. Use a long random password, a separate VLAN, consider Secure Boot V2 and flash encryption.
+- OTE (if enabled, 4.24): upload over TLS with the login of the page or the OTE password (throttled); the image is checked for project and chip revision and verified, but not signed: whoever can log in or knows the OTE password can replace the firmware. Use a long random password, keep OTE off when it is not needed, consider Secure Boot V2 and flash encryption.
 - MQTT (if enabled): `mqtt://` sends the credentials in clear text; prefer `mqtts://` (the broker certificate is checked against the ESP-IDF CA bundle).
 - Web admin (4.23): whoever knows the password can change every setting on the page, including the network and the NTP key. Change the default password at once, use the allow-list, keep the device in a management network. The password hash, the settings with the MQTT password and NTP key, and the TLS private key are stored in NVS without encryption (as the compiled secrets are stored in the firmware): someone with physical access can read them with a USB cable (see 13 for NVS and flash encryption). Login attempts are throttled; a flood of TLS connections can keep the page busy (3 connections, LRU purge) but does not affect NTP (priority 3, core 0).
 
@@ -638,7 +679,7 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `CONFIG_COMPILER_OPTIMIZATION_PERF` | `sdkconfig.defaults`, `sdkconfig` | y | -O2 |
 | `WEB_ADMIN_ENABLED` | `ESP32TimeServerSettings.h` | 1 | 0 = no web admin page (TCP 443 closed) and compiled settings only (4.23) |
 | `WebAdminPassword` | `ESP32TimeServerSettingsSecrets.h` | "password" | password of the web admin page until one is set on the page; again after a factory reset |
-| `DeviceName` | `ESP32TimeServerSettings.h` | "ESP32TimeServer" | default FQDN of the page (host name for DHCP and OTE, certificate name) |
+| `DeviceName` | `ESP32TimeServerSettings.h` | "ESP32TimeServer" | default FQDN of the page (host name for DHCP, certificate name) and default mDNS host name |
 | `*_ENABLED` of LCD, LED, MQTT, NTP authentication, the pins, the network values, `timeZoneSpec`, `lcdTopLineTitle`, `display*`, `RGB_LED_Brightness_Percent`, `MQTTServerIPAddress` / `MQTTPort`, `MQTTUsername` / `MQTTPassword`, `symmetric_keys` | settings files | as before | defaults of the web admin page (4.23); saved page settings take precedence |
 | `NETWORK_CONFIRM_TIMEOUT_US`, `MAX_SOCKETS`, `MAX_BODY`, `TASK_PRIORITY`, `TASK_CORE` | `main/web/web_server.cpp` | 120 s, 3, 4 kB, 3, 0 | network confirmation, connections, request body, server task |
 | `PBKDF2_ITERATIONS`, `MAX_SESSIONS`, `FAILURES_BEFORE_LOCKOUT`, `FIRST_LOCKOUT_US`, `MAX_LOCKOUT_US` | `main/web/web_auth.cpp` | 10000, 4, 5, 30 s, 15 min | password hash and login throttling |
@@ -708,6 +749,8 @@ Only with `DEBUG_ENABLED`:
 | Follow-up: fine timebase, free-running PTP clock, loopback | `-fsyntax-only` against stubs (extended by the PTP PPS and frequency functions) in 8 combinations incl. `PTP_FREE_RUNNING 0` and `FINE_LOCAL_TIMEBASE 0`, -O2 with the IDF warning flags; servo simulation with 12 cases and 8 seeds (7.6); the existing host tests (frames, checksums, TX delay, legacy PTP mapping) | yes: built with ESP-IDF 6.1, loopback on GPIO 23 active on all four boards, stack sizes measured, overnight chrony run (13 h) and all boards within about 2 µs on the DiskStation |
 | PLL clock source, root dispersion 1 (2026-10-20) | `-fsyntax-only` in 7 combinations incl. `PTP_CLOCK_FROM_PLL 0`, -O2 with the IDF warning flags; unit test of the source selection (PLL works / fails at the start / fails at a recovery, increment and addend headroom); servo simulation with 13 ns steps | **not yet** |
 
+| Ethernet recovery, ESP-IDF Ethernet driver, OTE over HTTPS (2026-10-21, 4.24) | `idf.py build` with ESP-IDF 6.1 and a new `sdkconfig` (no new warnings compared with the build before; image 49 kB smaller); `main.cpp` also compiled with `CALCULATE_STACK_SIZES_ENABLED 1` (forces `DEBUG_ENABLED`); image header parsing of `tools/ote_upload.py` against a built image | **not yet** |
+
 | Web admin page (2026-10-21) | `idf.py build` with ESP-IDF 6.1, -O2 and the IDF warning flags, `sdkconfig` regenerated from `sdkconfig.defaults` (no new warnings in the project code); the page (login, status, apply with network confirmation, dark / light mode) in a browser against a local mock of the JSON API | **not yet** (nothing of 4.23 has run on the board yet) |
 
 The transmit delay compensation of basic mode responses was measured on the board (7.4) but not checked with a basic mode client (chrony uses the interleaved mode).
@@ -725,6 +768,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - After a PPS loss the server goes to stratum 16 after 3.5 s (no holdover at stratum 1), although the PTP clock now keeps the learned rate (simulated: below 1 µs in 5 minutes with a constant crystal).
 - Leap second warnings (LI) from the GNSS are not passed on.
 - If the GNSS receiver stops answering at run time, the recovery can end in `halt_with_display()`; the sync task then waits forever (stratum 16, no reboot).
+- Ethernet recovery, ESP-IDF Ethernet driver, OTE over HTTPS, mDNS (4.24): built, not tested on the board yet. Points to check first: DHCP host name, IPv6 (SLAAC, neighbour discovery with the multicast setting), `<name>.local`, the hardware NTP path and the PTP loopback after the driver change, an upload on the page and with the script, a refused image (wrong build profile), an Ethernet recovery (unplug the cable for more than 35 s once the server is open for business).
 - Web admin (4.23): not tested on the board yet. Points to check first: TLS handshake time and heap with two browsers, the ND6 gateway hook with a static IPv6 address and SLAAC off, the 120 s rollback, the one-shot restart with changed pins, the button recovery.
 - The certificate is self-signed: every browser warns, the fingerprint has to be compared by hand. The certificate names the FQDN only (no IP addresses, they can change).
 - The IPv6 prefix length is stored and shown, but lwIP decides on-link with the first 64 bits; prefixes shorter than 64 are refused.
@@ -764,6 +808,8 @@ Current files of the changes:
 | `main/web/web_tls.*` | TLS key and self-signed certificate |
 | `main/web/web_net.*` | network settings at run time, ND6 gateway hook |
 | `main/web/web_server.*` | HTTPS server, TLS transport, JSON API |
+| `main/web/web_ote.*` | firmware upload (Over The Ethernet update) over the HTTPS server (4.24) |
+| `tools/ote_upload.py` | firmware upload script (HTTPS, certificate fingerprint, OTE password) |
 | `main/web/www/index.html`, `app.css`, `app.js`, `favicon.ico` | the page and its icon (embedded) |
 | `main/custom/ntp_auth.*` | always compiled; keys and on/off at run time (lock-free) |
 | `main/CMakeLists.txt`, `main/idf_component.yml`, `sdkconfig.defaults` | all features compiled in, web sources, cJSON, TLS / lwIP options |

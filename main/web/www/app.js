@@ -350,8 +350,7 @@
       tf_d3_pin: String(s.tf_d3_pin),
       ntp_auth_enabled: s.ntp_auth_enabled,
       ote_enabled: s.ote_enabled,
-      ote_device_name: s.ote_device_name,
-      ote_port: String(s.ote_port)
+      ote_device_name: s.ote_device_name
     };
   }
 
@@ -515,7 +514,6 @@
       ntp_key_clear: f.ntp_key_clear.checked,
       ote_enabled: f.ote_enabled.checked,
       ote_device_name: f.ote_device_name.value.trim(),
-      ote_port: Number(f.ote_port.value),
       ote_password: f.ote_password.value
     };
     // NTP keys: only sent when they were changed (otherwise the compiled keys stay in use if they are)
@@ -655,6 +653,7 @@
     $('banner-oneshot').hidden = !state.oneshot_boot;
     $('banner-unsaved').hidden = state.oneshot_boot || !state.unsaved_changes;
     renderPending(state.network_pending);
+    renderOte();
     updateDependent();
   }
 
@@ -713,6 +712,7 @@
 
   function setBusy(busy) {
     document.querySelectorAll('button').forEach((b) => { if (b.id !== 'theme-toggle') b.disabled = busy; });
+    if (!busy && state) renderOte(); // the upload button stays off while OTE updates are off
   }
 
   // ---- Actions ----
@@ -856,6 +856,93 @@
     setBusy(false);
     show(r.status === 200 ? r.data.message : (r.data.error || 'Allow-list could not be stored'), r.status === 200 ? 'ok' : 'error');
     if (r.status === 200) await loadState(false);
+  });
+
+  // ---- Firmware update (Over The Ethernet) ----
+  let oteUploading = false;
+
+  // ote_enabled of the settings in use (a restart field: the value of this boot)
+  function renderOte() {
+    const on = !!state.settings.ote_enabled;
+    $('ote-off').hidden = on;
+    $('ote-chip').textContent = 'ESP32-P4 ' + state.status.chip_revision;
+    if (!oteUploading) {
+      $('ote-file').disabled = !on;
+      $('ote-upload').disabled = !on;
+    }
+  }
+
+  // The first bytes of an application image: image magic 0xE9, application description (magic 0xABCD5432) after
+  // the image header (24 bytes) and the first segment header (8 bytes), its version text at offset 48
+  async function imageVersion(file) {
+    const bytes = new Uint8Array(await file.slice(0, 112).arrayBuffer());
+    const view = new DataView(bytes.buffer);
+    if (bytes.length < 112 || bytes[0] !== 0xE9 || view.getUint32(32, true) !== 0xABCD5432) return null;
+    const text = (from, length) => new TextDecoder().decode(bytes.subarray(from, from + length)).replace(/\0.*$/s, '');
+    return { version: text(48, 32), project: text(80, 32) };
+  }
+
+  $('ote-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const file = $('ote-file').files[0];
+    if (!file) {
+      show('Choose the firmware image (.bin) first.', 'error');
+      return;
+    }
+    const image = await imageVersion(file);
+    if (!image) {
+      show('This is not an application image: use ESP32TimeServer.bin of the build folder (not the merged flash image).', 'error');
+      return;
+    }
+    if (!window.confirm('Upload ' + image.project + ' ' + image.version + ' (' + file.name + ', ' + Math.round(file.size / 1024) +
+      ' kB) and restart the device with it? Running: ' + state.status.firmware + '.')) return;
+
+    oteUploading = true;
+    clearInterval(refreshTimer); // the server answers nothing else during the upload
+    setBusy(true);
+    $('ote-file').disabled = true;
+    const progress = $('ote-progress');
+    progress.value = 0;
+    progress.hidden = false;
+    $('ote-state').textContent = 'Uploading …';
+
+    const finish = (status, data) => {
+      oteUploading = false;
+      setBusy(false);
+      if (status === 200) {
+        progress.value = 100;
+        $('ote-state').textContent = data.message || '';
+        $('ote-file').value = '';
+        stopAfterRestart((data.message || 'Firmware accepted.') + ' Reload this page in about a minute.');
+        return;
+      }
+      progress.hidden = true;
+      $('ote-state').textContent = '';
+      if (status === 401) {
+        showLogin();
+        return;
+      }
+      show(data.error || 'Upload failed (' + status + ')', 'error');
+      startRefresh();
+    };
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/ote');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('X-CSRF-Token', csrf);
+    xhr.upload.onprogress = (ev) => {
+      if (!ev.lengthComputable) return;
+      progress.value = Math.round((ev.loaded * 100) / ev.total);
+      $('ote-state').textContent = ev.loaded < ev.total ? 'Uploading … ' + progress.value + ' %' : 'Checking and writing the image …';
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch (err) { data = {}; }
+      finish(xhr.status, data);
+    };
+    // The device closes the connection when it refuses the image before the whole file is sent (wrong project
+    // or chip revision): the browser then only sees an interrupted upload
+    xhr.onerror = () => finish(0, { error: 'The upload was interrupted. The device may have refused the image (the reason is on the LCD and the serial console), or it does not answer.' });
+    xhr.send(file);
   });
 
   // ---- Start ----

@@ -48,3 +48,9 @@ void app_get_status(web_app_status_t &status);
 esp_netif_t *app_eth_netif();
 // The network configuration of the interface changed: refresh the address cache used by the NTP and LCD code
 void app_network_settings_changed();
+// Over The Ethernet update (firmware upload, see web_ote.h): switched on for this boot, upload progress, failure
+// (reason shown on the LCD, at most 20 characters) and an accepted image (the device restarts a few seconds later)
+bool app_ote_enabled();
+void app_ote_progress(size_t written, size_t total);
+void app_ote_failed(const char *reason);
+void app_ote_accepted();

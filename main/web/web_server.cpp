@@ -10,6 +10,7 @@
 #include "web_server.h"
 #include "web_auth.h"
 #include "web_net.h"
+#include "web_ote.h"
 #include "web_settings.h"
 #include "web_tls.h"
 
@@ -259,22 +260,26 @@ namespace
     }
 
     // Cross-site protection of state changing requests: the Origin must be this server (as named in the Host
-    // header), a Sec-Fetch-Site header (if sent) must say same-origin, and the body must be JSON
-    bool same_origin(httpd_req_t *req)
+    // header) and a Sec-Fetch-Site header (if sent) must say same-origin
+    bool origin_is_this_server(httpd_req_t *req)
     {
         char host[300];
         char origin[310];
         char expected[310];
-        char content_type[64];
         if (!header(req, "Host", host, sizeof(host)) || !header(req, "Origin", origin, sizeof(origin)))
             return false;
         snprintf(expected, sizeof(expected), "https://%s", host);
         if (strcmp(origin, expected) != 0)
             return false;
         char fetch_site[32];
-        if (header(req, "Sec-Fetch-Site", fetch_site, sizeof(fetch_site)) && strcmp(fetch_site, "same-origin") != 0)
-            return false;
-        return header(req, "Content-Type", content_type, sizeof(content_type)) &&
+        return !header(req, "Sec-Fetch-Site", fetch_site, sizeof(fetch_site)) || strcmp(fetch_site, "same-origin") == 0;
+    }
+
+    // ... and the body must be JSON
+    bool same_origin(httpd_req_t *req)
+    {
+        char content_type[64];
+        return origin_is_this_server(req) && header(req, "Content-Type", content_type, sizeof(content_type)) &&
                strncmp(content_type, "application/json", 16) == 0;
     }
 
@@ -427,7 +432,6 @@ namespace
         add_ntp_keys(cJSON_AddArrayToObject(object, "ntp_keys"), s.ntp_keys, s.ntp_key_count);
         cJSON_AddBoolToObject(object, "ote_enabled", s.ote_enabled);
         cJSON_AddStringToObject(object, "ote_device_name", s.ote_device_name);
-        cJSON_AddNumberToObject(object, "ote_port", s.ote_port);
         cJSON_AddBoolToObject(object, "ote_password_set", s.ote_password[0] != '\0');
     }
 
@@ -524,8 +528,7 @@ namespace
                   json_int(root, "tf_d3_pin", s.tf_d3_pin, 0, 54, err, err_size) &&
                   json_bool(root, "ntp_auth_enabled", s.ntp_auth_enabled, err, err_size) &&
                   json_bool(root, "ote_enabled", s.ote_enabled, err, err_size) &&
-                  json_string(root, "ote_device_name", s.ote_device_name, sizeof(s.ote_device_name), err, err_size) &&
-                  json_int(root, "ote_port", s.ote_port, 1, 65535, err, err_size);
+                  json_string(root, "ote_device_name", s.ote_device_name, sizeof(s.ote_device_name), err, err_size);
         if (!ok)
             return false;
 
@@ -1209,6 +1212,88 @@ namespace
         return err;
     }
 
+    // Firmware upload (Over The Ethernet update, see web_ote.h). Two ways to authenticate:
+    //  - the page: session cookie, same origin and the CSRF header, as every other state changing request
+    //  - scripts (tools/ote_upload.py): "Authorization: Bearer <OTE password>", inside the TLS connection;
+    //    wrong passwords count for the login throttling
+    // The body is the raw application image (Content-Type application/octet-stream).
+    esp_err_t handle_ote(httpd_req_t *req)
+    {
+        if (!app_ote_enabled())
+            return send_error(req, "403 Forbidden", "Over The Ethernet updates are switched off in the settings");
+
+        if (httpd_req_get_hdr_value_len(req, "Authorization") > 0)
+        {
+            struct sockaddr_storage peer{};
+            if (!peer_address(req, peer, false))
+                return send_error(req, "400 Bad Request", "No peer address");
+            const uint32_t wait_s = web_auth_login_wait_seconds(peer);
+            if (wait_s > 0)
+            {
+                char retry[16];
+                snprintf(retry, sizeof(retry), "%lu", static_cast<unsigned long>(wait_s));
+                httpd_resp_set_hdr(req, "Retry-After", retry);
+                return send_error(req, "429 Too Many Requests", "Too many failed password checks, please wait");
+            }
+            // Both passwords are copied into zero filled buffers and compared over the whole buffer (constant time)
+            char authorization[WEB_OTE_PASSWORD_SIZE + 8] = "";
+            char password[WEB_OTE_PASSWORD_SIZE] = "";
+            char expected[WEB_OTE_PASSWORD_SIZE] = "";
+            const bool parsed = header(req, "Authorization", authorization, sizeof(authorization)) &&
+                                strncmp(authorization, "Bearer ", 7) == 0 && strlen(authorization + 7) < sizeof(password);
+            if (parsed)
+                memcpy(password, authorization + 7, strlen(authorization + 7));
+            const web_settings_t &boot = web_settings_boot();
+            memcpy(expected, boot.ote_password, strnlen(boot.ote_password, sizeof(expected) - 1));
+            const bool ok = parsed && expected[0] != '\0' &&
+                            web_constant_time_equal(reinterpret_cast<const uint8_t *>(password),
+                                                    reinterpret_cast<const uint8_t *>(expected), sizeof(expected));
+            memset(authorization, 0, sizeof(authorization));
+            memset(password, 0, sizeof(password));
+            memset(expected, 0, sizeof(expected));
+            if (!ok)
+            {
+                web_auth_record_failed_check(peer);
+                char address[INET6_ADDRSTRLEN];
+                format_address(peer, address, sizeof(address));
+                ESP_LOGW(TAG, "Web admin: firmware upload with a wrong OTE password from %s", address);
+                httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
+                send_error(req, "401 Unauthorized", "Wrong OTE password");
+                return ESP_FAIL; // closes the connection (the body is not read)
+            }
+        }
+        else
+        {
+            char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+            char csrf[WEB_CSRF_TOKEN_HEX_LEN + 2];
+            if (!session_cookie(req, token) || !web_auth_session_valid(token, nullptr))
+            {
+                send_error(req, "401 Unauthorized", "Not logged in");
+                return ESP_FAIL;
+            }
+            if (!origin_is_this_server(req) || !header(req, "X-CSRF-Token", csrf, sizeof(csrf)) || !web_auth_csrf_valid(token, csrf))
+            {
+                send_error(req, "403 Forbidden", "Request rejected (origin or CSRF token)");
+                return ESP_FAIL;
+            }
+        }
+
+        char content_type[48];
+        if (!header(req, "Content-Type", content_type, sizeof(content_type)) || strcmp(content_type, "application/octet-stream") != 0)
+        {
+            send_error(req, "415 Unsupported Media Type", "Send the application image (.bin) as application/octet-stream");
+            return ESP_FAIL;
+        }
+
+        const web_ote_result_t result = web_ote_receive(req);
+        if (result.accepted)
+            return send_ok(req, result.message);
+        httpd_resp_set_hdr(req, "Connection", "close");
+        send_error(req, result.status, result.message);
+        // An unread rest of the image would otherwise be read (and thrown away) by the server
+        return result.body_consumed ? ESP_OK : ESP_FAIL;
+    }
+
     // Without login: only the host name, for the title of the login page
     esp_err_t handle_info(httpd_req_t *req)
     {
@@ -1282,6 +1367,7 @@ namespace
             {"/api/password", HTTP_POST, handle_password},
             {"/api/allow-list", HTTP_POST, handle_allow_list},
             {"/api/reboot", HTTP_POST, handle_reboot},
+            {"/api/ote", HTTP_POST, handle_ote},
             {"/api/info", HTTP_GET, handle_info},
         };
         for (const route_t &route : routes)

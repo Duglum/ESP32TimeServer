@@ -56,8 +56,6 @@
 #include <vector>
 
 #include "Arduino.h"
-#include "ArduinoOTA.h"
-#include "ETH.h"
 #include "SparkFun_u-blox_GNSS_v3.h"
 #include "ESP32TimeServerSettings.h"
 #include "custom/app_metadata.h"
@@ -103,6 +101,9 @@ extern "C"
 #include "esp_eth_clock.h"
 #include "esp_eth_driver.h"
 #include "esp_eth_mac_esp.h"
+#include "esp_eth_netif_glue.h"
+#include "esp_eth_phy.h"
+#include "mdns.h"
 #include "esp_private/esp_clk_tree_common.h"
 #include "esp_log.h"
 #include "ff.h"
@@ -272,7 +273,7 @@ reply and doesn’t blindly accept time data that has been changed in transit.
 
 // FreeRTOS task stack allocations, in bytes.
 
-static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 2405;
+static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 3072; // also the recovery worker task; was 2405 before the recovery log lines
 static constexpr size_t GNSS_Recovery_Task_Stack_Size = 12288;
 static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = 2412;
 static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2719;
@@ -551,10 +552,18 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
 #define UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED 1
 #endif
 
+// IP101 PHY with the external 50 MHz RMII clock of the Waveshare ESP32-P4 Ethernet boards
 static constexpr gpio_num_t ETH_MDC_GPIO = GPIO_NUM_31;
 static constexpr gpio_num_t ETH_MDIO_GPIO = GPIO_NUM_52;
 static constexpr gpio_num_t ETH_PHY_RST_GPIO = GPIO_NUM_51;
 static constexpr int ETH_PHY_ADDRESS = 1;
+static constexpr gpio_num_t ETH_RMII_CLK_GPIO = GPIO_NUM_50;
+static constexpr gpio_num_t ETH_RMII_TX_EN_GPIO = GPIO_NUM_49;
+static constexpr gpio_num_t ETH_RMII_TXD0_GPIO = GPIO_NUM_34;
+static constexpr gpio_num_t ETH_RMII_TXD1_GPIO = GPIO_NUM_35;
+static constexpr gpio_num_t ETH_RMII_CRS_DV_GPIO = GPIO_NUM_28;
+static constexpr gpio_num_t ETH_RMII_RXD0_GPIO = GPIO_NUM_29;
+static constexpr gpio_num_t ETH_RMII_RXD1_GPIO = GPIO_NUM_30;
 
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
 static constexpr i2c_port_t LCD_I2C_PORT = I2C_NUM_0;
@@ -596,6 +605,8 @@ static bool s_lcd_line_cached[lcdRows] = {};
 
 static std::string MACToBeUsed;
 static char s_hostname[WEB_HOSTNAME_MAX_LEN + 1] = ""; // first label of the FQDN of the settings
+static esp_eth_handle_t s_eth_handle = nullptr;        // ESP-IDF Ethernet driver (EMAC + IP101 PHY)
+static esp_netif_t *s_eth_netif = nullptr;             // its lwIP interface
 
 struct PpsCaptureEvent
 {
@@ -1126,11 +1137,11 @@ static bool set_network_ipv6_address(const esp_ip6_addr_t &address)
 
 static void refresh_network_ipv6_addresses()
 {
-    if (!IPV6_ENABLED || ETH.netif() == nullptr)
+    if (!IPV6_ENABLED || s_eth_netif == nullptr)
         return;
 
     esp_ip6_addr_t addresses[CONFIG_LWIP_IPV6_NUM_ADDRESSES]{};
-    const int address_count = esp_netif_get_all_ip6(ETH.netif(), addresses);
+    const int address_count = esp_netif_get_all_ip6(s_eth_netif, addresses);
     bool routable_address_acquired = false;
     for (int index = 0; index < address_count; ++index)
         routable_address_acquired = set_network_ipv6_address(addresses[index]) || routable_address_acquired;
@@ -1143,11 +1154,11 @@ static void refresh_network_ipv6_addresses()
 
 static void log_network_ipv6_addresses()
 {
-    if (!IPV6_ENABLED || ETH.netif() == nullptr)
+    if (!IPV6_ENABLED || s_eth_netif == nullptr)
         return;
 
     esp_ip6_addr_t addresses[CONFIG_LWIP_IPV6_NUM_ADDRESSES]{};
-    const int address_count = esp_netif_get_all_ip6(ETH.netif(), addresses);
+    const int address_count = esp_netif_get_all_ip6(s_eth_netif, addresses);
     if (address_count == 0)
     {
         ESP_LOGW(TAG, "Ethernet IPv6 candidates: none");
@@ -2542,6 +2553,10 @@ static constexpr uint32_t ETHERNET_RECOVERY_DELAY_MS = 100;
 static constexpr uint32_t ETHERNET_RECOVERY_STOP_TIMEOUT_MS = 1000;
 static constexpr uint32_t ETHERNET_RECOVERY_IP_TIMEOUT_MS = 10000;
 static constexpr uint32_t ETHERNET_RECOVERY_RX_UNAVAILABLE_ATTEMPTS_BEFORE_RESTART = 2;
+static constexpr uint32_t ETHERNET_RECOVERY_TIMEOUT_MS = 45000;          // a recovery that takes longer (driver hangs) restarts the device
+static constexpr int64_t ETHERNET_RECOVERY_INTERVAL_US = 60000000LL;      // minimum time between two recoveries
+static constexpr int64_t ETHERNET_RECOVERY_MAX_INTERVAL_US = 900000000LL; // longest back-off for address, link state and time stamp failures
+static constexpr uint32_t ETHERNET_RECOVERY_TIMESTAMP_ATTEMPTS = 3;       // recoveries per boot for hardware TX time stamp errors
 static constexpr int64_t NTP_TRANSPORT_STALL_TIMEOUT_US = 35000000LL;
 
 struct hardware_ntp_request_t
@@ -2708,6 +2723,7 @@ static bool timestamp_is_valid(const eth_mac_time_t *timestamp)
 
 static std::atomic<bool> s_hw_tx_timestamp_enabled{true};
 static std::atomic<uint32_t> s_hw_tx_timestamp_failures{0};
+static std::atomic<bool> s_hw_tx_timestamp_recovery_requested{false}; // set when they were switched off, cleared by the recovery
 
 // Transmits a complete Ethernet frame. If possible the EMAC returns the hardware TX time stamp, converted
 // to NTP format with the same drift compensation as T2. *tx_time_ntp64 stays 0 if no usable time stamp exists.
@@ -2752,10 +2768,14 @@ static esp_err_t transmit_with_hw_timestamp(esp_eth_handle_t handle, uint8_t *fr
         return result; // the caller retries
 
     // Error while sending with a time stamp: try once without, and after 5 errors in a row
-    // switch the hardware TX time stamps off
+    // switch the hardware TX time stamps off and ask the transport recovery to restart the EMAC (which switches
+    // them on again)
     if (s_hw_tx_timestamp_failures.fetch_add(1, std::memory_order_relaxed) + 1 >= 5 &&
         s_hw_tx_timestamp_enabled.exchange(false, std::memory_order_relaxed))
-        ESP_LOGW(TAG, "Hardware TX time stamping disabled after repeated errors (last: %d)", static_cast<int>(result));
+    {
+        s_hw_tx_timestamp_recovery_requested.store(true, std::memory_order_release);
+        ESP_LOGW(TAG, "Hardware TX time stamping disabled after repeated errors (last: %d), Ethernet recovery requested", static_cast<int>(result));
+    }
 
     return esp_eth_transmit(handle, frame, length);
 #else
@@ -3546,21 +3566,53 @@ enum class ethernet_recovery_result_t : uint8_t
     timestamp_failed
 };
 
-static bool physical_ethernet_link_is_up()
+// The EMAC receives every multicast frame (IPv6 neighbour discovery and mDNS), as the Arduino Ethernet library did.
+// Set after every esp_eth_start().
+static void enable_receive_all_multicast(esp_eth_handle_t handle)
 {
-    const esp_eth_handle_t handle = ETH.handle();
-    esp_eth_phy_t *phy = nullptr;
-    if (handle == nullptr || esp_eth_get_phy_instance(handle, &phy) != ESP_OK || phy == nullptr || phy->get_link(phy) != ESP_OK)
-        return false;
+    bool all_multicast = true;
+    if (esp_eth_ioctl(handle, ETH_CMD_S_ALL_MULTICAST, &all_multicast) != ESP_OK)
+        ESP_LOGW(TAG, "Unable to switch the Ethernet MAC to receive all multicast frames");
+}
 
-    return s_ethernet_connected.load(std::memory_order_acquire);
+enum class physical_link_status_t : uint8_t
+{
+    up,
+    down,
+    unknown
+};
+
+// Link state read from the PHY itself (IEEE 802.3 basic status register 1, bit 2), independent of the link state
+// reported by the driver. The bit is latch-low: the first read can still show an old link loss, the second read
+// shows the current state. Only read when a decision depends on it: the driver polls the PHY over the same MDIO bus.
+static physical_link_status_t physical_ethernet_link_status()
+{
+    uint32_t status = 0;
+    esp_eth_phy_reg_rw_data_t reg{1, &status};
+    if (s_eth_handle == nullptr ||
+        esp_eth_ioctl(s_eth_handle, ETH_CMD_READ_PHY_REG, &reg) != ESP_OK ||
+        esp_eth_ioctl(s_eth_handle, ETH_CMD_READ_PHY_REG, &reg) != ESP_OK ||
+        status == 0 || status == 0xFFFF)
+        return physical_link_status_t::unknown;
+
+    return (status & (1U << 2)) != 0 ? physical_link_status_t::up : physical_link_status_t::down;
+}
+
+// No link after the restart: link_unavailable if the PHY has no link either, driver_failed if the PHY has a link
+// that the driver does not report
+static ethernet_recovery_result_t restart_ethernet_link_result()
+{
+    if (physical_ethernet_link_status() == physical_link_status_t::up)
+        return ethernet_recovery_result_t::driver_failed;
+
+    s_last_physical_link_down_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+    return ethernet_recovery_result_t::link_unavailable;
 }
 
 static ethernet_recovery_result_t restart_ethernet_transport()
 {
-    const esp_eth_handle_t handle = ETH.handle();
+    const esp_eth_handle_t handle = s_eth_handle;
     if (handle == nullptr || s_hardware_ntp_transmit_mutex == nullptr ||
-        !s_hardware_ntp_accepting.load(std::memory_order_acquire) ||
         xSemaphoreTake(s_hardware_ntp_transmit_mutex, pdMS_TO_TICKS(ETHERNET_RECOVERY_STOP_TIMEOUT_MS)) != pdTRUE)
         return ethernet_recovery_result_t::retry_later;
 
@@ -3583,21 +3635,30 @@ static ethernet_recovery_result_t restart_ethernet_transport()
         s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
         return ethernet_recovery_result_t::driver_failed;
     }
+    enable_receive_all_multicast(handle);
+
+    // The PTP clock is enabled and set again under the time mutex: the PPS phase correction and the time
+    // synchronization write the same clock
+    s_ptp_clock_ready.store(false, std::memory_order_release);
+    if (xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(ETHERNET_RECOVERY_STOP_TIMEOUT_MS)) != pdTRUE)
+    {
+        s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
+        return ethernet_recovery_result_t::timestamp_failed;
+    }
+    const auto timestamp_failed = []()
+    {
+        xSemaphoreGive(s_time_mutex);
+        s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
+        return ethernet_recovery_result_t::timestamp_failed;
+    };
 
     esp_eth_mac_t *mac = nullptr;
-    s_ptp_clock_ready.store(false, std::memory_order_release);
     if (esp_eth_get_mac_instance(handle, &mac) != ESP_OK || mac == nullptr)
-    {
-        s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
-        return ethernet_recovery_result_t::timestamp_failed;
-    }
+        return timestamp_failed();
     if (!ptp_mac_enable(mac, false) ||
         esp_eth_mac_enable_ts4all(mac, true) != ESP_OK ||
-        esp_eth_update_input_path_info(handle, ntp_ethernet_input, ETH.netif()) != ESP_OK)
-    {
-        s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
-        return ethernet_recovery_result_t::timestamp_failed;
-    }
+        esp_eth_update_input_path_info(handle, ntp_ethernet_input, s_eth_netif) != ESP_OK)
+        return timestamp_failed();
 
     struct timeval system_time{};
     gettimeofday(&system_time, nullptr);
@@ -3609,10 +3670,7 @@ static ethernet_recovery_result_t restart_ethernet_transport()
     s_ptp_addend_reset.store(true, std::memory_order_release);
 #endif
     if (clock_settime(CLOCK_PTP_SYSTEM, &ptp_time) != 0)
-    {
-        s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
-        return ethernet_recovery_result_t::timestamp_failed;
-    }
+        return timestamp_failed();
 #if PTP_FREE_RUNNING
     s_ptp_epoch.fetch_add(1, std::memory_order_acq_rel);
     setup_ptp_pps_loopback(mac);
@@ -3625,12 +3683,16 @@ static ethernet_recovery_result_t restart_ethernet_transport()
     if (!first_read_ok || esp_eth_mac_get_ptp_time(mac, &second_time) != ESP_OK ||
         (second_time.seconds < first_time.seconds ||
          (second_time.seconds == first_time.seconds && second_time.nanoseconds <= first_time.nanoseconds)))
-    {
-        s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
-        return ethernet_recovery_result_t::timestamp_failed;
-    }
+        return timestamp_failed();
 
     s_ptp_clock_ready.store(true, std::memory_order_release);
+    xSemaphoreGive(s_time_mutex);
+
+    // The EMAC was restarted: the hardware TX time stamps are tried again
+    s_hw_tx_timestamp_failures.store(0, std::memory_order_relaxed);
+    s_hw_tx_timestamp_enabled.store(true, std::memory_order_relaxed);
+    s_hw_tx_timestamp_recovery_requested.store(false, std::memory_order_release);
+
     s_hardware_ntp_accepting.store(true, std::memory_order_release);
     s_ethernet_recovery_rx_probe_frames.store(0, std::memory_order_relaxed);
     s_ethernet_recovery_rx_probe_active.store(true, std::memory_order_release);
@@ -3640,7 +3702,7 @@ static ethernet_recovery_result_t restart_ethernet_transport()
     {
         s_ethernet_recovery_rx_probe_active.store(false, std::memory_order_release);
         s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
-        return ethernet_recovery_result_t::link_unavailable;
+        return restart_ethernet_link_result();
     }
     const EventBits_t needed_ip = PreferIPvX == 1   ? ETH_GOT_IP_BIT
                                   : PreferIPvX == 2 ? ETH_GOT_ROUTABLE_IP6_BIT
@@ -3654,16 +3716,42 @@ static ethernet_recovery_result_t restart_ethernet_transport()
     const uint32_t recovery_rx_frames = s_ethernet_recovery_rx_probe_frames.load(std::memory_order_relaxed);
     s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
     if (!linked)
-    {
-        s_last_physical_link_down_us.store(esp_timer_get_time(), std::memory_order_relaxed);
-        return ethernet_recovery_result_t::link_unavailable;
-    }
+        return restart_ethernet_link_result();
     if ((acquired_ip & needed_ip) == 0)
     {
         if (recovery_rx_frames == 0)
             return ethernet_recovery_result_t::receive_unavailable;
     }
     return (acquired_ip & needed_ip) != 0 ? ethernet_recovery_result_t::recovered : ethernet_recovery_result_t::no_ip;
+}
+
+// The restart runs in a worker task: if esp_eth_stop() / esp_eth_start() or one of the waits hangs, the recovery
+// task restarts the device after ETHERNET_RECOVERY_TIMEOUT_MS instead of hanging as well
+static void ethernet_recovery_worker_task(void *parameter)
+{
+    const TaskHandle_t supervisor = static_cast<TaskHandle_t>(parameter);
+    const ethernet_recovery_result_t result = restart_ethernet_transport();
+#if CALCULATE_STACK_SIZES_ENABLED
+    report_current_task_stack_usage(Ethernet_Transport_Recovery);
+#endif
+    xTaskNotify(supervisor, static_cast<uint32_t>(result) + 1, eSetValueWithOverwrite);
+    vTaskDelete(nullptr);
+}
+
+static ethernet_recovery_result_t recover_ethernet_with_timeout()
+{
+    uint32_t value = 0;
+    xTaskNotifyWait(0, UINT32_MAX, &value, 0); // drop a stale notification
+    if (xTaskCreatePinnedToCore(ethernet_recovery_worker_task, "eth_recover", Ethernet_Transport_Recovery_Task_Stack_Size,
+                                xTaskGetCurrentTaskHandle(), 6, nullptr, 0) != pdPASS)
+        return ethernet_recovery_result_t::retry_later;
+
+    if (xTaskNotifyWait(0, UINT32_MAX, &value, pdMS_TO_TICKS(ETHERNET_RECOVERY_TIMEOUT_MS)) != pdTRUE || value == 0)
+    {
+        controlled_restart("ethernet_recovery_timeout");
+        return ethernet_recovery_result_t::driver_failed;
+    }
+    return static_cast<ethernet_recovery_result_t>(value - 1);
 }
 
 static void ethernet_transport_recovery_task(void *parameter)
@@ -3678,6 +3766,11 @@ static void ethernet_transport_recovery_task(void *parameter)
     int64_t recovery_verification_us = 0;
     bool recovery_needs_retry = false;
     uint32_t consecutive_rx_unavailable_recoveries = 0;
+    int64_t address_missing_since_us = 0;
+    int64_t link_missing_since_us = 0;
+    int64_t last_phy_check_us = 0;
+    int64_t persistent_interval_us = ETHERNET_RECOVERY_INTERVAL_US; // grows while the failures below persist
+    uint32_t timestamp_recoveries = 0;
     for (;;)
     {
         const int64_t now_us = esp_timer_get_time();
@@ -3703,8 +3796,17 @@ static void ethernet_transport_recovery_task(void *parameter)
         const int64_t last_input_us = s_last_ntp_input_us.load(std::memory_order_relaxed);
         const int64_t last_shedding_us = s_last_load_shedding_us.load(std::memory_order_relaxed);
         const bool link_up = s_ethernet_connected.load(std::memory_order_acquire);
-        const bool ipv4_missing = s_ipv4_ever_acquired.load(std::memory_order_relaxed) &&
-                                  (xEventGroupGetBits(s_net_event_group) & ETH_GOT_IP_BIT) == 0;
+        const bool responses_enabled = s_ntp_external_responses_enabled.load(std::memory_order_acquire);
+        const EventBits_t net_bits = xEventGroupGetBits(s_net_event_group);
+        const bool ipv4_missing = s_ipv4_ever_acquired.load(std::memory_order_relaxed) && (net_bits & ETH_GOT_IP_BIT) == 0;
+        if (!link_up || has_usable_network_address(net_bits))
+            address_missing_since_us = 0;
+        else if (address_missing_since_us == 0)
+            address_missing_since_us = now_us;
+        if (link_up)
+            link_missing_since_us = 0;
+        else if (link_missing_since_us == 0)
+            link_missing_since_us = now_us;
         bool mqtt_unavailable = false;
 #if MQTT_ENABLED
         if (s_mqtt_on)
@@ -3722,7 +3824,7 @@ static void ethernet_transport_recovery_task(void *parameter)
                      last_input_us > recovery_verification_us &&
                      now_us - recovery_verification_us >= NTP_TRANSPORT_STALL_TIMEOUT_US &&
                      now_us - last_input_us < 2000000LL &&
-                     has_usable_network_address(xEventGroupGetBits(s_net_event_group)))
+                     has_usable_network_address(net_bits))
             {
                 controlled_restart("ethernet_recovery_timestamp_unverified");
             }
@@ -3731,20 +3833,54 @@ static void ethernet_transport_recovery_task(void *parameter)
         const bool confirmed_stall = health == ntp_transport_health_t::stalled &&
                                      old_health == ntp_transport_health_t::stalled && link_up &&
                                      now_us - last_input_us < 2000000LL;
-        const bool silent_transport_failure = link_up && s_ntp_external_responses_enabled.load(std::memory_order_acquire) &&
+        const bool silent_transport_failure = link_up && responses_enabled &&
                                               last_input_us > s_last_physical_link_down_us.load(std::memory_order_relaxed) &&
                                               now_us - last_input_us >= NTP_TRANSPORT_STALL_TIMEOUT_US &&
                                               now_us - last_input_us < 180000000LL &&
                                               (ipv4_missing || mqtt_unavailable);
-        if ((confirmed_stall || silent_transport_failure) &&
-            (last_recovery_attempt_us == 0 ||
-             (now_us - last_recovery_attempt_us >= 60000000LL &&
-              (recovery_needs_retry || last_input_us > last_recovery_attempt_us ||
-               last_shedding_us > last_recovery_attempt_us))))
+        const bool transport_trigger = (confirmed_stall || silent_transport_failure) &&
+                                       (last_recovery_attempt_us == 0 ||
+                                        (now_us - last_recovery_attempt_us >= ETHERNET_RECOVERY_INTERVAL_US &&
+                                         (recovery_needs_retry || last_input_us > last_recovery_attempt_us ||
+                                          last_shedding_us > last_recovery_attempt_us)));
+
+        // Failures without NTP traffic to judge by, retried with a doubling interval (up to 15 min) while they persist:
+        //  - the link is up but there is no usable address (e.g. a DHCP lease that was lost and not renewed)
+        //  - the driver reports the link down while the PHY reports a link (a missed link-up)
+        //  - the hardware TX time stamps were switched off after repeated errors (at most 3 recoveries per boot)
+        const bool address_failure = responses_enabled && address_missing_since_us > 0 &&
+                                     now_us - address_missing_since_us >= NTP_TRANSPORT_STALL_TIMEOUT_US;
+        const bool link_down_long = responses_enabled && link_missing_since_us > 0 &&
+                                    now_us - link_missing_since_us >= NTP_TRANSPORT_STALL_TIMEOUT_US;
+        const bool timestamp_failure = s_hw_tx_timestamp_recovery_requested.load(std::memory_order_acquire) &&
+                                       timestamp_recoveries < ETHERNET_RECOVERY_TIMESTAMP_ATTEMPTS;
+        if (!address_failure && !link_down_long && !timestamp_failure)
+            persistent_interval_us = ETHERNET_RECOVERY_INTERVAL_US;
+        const bool persistent_due = last_recovery_attempt_us == 0 || now_us - last_recovery_attempt_us >= persistent_interval_us;
+        bool link_state_failure = false;
+        if (link_down_long && persistent_due && now_us - last_phy_check_us >= 10000000LL) // cable out: the PHY every 10 s
+        {
+            last_phy_check_us = now_us;
+            link_state_failure = physical_ethernet_link_status() == physical_link_status_t::up;
+        }
+        const bool persistent_trigger = persistent_due && (address_failure || link_state_failure || timestamp_failure);
+
+        if (transport_trigger || persistent_trigger)
         {
             last_recovery_attempt_us = now_us;
             recovery_verification_us = 0;
-            const ethernet_recovery_result_t result = restart_ethernet_transport();
+            if (!transport_trigger)
+                persistent_interval_us = std::min(persistent_interval_us * 2, ETHERNET_RECOVERY_MAX_INTERVAL_US);
+            if (timestamp_failure)
+                ++timestamp_recoveries;
+#if DEBUG_ENABLED
+            ESP_LOGW(TAG, "Ethernet recovery: stalled=%d silent=%d no_address=%d link_state=%d tx_timestamps=%d",
+                     confirmed_stall, silent_transport_failure, address_failure, link_state_failure, timestamp_failure);
+#endif
+            const ethernet_recovery_result_t result = recover_ethernet_with_timeout();
+#if DEBUG_ENABLED
+            ESP_LOGW(TAG, "Ethernet recovery result: %u (0 = recovered)", static_cast<unsigned int>(result));
+#endif
             recovery_needs_retry = result != ethernet_recovery_result_t::recovered;
             if (result == ethernet_recovery_result_t::recovered)
             {
@@ -3755,7 +3891,7 @@ static void ethernet_transport_recovery_task(void *parameter)
             {
                 ++consecutive_rx_unavailable_recoveries;
                 if (consecutive_rx_unavailable_recoveries >= ETHERNET_RECOVERY_RX_UNAVAILABLE_ATTEMPTS_BEFORE_RESTART &&
-                    physical_ethernet_link_is_up())
+                    physical_ethernet_link_status() == physical_link_status_t::up)
                     controlled_restart("ethernet_recovery_receive_unavailable");
             }
             else if ((result == ethernet_recovery_result_t::driver_failed ||
@@ -3765,6 +3901,11 @@ static void ethernet_transport_recovery_task(void *parameter)
             {
                 consecutive_rx_unavailable_recoveries = 0;
                 controlled_restart("ethernet_recovery_local_failure");
+            }
+            else if (result == ethernet_recovery_result_t::driver_failed && link_state_failure)
+            {
+                // the PHY still has a link that the restarted driver does not report
+                controlled_restart("ethernet_recovery_link_state");
             }
             else
                 consecutive_rx_unavailable_recoveries = 0;
@@ -3870,7 +4011,7 @@ static void setup_ptp_pps_loopback(esp_eth_mac_t *mac)
 
 static bool configure_hardware_timestamps()
 {
-    const esp_eth_handle_t handle = ETH.handle();
+    const esp_eth_handle_t handle = s_eth_handle;
     if (handle == nullptr)
         return false;
 
@@ -3900,7 +4041,7 @@ static bool configure_hardware_timestamps()
         ESP_LOGI(TAG, "PTP clock: free-running and frequency disciplined, measured against the PPS by software readings");
 #endif
 
-    const bool input_path_updated = esp_eth_update_input_path_info(handle, ntp_ethernet_input, ETH.netif()) == ESP_OK;
+    const bool input_path_updated = esp_eth_update_input_path_info(handle, ntp_ethernet_input, s_eth_netif) == ESP_OK;
     s_hardware_ntp_accepting.store(input_path_updated, std::memory_order_release);
     return input_path_updated;
 }
@@ -7513,9 +7654,26 @@ static void mqtt_log_tf_directory(const char *path)
 
 #endif
 
+static void restart_deadline_callback(void *)
+{
+    esp_restart();
+}
+
 static void controlled_restart(const char *reason)
 // Publish a controlled restart notification via MQTT or queue it if not connected.
 {
+    // The restart happens within 5 s even if the MQTT publish or the NVS write below hangs
+    static constexpr uint64_t restart_deadline_us = 5000000ULL;
+    esp_timer_create_args_t deadline_args{};
+    deadline_args.callback = restart_deadline_callback;
+    deadline_args.name = "restart_deadline";
+    esp_timer_handle_t deadline_timer = nullptr;
+    if (esp_timer_create(&deadline_args, &deadline_timer) != ESP_OK ||
+        esp_timer_start_once(deadline_timer, restart_deadline_us) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Unable to arm the restart deadline, restarting now: %s", reason);
+        esp_restart();
+    }
 
 #if DEBUG_ENABLED
     ESP_LOGW(TAG, "Controlled restart requested: %s", reason);
@@ -7829,22 +7987,25 @@ static void setup_mqtt()
 #endif
 }
 
-static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_info_t info)
+// Ethernet driver events (default event loop task)
+static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void *event_data)
 {
+    if (event_data == nullptr || *static_cast<esp_eth_handle_t *>(event_data) != s_eth_handle)
+        return;
+
     switch (event)
     {
-    case ARDUINO_EVENT_ETH_START:
+    case ETHERNET_EVENT_START:
 #if DEBUG_ENABLED
         ESP_LOGI(TAG, "Ethernet driver started");
 #endif
-        ETH.setHostname(s_hostname);
         display_line(1, "Ethernet started");
         break;
-    case ARDUINO_EVENT_ETH_CONNECTED:
+    case ETHERNET_EVENT_CONNECTED:
         s_ethernet_connected.store(true);
         if (IPV6_ENABLED)
         {
-            const esp_err_t result = esp_netif_create_ip6_linklocal(ETH.netif());
+            const esp_err_t result = esp_netif_create_ip6_linklocal(s_eth_netif);
             if (result != ESP_OK)
                 ESP_LOGW(TAG, "Unable to create Ethernet IPv6 link-local address: %s", esp_err_to_name(result));
             refresh_network_ipv6_addresses();
@@ -7863,62 +8024,7 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
         xEventGroupSetBits(s_net_event_group, ETH_CONNECTED_BIT);
         display_line(1, "Ethernet connected");
         break;
-    case ARDUINO_EVENT_ETH_GOT_IP:
-        if (!IPV4_ENABLED)
-            break;
-        s_ipv4_ever_acquired.store(true, std::memory_order_relaxed);
-        set_network_ipv4_address(info.got_ip.ip_info.ip);
-#if MQTT_ENABLED
-        if (s_mqtt_on)
-        {
-            if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
-                s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
-        }
-#endif
-#if DEBUG_ENABLED
-        ESP_LOGI(TAG,
-                 "Ethernet IPv4 acquired: ip=" IPSTR ", mask=" IPSTR ", gw=" IPSTR,
-                 IP2STR(&info.got_ip.ip_info.ip),
-                 IP2STR(&info.got_ip.ip_info.netmask),
-                 IP2STR(&info.got_ip.ip_info.gw));
-#endif
-        xEventGroupSetBits(s_net_event_group, ETH_GOT_IP_BIT);
-        display_selected_ip_address(static_cast<int>(time(nullptr) % 10));
-        break;
-    case ARDUINO_EVENT_ETH_GOT_IP6:
-    {
-        if (!IPV6_ENABLED)
-            break;
-        const bool routable_ipv6_acquired = set_network_ipv6_address(info.got_ip6.ip6_info.ip);
-#if MQTT_ENABLED
-        if (s_mqtt_on)
-        {
-            if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
-                s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
-        }
-#endif
-#if DEBUG_ENABLED
-        const network_address_snapshot_t addresses = get_network_address_snapshot();
-        ESP_LOGI(TAG,
-                 "Ethernet IPv6 acquired: %s",
-                 routable_ipv6_acquired ? addresses.ipv6 : "link-local address");
-#endif
-        xEventGroupSetBits(s_net_event_group, ETH_GOT_IP6_BIT);
-        if (routable_ipv6_acquired)
-            xEventGroupSetBits(s_net_event_group, ETH_GOT_ROUTABLE_IP6_BIT);
-        display_selected_ip_address(static_cast<int>(time(nullptr) % 10));
-        break;
-    }
-    case ARDUINO_EVENT_ETH_LOST_IP:
-#if DEBUG_ENABLED
-        ESP_LOGW(TAG, "Ethernet lost IPv4 address");
-#endif
-        xEventGroupClearBits(s_net_event_group, ETH_GOT_IP_BIT);
-        clear_network_ipv4_address();
-        display_line(1, "Ethernet lost IP");
-        display_selected_ip_address(static_cast<int>(time(nullptr) % 10));
-        break;
-    case ARDUINO_EVENT_ETH_DISCONNECTED:
+    case ETHERNET_EVENT_DISCONNECTED:
         if (!s_ethernet_recovery_in_progress.load(std::memory_order_acquire))
             s_last_physical_link_down_us.store(esp_timer_get_time(), std::memory_order_relaxed);
         s_ethernet_connected.store(false);
@@ -7938,7 +8044,7 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
         display_line(1, "Ethernet disconnect");
         display_line(3, "");
         break;
-    case ARDUINO_EVENT_ETH_STOP:
+    case ETHERNET_EVENT_STOP:
         s_ethernet_connected.store(false);
         s_first_ntp_input_us.store(0, std::memory_order_relaxed);
         s_last_ntp_response_us.store(0, std::memory_order_relaxed);
@@ -7961,21 +8067,155 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
     }
 }
 
+// Address events of the Ethernet interface (default event loop task)
+static void ethernet_ip_event_handler(void *, esp_event_base_t, int32_t event, void *event_data)
+{
+    if (event_data == nullptr)
+        return;
+
+    switch (event)
+    {
+    case IP_EVENT_ETH_GOT_IP:
+    {
+        const ip_event_got_ip_t &info = *static_cast<const ip_event_got_ip_t *>(event_data);
+        if (info.esp_netif != s_eth_netif || !IPV4_ENABLED)
+            break;
+        s_ipv4_ever_acquired.store(true, std::memory_order_relaxed);
+        set_network_ipv4_address(info.ip_info.ip);
+#if MQTT_ENABLED
+        if (s_mqtt_on)
+        {
+            if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
+                s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        }
+#endif
+#if DEBUG_ENABLED
+        ESP_LOGI(TAG,
+                 "Ethernet IPv4 acquired: ip=" IPSTR ", mask=" IPSTR ", gw=" IPSTR,
+                 IP2STR(&info.ip_info.ip),
+                 IP2STR(&info.ip_info.netmask),
+                 IP2STR(&info.ip_info.gw));
+#endif
+        xEventGroupSetBits(s_net_event_group, ETH_GOT_IP_BIT);
+        display_selected_ip_address(static_cast<int>(time(nullptr) % 10));
+        break;
+    }
+    case IP_EVENT_GOT_IP6:
+    {
+        const ip_event_got_ip6_t &info = *static_cast<const ip_event_got_ip6_t *>(event_data);
+        if (info.esp_netif != s_eth_netif || !IPV6_ENABLED)
+            break;
+        const bool routable_ipv6_acquired = set_network_ipv6_address(info.ip6_info.ip);
+#if MQTT_ENABLED
+        if (s_mqtt_on)
+        {
+            if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
+                s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        }
+#endif
+#if DEBUG_ENABLED
+        const network_address_snapshot_t addresses = get_network_address_snapshot();
+        ESP_LOGI(TAG,
+                 "Ethernet IPv6 acquired: %s",
+                 routable_ipv6_acquired ? addresses.ipv6 : "link-local address");
+#endif
+        xEventGroupSetBits(s_net_event_group, ETH_GOT_IP6_BIT);
+        if (routable_ipv6_acquired)
+            xEventGroupSetBits(s_net_event_group, ETH_GOT_ROUTABLE_IP6_BIT);
+        display_selected_ip_address(static_cast<int>(time(nullptr) % 10));
+        break;
+    }
+    case IP_EVENT_ETH_LOST_IP:
+        if (static_cast<const ip_event_got_ip_t *>(event_data)->esp_netif != s_eth_netif)
+            break;
+#if DEBUG_ENABLED
+        ESP_LOGW(TAG, "Ethernet lost IPv4 address");
+#endif
+        xEventGroupClearBits(s_net_event_group, ETH_GOT_IP_BIT);
+        clear_network_ipv4_address();
+        display_line(1, "Ethernet lost IP");
+        display_selected_ip_address(static_cast<int>(time(nullptr) % 10));
+        break;
+    default:
+        break;
+    }
+}
+
+// ESP-IDF Ethernet driver (internal EMAC, IP101 PHY, RMII with external clock) and its lwIP interface. The host
+// name is set before the start, so the first DHCP request already carries it. DHCPv4 runs by default; the network
+// settings of the web admin are applied by web_net_apply() afterwards.
 static bool start_ethernet_driver()
 {
-    if (IPV6_ENABLED && !ETH.enableIPv6())
+    const auto failed = [](const char *what, esp_err_t result)
     {
-#if DEBUG_ENABLED
-        ESP_LOGE(TAG, "Unable to enable Ethernet IPv6 support");
-#endif
-    }
+        ESP_LOGE(TAG, "Ethernet setup: %s failed (%s)", what, esp_err_to_name(result));
+        return false;
+    };
 
-    return ETH.begin(ETH_PHY_IP101,
-                     ETH_PHY_ADDRESS,
-                     static_cast<int>(ETH_MDC_GPIO),
-                     static_cast<int>(ETH_MDIO_GPIO),
-                     static_cast<int>(ETH_PHY_RST_GPIO),
-                     EMAC_CLK_EXT_IN);
+    esp_err_t result = esp_netif_init();
+    if (result != ESP_OK)
+        return failed("esp_netif_init", result);
+    result = esp_event_loop_create_default();
+    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) // ESP_ERR_INVALID_STATE: the default loop exists already
+        return failed("esp_event_loop_create_default", result);
+
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    mac_config.sw_reset_timeout_ms = 1000;
+    mac_config.rx_task_stack_size = 4096;
+    eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+    emac_config.smi_gpio.mdc_num = ETH_MDC_GPIO;
+    emac_config.smi_gpio.mdio_num = ETH_MDIO_GPIO;
+    emac_config.interface = EMAC_DATA_INTERFACE_RMII;
+    emac_config.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
+    emac_config.clock_config.rmii.clock_gpio = ETH_RMII_CLK_GPIO;
+    emac_config.emac_dataif_gpio.rmii.tx_en_num = ETH_RMII_TX_EN_GPIO;
+    emac_config.emac_dataif_gpio.rmii.txd0_num = ETH_RMII_TXD0_GPIO;
+    emac_config.emac_dataif_gpio.rmii.txd1_num = ETH_RMII_TXD1_GPIO;
+    emac_config.emac_dataif_gpio.rmii.crs_dv_num = ETH_RMII_CRS_DV_GPIO;
+    emac_config.emac_dataif_gpio.rmii.rxd0_num = ETH_RMII_RXD0_GPIO;
+    emac_config.emac_dataif_gpio.rmii.rxd1_num = ETH_RMII_RXD1_GPIO;
+    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
+    if (mac == nullptr)
+        return failed("esp_eth_mac_new_esp32", ESP_ERR_NO_MEM);
+
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
+    phy_config.phy_addr = ETH_PHY_ADDRESS;
+    phy_config.reset_gpio_num = ETH_PHY_RST_GPIO;
+    // ESP-IDF 6 drives the IP101 with the IEEE 802.3 generic PHY driver (the Arduino library did the same)
+    esp_eth_phy_t *phy = esp_eth_phy_new_generic(&phy_config);
+    if (phy == nullptr)
+        return failed("esp_eth_phy_new_generic", ESP_ERR_NO_MEM);
+
+    const esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
+    result = esp_eth_driver_install(&eth_config, &s_eth_handle);
+    if (result != ESP_OK)
+        return failed("esp_eth_driver_install", result);
+
+    const esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
+    s_eth_netif = esp_netif_new(&netif_config);
+    if (s_eth_netif == nullptr)
+        return failed("esp_netif_new", ESP_ERR_NO_MEM);
+    esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
+    if (glue == nullptr)
+        return failed("esp_eth_new_netif_glue", ESP_ERR_NO_MEM);
+    result = esp_netif_attach(s_eth_netif, glue);
+    if (result != ESP_OK)
+        return failed("esp_netif_attach", result);
+    result = esp_netif_set_hostname(s_eth_netif, s_hostname);
+    if (result != ESP_OK)
+        ESP_LOGW(TAG, "Unable to set the Ethernet host name: %s", esp_err_to_name(result));
+
+    if ((result = esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, ethernet_event_handler, nullptr)) != ESP_OK ||
+        (result = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, ethernet_ip_event_handler, nullptr)) != ESP_OK ||
+        (result = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP, ethernet_ip_event_handler, nullptr)) != ESP_OK ||
+        (result = esp_event_handler_register(IP_EVENT, IP_EVENT_GOT_IP6, ethernet_ip_event_handler, nullptr)) != ESP_OK)
+        return failed("esp_event_handler_register", result);
+
+    result = esp_eth_start(s_eth_handle);
+    if (result != ESP_OK)
+        return failed("esp_eth_start", result);
+    enable_receive_all_multicast(s_eth_handle);
+    return true;
 }
 
 static void wait_for_startup_ethernet_readiness()
@@ -8010,11 +8250,9 @@ static void setup_ethernet()
     clear_network_addresses();
     xEventGroupClearBits(s_net_event_group, ETH_CONNECTED_BIT | ETH_GOT_IP_BIT | ETH_GOT_IP6_BIT | ETH_GOT_ROUTABLE_IP6_BIT);
 
-    Network.onEvent(arduino_eth_event_handler);
-
 #if DEBUG_ENABLED
     ESP_LOGI(TAG,
-             "Starting Arduino Ethernet with phy_addr=%d, mdc=%d, mdio=%d, power=%d",
+             "Starting Ethernet with phy_addr=%d, mdc=%d, mdio=%d, reset=%d",
              ETH_PHY_ADDRESS,
              static_cast<int>(ETH_MDC_GPIO),
              static_cast<int>(ETH_MDIO_GPIO),
@@ -8022,12 +8260,7 @@ static void setup_ethernet()
 #endif
 
     if (!start_ethernet_driver()) // needed for hardware time stamping
-    {
-#if DEBUG_ENABLED
-        ESP_LOGE(TAG, "ETH.begin() failed");
-#endif
         return;
-    }
 
     if (!ntp_cache_init() ||
         (s_hardware_ntp_transmit_mutex = xSemaphoreCreateMutex()) == nullptr ||
@@ -8048,7 +8281,7 @@ static void setup_ethernet()
     // Network settings of this boot (web settings, defaults from ESP32TimeServerSettings.h): IPv4 DHCP or static,
     // IPv6 SLAAC and an optional static IPv6 address with gateway, DNS servers
     web_net_dns_start();
-    if (!web_net_apply(ETH.netif(), *s_cfg, nullptr))
+    if (!web_net_apply(s_eth_netif, *s_cfg, nullptr))
         ESP_LOGE(TAG, "Some network settings could not be applied");
     const bool static_ip_applied = !s_cfg->ipv4_dhcp;
 
@@ -8126,7 +8359,7 @@ void write_settings_messages_to_the_console()
         ESP_LOGW(TAG, "LCD support: Disabled");
 
     if (s_ote_on)
-        ESP_LOGI(TAG, "Over the Ethernet update support: Enabled (%s, UDP port %u)", cfg.ote_device_name, static_cast<unsigned int>(cfg.ote_port));
+        ESP_LOGI(TAG, "Over the Ethernet update support: Enabled (upload over the web admin server, HTTPS TCP 443)");
     else
         ESP_LOGW(TAG, "Over the Ethernet update support: Disabled");
 
@@ -8503,38 +8736,6 @@ static void OTE_set_success_state()
     }
 }
 
-static void format_ote_error_reason(ota_error_t error, char *buffer, size_t buffer_size)
-{
-    const char *update_error = Update.errorString();
-    if ((error == OTA_BEGIN_ERROR || error == OTA_END_ERROR) && update_error != nullptr && strcmp(update_error, "No Error") != 0)
-    {
-        snprintf(buffer, buffer_size, "%s", update_error);
-        return;
-    }
-
-    switch (error)
-    {
-    case OTA_AUTH_ERROR:
-        snprintf(buffer, buffer_size, "%s", "Auth Failed");
-        break;
-    case OTA_BEGIN_ERROR:
-        snprintf(buffer, buffer_size, "%s", "Begin Failed");
-        break;
-    case OTA_CONNECT_ERROR:
-        snprintf(buffer, buffer_size, "%s", "Connect Failed");
-        break;
-    case OTA_RECEIVE_ERROR:
-        snprintf(buffer, buffer_size, "%s", "Receive Failed");
-        break;
-    case OTA_END_ERROR:
-        snprintf(buffer, buffer_size, "%s", "End Failed");
-        break;
-    default:
-        snprintf(buffer, buffer_size, "%s", "Unknown Error");
-        break;
-    }
-}
-
 static bool render_ote_display()
 {
     bool OTE_in_progress = false;
@@ -8599,18 +8800,16 @@ static bool render_ote_display()
     return true;
 }
 
+// The upload itself runs in the web admin server task (web/web_ote.cpp); this task restarts the device
+// OTE_Reboot_Delay_Ms after an accepted image
 static void ote_service_task(void *parameter)
 {
 #if DEBUG_ENABLED
-    ESP_LOGI(TAG, "OTE service task started on port %u", static_cast<unsigned int>(s_cfg->ote_port));
+    ESP_LOGI(TAG, "OTE service task started (firmware upload: POST https://<address>/api/ote)");
 #endif
-
 
     for (;;)
     {
-        ArduinoOTA.handle();
-
-
         bool should_reboot = false;
         TickType_t loop_delay_ticks = pdMS_TO_TICKS(50);
         if (xSemaphoreTake(s_ote_mutex, portMAX_DELAY) == pdTRUE)
@@ -8634,7 +8833,7 @@ static void ote_service_task(void *parameter)
     }
 }
 
-static void setup_ota()
+static void reset_ote_state()
 {
     if (xSemaphoreTake(s_ote_mutex, portMAX_DELAY) == pdTRUE)
     {
@@ -8647,85 +8846,95 @@ static void setup_ota()
         s_ote_error_reason[0] = '\0';
         xSemaphoreGive(s_ote_mutex);
     };
-
-    bool network_begin_ok = Network.begin();
-    (void)network_begin_ok; // only read by the debug output
-
-#if DEBUG_ENABLED
-    const network_address_snapshot_t addresses = get_network_address_snapshot();
-    ESP_LOGI(TAG,
-             "Arduino Network.begin()=%s, online=%s, current_ip=%s",
-             network_begin_ok ? "true" : "false",
-             Network.isOnline() ? "true" : "false",
-             addresses.selected[0] == '\0' ? "<none>" : addresses.selected);
-
-    ESP_LOGI(TAG,
-             "Configuring ArduinoOTA: host=%s, port=%u, password_length=%u",
-             s_cfg->ote_device_name,
-             static_cast<unsigned int>(s_cfg->ote_port),
-             static_cast<unsigned int>(strlen(s_cfg->ote_password)));
-#endif
-
-    // Settings of this boot (web admin; defaults DeviceName, OTEPort, OTEPassword)
-    ArduinoOTA.setPort(s_cfg->ote_port);
-    ArduinoOTA.setHostname(s_cfg->ote_device_name);
-    ArduinoOTA.setPassword(s_cfg->ote_password);
-    ArduinoOTA.setRebootOnSuccess(false);
-    ArduinoOTA.onStart([]()
-                       {
-                           OTE_set_running_state(0, 1);
-#if DEBUG_ENABLED
-                           ESP_LOGI(TAG, "OTE update started");
-#endif
-                       });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                          { OTE_set_running_state(progress, total); });
-    ArduinoOTA.onEnd([]()
-                     {
-                         OTE_set_success_state();
-#if DEBUG_ENABLED
-                         ESP_LOGI(TAG, "OTE update completed successfully");
-#endif
-                     });
-    ArduinoOTA.onError([](ota_error_t error)
-                       {
-                           char reason[lcdColumns + 1];
-                           format_ote_error_reason(error, reason, sizeof(reason));
-                           OTE_set_failure_state(reason);
-#if DEBUG_ENABLED
-                           ESP_LOGE(TAG, "OTE update failed: %s", reason);
-#endif
-                       });
-#if DEBUG_ENABLED
-    ESP_LOGI(TAG, "Calling ArduinoOTA.begin()...");
-#endif
-
-    ArduinoOTA.begin();
-
-#if DEBUG_ENABLED
-    const network_address_snapshot_t ota_addresses = get_network_address_snapshot();
-    ESP_LOGI(TAG,
-             "ArduinoOTA.begin() returned, listener should be available on %s:%u",
-             ota_addresses.selected[0] == '\0' ? s_cfg->ote_device_name : ota_addresses.selected,
-             static_cast<unsigned int>(s_cfg->ote_port));
-#endif
 }
 
 #endif
+
+// ---- Over The Ethernet update: called by the firmware upload of the web admin server (web/web_ote.cpp) ----
+bool app_ote_enabled()
+{
+#if OTE_UPDATES_ENABLED
+    return s_ote_on && s_ote_mutex != nullptr;
+#else
+    return false;
+#endif
+}
+
+void app_ote_progress(size_t written, size_t total)
+{
+#if OTE_UPDATES_ENABLED
+    OTE_set_running_state(static_cast<unsigned int>(written), static_cast<unsigned int>(total));
+#else
+    (void)written;
+    (void)total;
+#endif
+}
+
+void app_ote_failed(const char *reason)
+{
+#if OTE_UPDATES_ENABLED
+    OTE_set_failure_state(reason);
+#if DEBUG_ENABLED
+    ESP_LOGE(TAG, "OTE update failed: %s", reason);
+#endif
+#else
+    (void)reason;
+#endif
+}
+
+void app_ote_accepted()
+{
+#if OTE_UPDATES_ENABLED
+    OTE_set_success_state();
+#if DEBUG_ENABLED
+    ESP_LOGI(TAG, "OTE update completed successfully, restarting in %u ms", static_cast<unsigned int>(OTE_Reboot_Delay_Ms));
+#endif
+#endif
+}
 
 void setup_for_ote_updates()
 {
 #if OTE_UPDATES_ENABLED
     if (!s_ote_on)
-        return; // switched off in the settings: no listener, no task
+        return; // switched off in the settings: uploads are refused, no task
 
     display_line(1, "Setup OTE");
     display_line(2, "");
-    setup_ota();
+    reset_ote_state();
 
     // note: this task is intentionally pinned to core 0 (as opposed to tskNO_AFFINITY)
-    xTaskCreatePinnedToCore(ote_service_task, "ote_service", OTE_Service_Task_Stack_Size, nullptr, 5, nullptr, 0);
+    if (xTaskCreatePinnedToCore(ote_service_task, "ote_service", OTE_Service_Task_Stack_Size, nullptr, 5, nullptr, 0) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Unable to start the OTE service task, OTE updates are not available");
+        s_ote_on = false;
+    }
+#if !WEB_ADMIN_ENABLED
+    ESP_LOGW(TAG, "OTE updates need the web admin server (WEB_ADMIN_ENABLED 1): no firmware can be uploaded");
+#endif
 
+#endif
+}
+
+// mDNS: announces <OTE device name>.local and the web admin page (_https._tcp, TCP 443), also while the OTE
+// updates are off
+void setup_mdns()
+{
+    esp_err_t result = mdns_init();
+    if (result == ESP_OK)
+        result = mdns_hostname_set(s_cfg->ote_device_name);
+    if (result == ESP_OK)
+        result = mdns_instance_name_set(s_cfg->ote_device_name);
+#if WEB_ADMIN_ENABLED
+    if (result == ESP_OK)
+        result = mdns_service_add(nullptr, "_https", "_tcp", 443, nullptr, 0);
+#endif
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "mDNS could not be started: %s", esp_err_to_name(result));
+        return;
+    }
+#if DEBUG_ENABLED
+    ESP_LOGI(TAG, "mDNS: %s.local", s_cfg->ote_device_name);
 #endif
 }
 
@@ -9249,7 +9458,7 @@ static void ntp_server_task(void *parameter)
     else if (ipv6_link_local_socket < 0 ||
              setsockopt(ipv6_link_local_socket, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_only, sizeof(ipv6_only)) != 0 ||
              setsockopt(ipv6_link_local_socket, SOL_SOCKET, SO_REUSEADDR, &reuse_address, sizeof(reuse_address)) != 0 ||
-             esp_netif_get_ip6_linklocal(ETH.netif(), &link_local_address) != ESP_OK)
+             esp_netif_get_ip6_linklocal(s_eth_netif, &link_local_address) != ESP_OK)
     {
 #if DEBUG_ENABLED
         ESP_LOGW(TAG, "IPv6 link-local NTP listener unavailable: errno %d", errno);
@@ -9264,7 +9473,7 @@ static void ntp_server_task(void *parameter)
         ipv6_link_local_listen_addr.sin6_family = AF_INET6;
         ipv6_link_local_listen_addr.sin6_port = htons(NTP_PORT);
         memcpy(&ipv6_link_local_listen_addr.sin6_addr, link_local_address.addr, sizeof(ipv6_link_local_listen_addr.sin6_addr));
-        ipv6_link_local_listen_addr.sin6_scope_id = esp_netif_get_netif_impl_index(ETH.netif());
+        ipv6_link_local_listen_addr.sin6_scope_id = esp_netif_get_netif_impl_index(s_eth_netif);
         if (bind(ipv6_link_local_socket,
                  reinterpret_cast<struct sockaddr *>(&ipv6_link_local_listen_addr),
                  sizeof(ipv6_link_local_listen_addr)) != 0)
@@ -10083,7 +10292,7 @@ static startup_health_test_results_t run_startup_health_tests()
         struct sockaddr_in6 ipv6_assigned{};
         ipv6_assigned.sin6_family = AF_INET6;
         ipv6_assigned.sin6_port = htons(NTP_PORT);
-        ipv6_assigned.sin6_scope_id = esp_netif_get_netif_impl_index(ETH.netif());
+        ipv6_assigned.sin6_scope_id = esp_netif_get_netif_impl_index(s_eth_netif);
         if (inet_pton(AF_INET6, addresses.ipv6, &ipv6_assigned.sin6_addr) == 1)
             results.ipv6_assigned = run_startup_health_endpoint_test("IPv6 assigned", reinterpret_cast<const struct sockaddr *>(&ipv6_assigned), sizeof(ipv6_assigned), AF_INET6);
         else
@@ -10520,14 +10729,14 @@ void app_controlled_restart(const char *reason)
 
 esp_netif_t *app_eth_netif()
 {
-    return ETH.netif();
+    return s_eth_netif;
 }
 
 // The addresses of the interface were changed by the web admin: read them again (the cache only ever upgrades the
 // IPv6 address, so a removed static address would otherwise stay on the LCD)
 void app_network_settings_changed()
 {
-    esp_netif_t *netif = ETH.netif();
+    esp_netif_t *netif = s_eth_netif;
     if (netif == nullptr)
         return;
     esp_netif_ip_info_t info{};
@@ -10746,6 +10955,8 @@ extern "C" void app_main()
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     setup_for_ote_updates();
+
+    setup_mdns();
 
     setup_mqtt();
 

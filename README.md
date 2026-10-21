@@ -386,9 +386,12 @@ idf.py -p COMx flash monitor
 Following the initial flash, OTE updates can be performed if
 `OTE_UPDATES_ENABLED` was set to `1` (Enabled) for the initial build and flash.
 
-A VS Code task **"ESP-IDF: OTE Upload over Ethernet"** is included in
-`.vscode/tasks.json`. It builds the firmware and deploys it to the device over
-Ethernet using `espota.py`, so no USB cable is needed after the first flash.
+The firmware image is uploaded over the HTTPS web admin server (TCP 443): on the
+web admin page (section *Firmware update*) or with `tools/ote_upload.py`. A VS
+Code task **"ESP-IDF: OTE Upload over Ethernet"** is included in
+`.vscode/tasks.json`. It builds the firmware and uploads it with
+`tools/ote_upload.py`, so no USB cable is needed after the first flash. A device
+that still runs a firmware with ArduinoOTA is updated once with `tools/espota.py`.
 Alternatively, use the terminal command in
 [`UsefulPowerShellCommands.md`](./misc/UsefullPowerShellCommands.md) in the
 `misc` folder.

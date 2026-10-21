@@ -8,7 +8,7 @@
       "args": [
         "/d",
         "/c",
-        "call C:\\esp\\v5.5.3\\esp-idf\\export.bat && idf.py build && python C:\\.platformio\\packages\\framework-arduinoespressif32\\tools\\espota.py -i ${input:otaDeviceIp} -p 3232 -P 3232 -a ESP32_Time_Server_pw -f build\\sample_project.bin -r"
+        "call C:\\esp\\v6.1\\esp-idf\\export.bat && idf.py build && python tools\\ote_upload.py -i ${input:otaDeviceIp} -f build\\ESP32TimeServer.bin --fingerprint ${input:otaFingerprint}"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
@@ -27,6 +27,11 @@
       "type": "promptString",
       "description": "ESP32 OTE target IP address",
       "default": "192.168.7.25"
+    },
+    {
+      "id": "otaFingerprint",
+      "type": "promptString",
+      "description": "SHA-256 fingerprint of the device certificate (web admin page, Status)"
     }
   ]
 }

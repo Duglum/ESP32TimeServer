@@ -13,7 +13,7 @@
 // are the defaults and are used again after a factory reset. The features LCD, RGB LED, MQTT, NTP
 // authentication and OTE updates are always compiled in: their *_ENABLED values below only decide whether they are on
 // by default.
-// DeviceName is the default host name (FQDN) of the page and the default OTE device name.
+// DeviceName is the default host name (FQDN) of the page and the default mDNS host name (<name>.local).
 //
 
 #pragma once
@@ -77,10 +77,11 @@ static constexpr int upTimeDisplayWillStayActiveForThisManySeconds = 10;
 static constexpr int upTimeRestartPin = 3;
 
 // (optional) Over The Ethernet updates support
-// Please also see ESP32TimeServerSettingsSecretes.h for the configuration of the OTE password.
+// The firmware image is uploaded over the web admin server (HTTPS, TCP 443, needs WEB_ADMIN_ENABLED 1): on the page
+// (System, Firmware update) or with tools/ote_upload.py, see misc/UsefullPowerShellCommands.md.
+// Please also see ESP32TimeServerSettingsSecretes.h for the configuration of the OTE password (used by the script).
 #define OTE_UPDATES_ENABLED 0 // 0 = Disabled; 1 = Enabled
 static constexpr char DeviceName[] = "ESP32TimeServer";
-static constexpr uint16_t OTEPort = 3232;
 
 // (optional) NTPv4 symmetric-key packet authentication.
 // When enabled, only authenticated NTPv4 requests with a valid configured key receive signed replies.

@@ -142,6 +142,7 @@ small.def { color: var(--muted); font-weight: 400; font-size: .78rem; }
 small.def.differs { color: var(--changed); }
 small.note { color: var(--muted); font-weight: 400; font-size: .78rem; }
 small.note.bad, .bad { color: var(--danger); }
+progress { width: 100%; height: .8rem; accent-color: var(--accent); }
 .good { color: var(--ok); }
 .hint { color: var(--muted); font-size: .82rem; margin: .75rem 0 0; }
 .hint.first { margin-top: 0; }
