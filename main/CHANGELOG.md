@@ -347,7 +347,7 @@ A settings page on the board replaces `ESP32TimeServerSettings.h` / `ESP32TimeSe
 | LCD | on/off (restart), top line title, 24-hour clock, hour with leading zero, show time zone, POSIX time zone | at once |
 | RGB LED | none / KY-016 / WS2812 and their pins (restart), brightness and the colour of each state (start-up, normal, time sync, warning, alert, critical, button pressed; preset or `#RRGGBB`, defaults `LED_startup` ... `LED_button_push`) (at once) | see left |
 | MQTT | on/off, broker URI (`mqtt://` or `mqtts://`, host, port), user name, password | restart |
-| NTP authentication | on/off, key ID and key (32 letters or digits) or the compiled keys | at once |
+| NTP authentication | on/off, up to 8 keys (key ID 1 to 65535 and key of 32 letters or digits, `[0-9A-Za-z]{32}`) in a table with "Add key", "Generate" (random key) and "Remove", or the compiled keys | at once |
 | Over The Ethernet updates | on/off (`OTE_UPDATES_ENABLED`), OTE device name (mDNS `<name>.local`, default `DeviceName`), UDP port (`OTEPort`, 1024 to 65535, not 5353 / 32768 / 32769), password (`OTEPassword`, secret, at least 8 characters while OTE is on) | restart |
 | Security | web admin password, allow-list of source networks | at once, stored at once |
 
@@ -356,7 +356,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
 **Apply / Save / Factory reset**
 
 - **Apply**: the values are in effect at once and are not stored; a restart returns to the saved state.
-  - Live settings (time zone, LCD text options, LED brightness, NTP authentication) are switched immediately. The NTP key set is replaced lock-free (seqlock in `ntp_auth.cpp`, the NTP path copies the key it needs and never waits).
+  - Live settings (time zone, LCD text options, LED brightness, NTP authentication) are switched immediately. The NTP key set (at most `NTP_AUTH_MAX_KEYS` = 8, `ntp_auth_configure()`) is replaced lock-free (seqlock in `ntp_auth.cpp`, the NTP path copies the key it needs and never waits).
   - Network settings (IPv4, IPv6, DNS) are applied at once and have to be **confirmed within 120 s** from the page. With a new static address the confirmation is only accepted over that address (the page lists the URLs; the session cookie is bound to the host name, so the user logs in again there). Without confirmation the previous network settings come back automatically.
   - Settings that need a restart (FQDN, GPIO pins, GNSS baud rate, LED type, LCD on/off, MQTT): Apply writes them as a **one-shot set** (NVS `webcfg/oneshot`) and restarts once. The one-shot set is erased at the start that uses it, before it is used: if it makes the device crash, the next start is back on the saved settings. If the one-shot set also changed the network, the confirmation runs after the start; without it the device restarts with the saved settings.
 - **Save Settings** (button): stores the form values in NVS (flash) (`webcfg/saved`, versioned blob with CRC); they are loaded at every start. Network values are only saved if they are the ones in use (apply and confirm them first), so a typo cannot lock the device out at the next start.
@@ -380,7 +380,9 @@ Every field shows its compiled default; fields that differ from it are marked. F
 - CSRF: SameSite=Strict, a per-session token in the `X-CSRF-Token` header, the `Origin` header must equal `https://` + `Host`, `Sec-Fetch-Site` (if sent) must be `same-origin`, and the body must be `application/json` on every state-changing request.
 - Login throttling per source address (after 5 failures 30 s, doubling up to 15 min; forgotten after an hour without failures) and global (20 failures in a minute block all logins for 60 s, doubling up to 15 min). It only affects the web admin, never NTP. Checks of the current password (password change, factory reset) count as well.
 - Password change and factory reset need the current password. A new password (12 to 128 characters, no control characters) is stored at once and closes all other sessions.
-- Secrets (MQTT password, NTP key, admin password) are never sent to the browser and never logged; the page shows "set / not set". An empty field keeps the stored value, a separate check box clears it (MQTT password) or returns to the compiled keys (NTP key).
+- Secrets (MQTT password, OTE password, admin password) are never sent to the browser and never logged; the page shows "set / not set". An empty field keeps the stored value, a separate check box clears it (MQTT password).
+- Exception (on request, 2026-10-21): the NTP keys are shown in clear text on the page, since they have to be copied to the clients anyway. Without keys of the web settings (e.g. after a fresh install) the table shows the keys compiled in from `ESP32TimeServerSettingsSecrets.h`; changing them there stores them as keys of the web settings. The check box "Use the keys compiled into the firmware" returns to the compiled keys. The keys are only sent to a logged-in session over TLS and are still never logged.
+- Password fields (login, MQTT, OTE, current and new admin password) have an eye button that shows the typed text in clear. It only appears once something was typed in this session (stored secrets never reach the browser), and a field that is emptied or disabled is masked again.
 
 **Page hardening and resources**
 
@@ -391,6 +393,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
 - Status: protocol, baud rate and (UBX) dynamic model of the GNSS receiver in separate lines; IPv6 and DNS addresses in lower case (RFC 5952), one per line, the kind (link-local, SLAAC, ...) in a second line. The page is up to 1240 px wide; below 1000 px the two status groups are stacked so the addresses are not broken.
 - The header shows the host name (first label of the FQDN, also on the login page through `GET /api/info`, the only API call without login, which returns nothing but the host name), the favicon and the FQDN.
 - The login page names the factory default password.
+- NTP keys: "Generate" fills a random key of 32 characters `[0-9A-Za-z]` from the cryptographic random generator of the browser (`crypto.getRandomValues`, rejection sampling, no bias); "Add key" adds a row with the lowest free key ID and a random key. Duplicate IDs and malformed keys are marked, and the keys are only sent when they were changed.
 - The buttons (Apply, Save Settings, Reboot, Factory reset) and their explanation share one panel, which stays visible at the bottom while scrolling (on screens below 680 px it is a normal panel at the end of the form).
 - A banner shows when the settings in use differ from what the next start loads (saved settings, otherwise the compiled defaults).
 - At most 3 sockets with LRU purge, request body at most 4 kB, receive / send timeout 5 s, request headers up to 2 kB (`CONFIG_HTTPD_MAX_REQ_HDR_LEN`, browsers send long headers), mbedTLS dynamic buffers (`CONFIG_MBEDTLS_DYNAMIC_BUFFER`).
@@ -648,7 +651,7 @@ Web admin (4.23):
 
 | Namespace | Key | Content | Factory reset |
 |---|---|---|---|
-| `webcfg` | `saved` (blob) | settings saved with "Save Settings": magic, layout version, size, flags, all settings incl. MQTT password and NTP key, CRC-32 | erased |
+| `webcfg` | `saved` (blob) | settings saved with "Save Settings": magic, layout version, size, flags, all settings incl. MQTT password and NTP keys, CRC-32 | erased |
 | `webcfg` | `oneshot` (blob) | settings of "Apply" that need a restart; erased at the start that uses them | erased |
 | `webauth` | `pw` (blob) | admin password: PBKDF2-HMAC-SHA256 hash, salt, iterations, CRC-32 | erased |
 | `webauth` | `allow` (blob) | allow-list (at most 8 entries), CRC-32 | erased |
@@ -722,7 +725,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - Changing the time zone at run time calls `setenv()` / `tzset()` while other tasks may call `localtime_r()`; newlib guards both, a reading during the switch may use the old zone once.
 - The settings blob has a layout version: after a firmware update that changes `web_settings_t` the saved settings are ignored (compiled defaults) until they are saved again.
 - PreferIPvX, MACAddress and the MQTT reporting details stay compile-time settings. `UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED` is now the default of the GNSS protocol setting: both GNSS paths are compiled in (`setup_gnss_ublox_receiver()`, `setup_gnss_nmea_receiver()`).
-- The settings blob layout version is 3 (2: GNSS protocol and LED colours, 3: OTE settings): settings saved with an older version are ignored once.
+- The settings blob layout version is 4 (2: GNSS protocol and LED colours, 3: OTE settings, 4: up to 8 NTP keys): settings saved with an older version are ignored once.
 
 ## 13. Recommendations that are not in the code
 

@@ -8105,7 +8105,8 @@ void write_settings_messages_to_the_console()
         ESP_LOGW(TAG, "Over the Ethernet update support: Disabled");
 
     if (cfg.ntp_auth_enabled)
-        ESP_LOGI(TAG, "Symmetric-key authentication support: Enabled (%s)", cfg.ntp_key_override ? "key of the web settings" : "compiled keys");
+        ESP_LOGI(TAG, "Symmetric-key authentication support: Enabled (%u key(s) %s)", static_cast<unsigned int>(ntp_auth_key_count()),
+                 cfg.ntp_key_override ? "of the web settings" : "compiled in");
     else
         ESP_LOGW(TAG, "Symmetric-key authentication support: Disabled");
 
@@ -10471,7 +10472,11 @@ void app_apply_live_settings(const web_settings_t &settings)
     for (size_t state = 0; state < WEB_LED_STATE_COUNT; ++state)
         s_led_rgb[state].store(settings.led_rgb[state] & 0xFFFFFFu, std::memory_order_relaxed);
     apply_timezone_settings();
-    ntp_auth_configure(settings.ntp_auth_enabled, settings.ntp_key_override, settings.ntp_key_id, settings.ntp_key);
+    ntp_auth_key_input_t keys[WEB_NTP_MAX_KEYS];
+    const size_t key_count = std::min<size_t>(settings.ntp_key_count, WEB_NTP_MAX_KEYS);
+    for (size_t i = 0; i < key_count; ++i)
+        keys[i] = {settings.ntp_keys[i].id, settings.ntp_keys[i].key};
+    ntp_auth_configure(settings.ntp_auth_enabled, settings.ntp_key_override, keys, key_count);
 }
 
 void app_controlled_restart(const char *reason)
@@ -10531,6 +10536,7 @@ void app_get_status(web_app_status_t &status)
     status.mqtt_connected = s_mqtt_on && s_mqtt_connected.load(std::memory_order_acquire);
     status.ntp_auth_available = ntp_auth_available();
     status.ntp_auth_compiled_keys = ntp_auth_compiled_key_count();
+    status.ntp_auth_keys_in_use = ntp_auth_key_count();
     status.free_heap = esp_get_free_heap_size();
 }
 

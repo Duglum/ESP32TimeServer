@@ -176,6 +176,129 @@
     }
   }
 
+  // ---- Password fields: eye button for clear text ----
+  // Only text typed in this session can be shown: the server never sends a stored secret, and an emptied field is
+  // masked again.
+  const passwordEyes = [];
+  function syncPasswordEye(entry) {
+    const empty = entry.input.value === '';
+    if (empty || entry.input.disabled) entry.input.type = 'password';
+    entry.button.hidden = empty || entry.input.disabled;
+    const shown = entry.input.type === 'text';
+    entry.button.setAttribute('aria-pressed', shown ? 'true' : 'false');
+    entry.button.title = shown ? 'Hide the text' : 'Show the text';
+  }
+  function syncPasswordEyes() {
+    passwordEyes.forEach(syncPasswordEye);
+  }
+  document.querySelectorAll('input[type="password"]').forEach((input) => {
+    const wrap = document.createElement('span');
+    wrap.className = 'pw-field';
+    input.parentNode.insertBefore(wrap, input);
+    wrap.appendChild(input);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'eye';
+    button.textContent = '\u{1F441}'; // eye
+    button.setAttribute('aria-label', 'Show or hide the text');
+    wrap.appendChild(button);
+    const entry = { input: input, button: button };
+    button.addEventListener('click', () => {
+      if (input.value !== '') input.type = input.type === 'password' ? 'text' : 'password';
+      syncPasswordEye(entry);
+    });
+    input.addEventListener('input', () => syncPasswordEye(entry));
+    passwordEyes.push(entry);
+    syncPasswordEye(entry);
+  });
+
+  // ---- NTP keys ----
+  let ntpKeyRows = [];
+  let ntpKeysChanged = false;
+
+  // 32 characters [0-9A-Za-z] from the cryptographic random generator of the browser (rejection sampling: no bias)
+  function randomKey() {
+    const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    const out = [];
+    const buffer = new Uint8Array(64);
+    while (out.length < 32) {
+      crypto.getRandomValues(buffer);
+      for (const b of buffer) {
+        if (b < 248 && out.length < 32) out.push(chars[b % 62]); // 248 = 4 * 62
+      }
+    }
+    return out.join('');
+  }
+
+  function checkKeyRow(row) {
+    row.key.classList.toggle('bad', !/^[0-9A-Za-z]{32}$/.test(row.key.value.trim()));
+    const id = Number(row.id.value);
+    row.id.classList.toggle('bad', !Number.isInteger(id) || id < 1 || id > 65535 ||
+      ntpKeyRows.some((other) => other !== row && Number(other.id.value) === id));
+  }
+
+  function keysChanged() {
+    ntpKeysChanged = true;
+    ntpKeyRows.forEach(checkKeyRow);
+    $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
+  }
+
+  function addKeyRow(id, key) {
+    const table = $('ntp-keys');
+    const idInput = document.createElement('input');
+    idInput.type = 'number';
+    idInput.min = '1';
+    idInput.max = '65535';
+    idInput.value = String(id);
+    idInput.setAttribute('aria-label', 'Key ID');
+    const keyInput = document.createElement('input');
+    keyInput.type = 'text';
+    keyInput.maxLength = 32;
+    keyInput.spellcheck = false;
+    keyInput.autocomplete = 'off';
+    keyInput.value = key;
+    keyInput.setAttribute('aria-label', 'Key');
+    const generate = document.createElement('button');
+    generate.type = 'button';
+    generate.textContent = 'Generate';
+    generate.title = 'New random key (32 letters or digits)';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = 'Remove';
+    const row = { id: idInput, key: keyInput, elements: [idInput, keyInput, generate, remove] };
+    generate.addEventListener('click', () => { keyInput.value = randomKey(); keysChanged(); });
+    remove.addEventListener('click', () => {
+      row.elements.forEach((el) => el.remove());
+      ntpKeyRows = ntpKeyRows.filter((r) => r !== row);
+      keysChanged();
+    });
+    idInput.addEventListener('input', keysChanged);
+    keyInput.addEventListener('input', keysChanged);
+    table.append(idInput, keyInput, generate, remove);
+    ntpKeyRows.push(row);
+    checkKeyRow(row);
+  }
+
+  // compiled: the keys shown are the ones of ESP32TimeServerSettingsSecrets.h
+  function setNtpKeys(keys, compiled) {
+    ntpKeyRows.forEach((row) => row.elements.forEach((el) => el.remove()));
+    ntpKeyRows = [];
+    for (const k of keys || []) addKeyRow(k.id, k.key);
+    ntpKeysChanged = false;
+    $('ntp-key-state').textContent = compiled
+      ? 'No keys are set on this page: these are the keys compiled into the firmware. Changing them here stores them as keys of the web settings.'
+      : 'Keys set on this page are in use.';
+    $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
+  }
+
+  $('ntp-key-add').addEventListener('click', () => {
+    const used = ntpKeyRows.map((r) => Number(r.id.value));
+    let id = 1;
+    while (used.includes(id)) id++;
+    addKeyRow(id, randomKey());
+    keysChanged();
+  });
+
   // ---- Settings <-> form ----
   function formValues(s) {
     // the form view of a settings object (also used for the defaults)
@@ -210,7 +333,6 @@
       mqtt_uri: s.mqtt_uri,
       mqtt_username: s.mqtt_username,
       ntp_auth_enabled: s.ntp_auth_enabled,
-      ntp_key_id: String(s.ntp_key_id),
       ote_enabled: s.ote_enabled,
       ote_device_name: s.ote_device_name,
       ote_port: String(s.ote_port)
@@ -233,14 +355,11 @@
     setColours(s.led_colors);
     f.mqtt_password.value = '';
     f.mqtt_password_clear.checked = false;
-    f.ntp_key.value = '';
     f.ntp_key_clear.checked = false;
+    setNtpKeys(s.ntp_key_override ? s.ntp_keys : state.ntp_compiled_keys, !s.ntp_key_override);
     f.ote_password.value = '';
     $('ote-password-state').textContent = s.ote_password_set ? 'A password is set.' : 'No password is set.';
     $('mqtt-password-state').textContent = s.mqtt_password_set ? 'A password is set.' : 'No password is set.';
-    $('ntp-key-state').textContent = s.ntp_key_override
-      ? 'A key set on this page is in use (ID ' + s.ntp_key_id + ').'
-      : 'The keys compiled into the firmware are in use.';
     updateDependent();
     markDefaults();
   }
@@ -288,7 +407,10 @@
     document.querySelectorAll('.led-ws2812').forEach((el) => { el.hidden = type !== 'ws2812'; });
     $('brightness-out').textContent = f.led_brightness.value + ' %';
     f.mqtt_password.disabled = f.mqtt_password_clear.checked;
-    f.ntp_key.disabled = f.ntp_key_clear.checked;
+    const compiledOnly = f.ntp_key_clear.checked;
+    document.querySelectorAll('#ntp-keys input, #ntp-keys button').forEach((el) => { el.disabled = compiledOnly; });
+    $('ntp-key-add').disabled = compiledOnly || ntpKeyRows.length >= 8;
+    syncPasswordEyes();
     if (state) {
       $('ptp-chip-warning').hidden = state.status.ptp_loopback_supported || f.ptp_loopback_pin.value.trim() === '';
     }
@@ -341,14 +463,23 @@
       mqtt_password: f.mqtt_password.value,
       mqtt_password_clear: f.mqtt_password_clear.checked,
       ntp_auth_enabled: f.ntp_auth_enabled.checked,
-      ntp_key_id: Number(f.ntp_key_id.value),
-      ntp_key: f.ntp_key.value,
       ntp_key_clear: f.ntp_key_clear.checked,
       ote_enabled: f.ote_enabled.checked,
       ote_device_name: f.ote_device_name.value.trim(),
       ote_port: Number(f.ote_port.value),
       ote_password: f.ote_password.value
     };
+    // NTP keys: only sent when they were changed (otherwise the compiled keys stay in use if they are)
+    if (!body.ntp_key_clear && ntpKeysChanged) {
+      body.ntp_keys = [];
+      ntpKeyRows.forEach((row, i) => {
+        const id = Number(row.id.value);
+        const key = row.key.value.trim();
+        if (!Number.isInteger(id) || id < 1 || id > 65535) throw new Error('NTP key ' + (i + 1) + ': key ID 1 to 65535');
+        if (!/^[0-9A-Za-z]{32}$/.test(key)) throw new Error('NTP key ' + (i + 1) + ': exactly 32 letters or digits');
+        body.ntp_keys.push({ id: id, key: key });
+      });
+    }
     for (const [key, name] of ledStates) {
       const hex = normaliseHex(colourRows[key].input.value);
       if (!hex) throw new Error('LED colour "' + name + '": #RRGGBB expected');
@@ -435,7 +566,9 @@
     if (st.gnss_baud_in_use) gnss.push(st.gnss_baud_in_use + ' baud');
     if (st.ublox_receiver) gnss.push(st.gnss_dynamic_model ? st.gnss_dynamic_model + ' mode' : 'dynamic model not known');
     fillList('st-gnss', gnss, '', false);
-    $('st-auth').textContent = st.ntp_auth_available ? 'on' : (state.settings.ntp_auth_enabled ? 'on, but no usable key' : 'off');
+    $('st-auth').textContent = st.ntp_auth_available
+      ? 'on, ' + st.ntp_auth_keys_in_use + (st.ntp_auth_keys_in_use === 1 ? ' key' : ' keys') + (state.settings.ntp_key_override ? ' of the web settings' : ' compiled in')
+      : (state.settings.ntp_auth_enabled ? 'on, but no usable key' : 'off');
     $('st-firmware').textContent = st.firmware + ' (' + st.build + ')';
     $('st-chip').textContent = 'ESP32-P4 ' + st.chip_revision;
     $('ptp-chip').textContent = st.chip_revision;
@@ -524,6 +657,7 @@
     const r = await api('/api/login', { password: $('login-password').value });
     setBusy(false);
     $('login-password').value = '';
+    syncPasswordEyes();
     if (r.status === 200) {
       csrf = r.data.csrf;
       show('', '');
@@ -604,6 +738,7 @@
   $('factory-cancel').addEventListener('click', () => {
     $('factory-card').hidden = true;
     $('factory-password').value = '';
+    syncPasswordEyes();
   });
   $('factory-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -612,6 +747,7 @@
     const r = await api('/api/factory-reset', { password: $('factory-password').value });
     setBusy(false);
     $('factory-password').value = '';
+    syncPasswordEyes();
     if (r.status === 200) {
       $('factory-card').hidden = true;
       stopAfterRestart(r.data.message + ' Log in with the compiled password after the restart.');
@@ -638,6 +774,7 @@
     $('pw-current').value = '';
     $('pw-new').value = '';
     $('pw-repeat').value = '';
+    syncPasswordEyes();
     if (r.status === 200) {
       show(r.data.message, 'ok');
       await loadState(false);

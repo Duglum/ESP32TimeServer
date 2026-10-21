@@ -349,6 +349,17 @@ namespace
     // Names of the LED states in the JSON (order of web_led_state_t)
     const char *const s_led_state_names[WEB_LED_STATE_COUNT] = {"startup", "normal", "sync", "warning", "alert", "critical", "button"};
 
+    void add_ntp_keys(cJSON *array, const web_ntp_key_t *keys, size_t count)
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "id", keys[i].id);
+            cJSON_AddStringToObject(item, "key", keys[i].key);
+            cJSON_AddItemToArray(array, item);
+        }
+    }
+
     void settings_to_json(cJSON *object, const web_settings_t &s)
     {
         cJSON_AddStringToObject(object, "fqdn", s.fqdn);
@@ -396,7 +407,8 @@ namespace
         cJSON_AddBoolToObject(object, "mqtt_password_set", s.mqtt_password[0] != '\0');
         cJSON_AddBoolToObject(object, "ntp_auth_enabled", s.ntp_auth_enabled);
         cJSON_AddBoolToObject(object, "ntp_key_override", s.ntp_key_override);
-        cJSON_AddNumberToObject(object, "ntp_key_id", s.ntp_key_id);
+        // The NTP keys are shown on the page (they have to be entered on the clients); the other secrets are not
+        add_ntp_keys(cJSON_AddArrayToObject(object, "ntp_keys"), s.ntp_keys, s.ntp_key_count);
         cJSON_AddBoolToObject(object, "ote_enabled", s.ote_enabled);
         cJSON_AddStringToObject(object, "ote_device_name", s.ote_device_name);
         cJSON_AddNumberToObject(object, "ote_port", s.ote_port);
@@ -480,7 +492,6 @@ namespace
                   json_string(root, "mqtt_uri", s.mqtt_uri, sizeof(s.mqtt_uri), err, err_size) &&
                   json_string(root, "mqtt_username", s.mqtt_username, sizeof(s.mqtt_username), err, err_size) &&
                   json_bool(root, "ntp_auth_enabled", s.ntp_auth_enabled, err, err_size) &&
-                  json_int(root, "ntp_key_id", s.ntp_key_id, 1, 65535, err, err_size) &&
                   json_bool(root, "ote_enabled", s.ote_enabled, err, err_size) &&
                   json_string(root, "ote_device_name", s.ote_device_name, sizeof(s.ote_device_name), err, err_size) &&
                   json_int(root, "ote_port", s.ote_port, 1, 65535, err, err_size);
@@ -583,22 +594,50 @@ namespace
             snprintf(s.ote_password, sizeof(s.ote_password), "%s", ote_password);
         memset(ote_password, 0, sizeof(ote_password));
 
-        char key[WEB_NTP_KEY_SIZE] = "";
+        // NTP keys: "ntp_keys" (list of {id, key}) replaces the keys and switches to the keys of the web settings,
+        // "ntp_key_clear" returns to the compiled keys; neither: unchanged
         clear = false;
-        if (!json_string(root, "ntp_key", key, sizeof(key), err, err_size) || !json_bool(root, "ntp_key_clear", clear, err, err_size))
+        if (!json_bool(root, "ntp_key_clear", clear, err, err_size))
             return false;
+        cJSON *keys = cJSON_GetObjectItemCaseSensitive(root, "ntp_keys");
         if (clear)
         {
             s.ntp_key_override = false;
-            memset(s.ntp_key, 0, sizeof(s.ntp_key));
+            s.ntp_key_count = 0;
+            memset(s.ntp_keys, 0, sizeof(s.ntp_keys));
         }
-        else if (key[0] != '\0')
+        else if (keys != nullptr)
         {
+            if (!cJSON_IsArray(keys) || cJSON_GetArraySize(keys) > static_cast<int>(WEB_NTP_MAX_KEYS))
+            {
+                snprintf(err, err_size, "At most %u NTP keys", static_cast<unsigned>(WEB_NTP_MAX_KEYS));
+                return false;
+            }
+            web_ntp_key_t list[WEB_NTP_MAX_KEYS] = {};
+            size_t count = 0;
+            cJSON *item = nullptr;
+            cJSON_ArrayForEach(item, keys)
+            {
+                cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
+                cJSON *value = cJSON_GetObjectItemCaseSensitive(item, "key");
+                if (!cJSON_IsObject(item) || !cJSON_IsNumber(id) || !cJSON_IsString(value) || id->valuedouble < 1 ||
+                    id->valuedouble > 65535 || id->valuedouble != static_cast<double>(static_cast<long>(id->valuedouble)) ||
+                    strlen(value->valuestring) >= WEB_NTP_KEY_SIZE)
+                {
+                    memset(list, 0, sizeof(list));
+                    snprintf(err, err_size, "NTP key %u: key ID 1 to 65535 and 32 letters or digits expected", static_cast<unsigned>(count + 1));
+                    return false;
+                }
+                list[count].id = static_cast<uint32_t>(id->valuedouble);
+                snprintf(list[count].key, sizeof(list[count].key), "%s", value->valuestring);
+                ++count;
+            }
             s.ntp_key_override = true;
-            snprintf(s.ntp_key, sizeof(s.ntp_key), "%s", key);
+            s.ntp_key_count = static_cast<uint8_t>(count);
+            memcpy(s.ntp_keys, list, sizeof(list));
+            memset(list, 0, sizeof(list));
         }
         memset(secret, 0, sizeof(secret));
-        memset(key, 0, sizeof(key));
         return true;
     }
 
@@ -799,6 +838,17 @@ namespace
         cJSON_AddStringToObject(root, "fingerprint", s_identity.fingerprint);
         settings_to_json(cJSON_AddObjectToObject(root, "settings"), sets->running);
         settings_to_json(cJSON_AddObjectToObject(root, "defaults"), sets->defaults);
+        // Keys of ESP32TimeServerSettingsSecrets.h (shown while no keys are set on the page)
+        cJSON *compiled = cJSON_AddArrayToObject(root, "ntp_compiled_keys");
+        for (const symmetric_key_t &key : symmetric_keys)
+        {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "id", key.key_id);
+            char value[WEB_NTP_KEY_SIZE];
+            snprintf(value, sizeof(value), "%.*s", static_cast<int>(sizeof(key.key_value)), key.key_value);
+            cJSON_AddStringToObject(item, "key", value);
+            cJSON_AddItemToArray(compiled, item);
+        }
         if (saved)
             settings_to_json(cJSON_AddObjectToObject(root, "saved"), sets->saved);
         else
@@ -868,6 +918,7 @@ namespace
         cJSON_AddBoolToObject(status, "mqtt_connected", sets->app.mqtt_connected);
         cJSON_AddBoolToObject(status, "ntp_auth_available", sets->app.ntp_auth_available);
         cJSON_AddNumberToObject(status, "ntp_auth_compiled_keys", sets->app.ntp_auth_compiled_keys);
+        cJSON_AddNumberToObject(status, "ntp_auth_keys_in_use", sets->app.ntp_auth_keys_in_use);
         cJSON_AddNumberToObject(status, "free_heap", sets->app.free_heap);
         delete sets;
         return send_json(req, "200 OK", root);

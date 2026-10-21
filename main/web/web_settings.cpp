@@ -36,8 +36,8 @@ namespace
 
     constexpr uint32_t BLOB_MAGIC = 0x57534554u; // "WSET"
     // Increase when web_settings_t changes: a saved set of another version is ignored (compiled defaults are used)
-    // 2: GNSS protocol and LED colours added; 3: Over The Ethernet update settings added
-    constexpr uint32_t BLOB_VERSION = 3;
+    // 2: GNSS protocol and LED colours added; 3: Over The Ethernet update settings added; 4: up to 8 NTP keys
+    constexpr uint32_t BLOB_VERSION = 4;
 
     struct settings_blob_t
     {
@@ -389,8 +389,8 @@ void web_settings_defaults(web_settings_t &out)
     copy_text(out.ote_password, OTEPassword);
 
     out.ntp_auth_enabled = SYMMETRIC_KEY_AUTHENTICATION_ENABLED != 0;
-    out.ntp_key_override = false;
-    out.ntp_key_id = std::size(symmetric_keys) > 0 ? symmetric_keys[0].key_id : 1;
+    out.ntp_key_override = false; // the keys of ESP32TimeServerSettingsSecrets.h
+    out.ntp_key_count = 0;
 }
 
 void web_settings_load_boot()
@@ -781,18 +781,24 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
     }
 
     // ---- NTP authentication ----
-    if (s.ntp_key_override)
+    if (s.ntp_key_count > (s.ntp_key_override ? WEB_NTP_MAX_KEYS : 0))
+        FAIL("NTP keys: at most %u", static_cast<unsigned>(WEB_NTP_MAX_KEYS));
+    if (s.ntp_key_override && s.ntp_auth_enabled && s.ntp_key_count == 0)
+        FAIL("NTP authentication needs at least one key");
+    for (size_t i = 0; i < s.ntp_key_count; ++i)
     {
-        if (s.ntp_key_id < 1 || s.ntp_key_id > 65535)
-            FAIL("NTP key ID: 1 to 65535");
-        if (strnlen(s.ntp_key, WEB_NTP_KEY_SIZE) != 32)
-            FAIL("NTP key: exactly 32 characters");
-        for (size_t i = 0; i < 32; ++i)
-            if (!isalnum(static_cast<unsigned char>(s.ntp_key[i])))
-                FAIL("NTP key: letters and digits only");
+        const web_ntp_key_t &key = s.ntp_keys[i];
+        if (key.id < 1 || key.id > 65535)
+            FAIL("NTP key %u: key ID 1 to 65535", static_cast<unsigned>(i + 1));
+        for (size_t k = 0; k < i; ++k)
+            if (s.ntp_keys[k].id == key.id)
+                FAIL("NTP key ID %lu is used twice", static_cast<unsigned long>(key.id));
+        if (strnlen(key.key, WEB_NTP_KEY_SIZE) != 32)
+            FAIL("NTP key %u: exactly 32 characters", static_cast<unsigned>(i + 1));
+        for (size_t c = 0; c < 32; ++c)
+            if (!isalnum(static_cast<unsigned char>(key.key[c])))
+                FAIL("NTP key %u: letters and digits only", static_cast<unsigned>(i + 1));
     }
-    else if (s.ntp_key[0] != '\0')
-        FAIL("NTP key without override");
 
     // ---- Over The Ethernet updates ----
     {
@@ -855,6 +861,6 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
            a.lcd_show_time_zone == b.lcd_show_time_zone && strcmp(a.time_zone, b.time_zone) == 0 &&
            a.led_brightness_percent == b.led_brightness_percent && memcmp(a.led_rgb, b.led_rgb, sizeof(a.led_rgb)) == 0 &&
            a.ntp_auth_enabled == b.ntp_auth_enabled &&
-           a.ntp_key_override == b.ntp_key_override && a.ntp_key_id == b.ntp_key_id &&
-           web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_key), reinterpret_cast<const uint8_t *>(b.ntp_key), WEB_NTP_KEY_SIZE);
+           a.ntp_key_override == b.ntp_key_override && a.ntp_key_count == b.ntp_key_count &&
+           web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_keys), reinterpret_cast<const uint8_t *>(b.ntp_keys), sizeof(a.ntp_keys));
 }

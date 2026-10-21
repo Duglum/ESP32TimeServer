@@ -32,6 +32,7 @@ struct web_app_status_t
     bool mqtt_connected;
     bool ntp_auth_available;
     size_t ntp_auth_compiled_keys;
+    size_t ntp_auth_keys_in_use;
     uint32_t free_heap;
 };
 

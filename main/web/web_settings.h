@@ -27,6 +27,7 @@ static constexpr size_t WEB_LCD_TITLE_SIZE = 18;    // 17 characters + NUL (the 
 static constexpr size_t WEB_MQTT_URI_SIZE = 128;
 static constexpr size_t WEB_MQTT_CREDENTIAL_SIZE = 65;
 static constexpr size_t WEB_NTP_KEY_SIZE = 33;      // 32 characters + NUL
+static constexpr size_t WEB_NTP_MAX_KEYS = 8;       // NTP_AUTH_MAX_KEYS
 static constexpr size_t WEB_OTE_NAME_SIZE = 33;     // OTE device name (mDNS host name), 32 characters + NUL
 static constexpr size_t WEB_OTE_PASSWORD_SIZE = 65; // 64 characters + NUL
 
@@ -35,6 +36,13 @@ enum class web_led_type_t : uint8_t
     none = 0,
     ky016 = 1,
     ws2812 = 2,
+};
+
+// Symmetric NTP key (key ID and 32 letters or digits)
+struct web_ntp_key_t
+{
+    uint32_t id;
+    char key[WEB_NTP_KEY_SIZE];
 };
 
 // States shown by the RGB LED; each has a colour in the settings (LED_startup ... LED_button_push)
@@ -98,8 +106,8 @@ struct web_settings_t
     // NTP symmetric-key authentication
     bool ntp_auth_enabled;
     bool ntp_key_override;   // false = the keys of ESP32TimeServerSettingsSecrets.h are used
-    uint32_t ntp_key_id;
-    char ntp_key[WEB_NTP_KEY_SIZE]; // secret
+    uint8_t ntp_key_count;   // keys of the web settings (ntp_key_override)
+    web_ntp_key_t ntp_keys[WEB_NTP_MAX_KEYS]; // secret (shown on the page: the clients need them)
 
     // Over The Ethernet updates (ArduinoOTA)
     bool ote_enabled;

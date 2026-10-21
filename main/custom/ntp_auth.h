@@ -12,7 +12,7 @@
 static constexpr size_t NTP_AUTH_KEY_ID_SIZE = 4;
 static constexpr size_t NTP_AUTH_DIGEST_SIZE = 20;
 static constexpr size_t NTP_AUTH_TRAILER_SIZE = NTP_AUTH_KEY_ID_SIZE + NTP_AUTH_DIGEST_SIZE;
-static constexpr size_t NTP_AUTH_MAX_KEYS = 4;
+static constexpr size_t NTP_AUTH_MAX_KEYS = 8;
 static constexpr size_t NTP_AUTH_MAX_KEY_SIZE = 64;
 
 enum class ntp_auth_result_t : uint8_t
@@ -37,9 +37,18 @@ struct ntp_auth_key_t
 // Validates the keys of ESP32TimeServerSettingsSecrets.h and initializes PSA. Authentication stays off until
 // ntp_auth_configure() switches it on.
 bool ntp_auth_initialize();
-// Run-time switch and key selection (web admin): use_override_key = one key set on the web page instead of the
-// compiled keys. Lock-free for the NTP path. Returns true if authentication is available afterwards.
-bool ntp_auth_configure(bool enabled, bool use_override_key, uint32_t override_key_id, const char *override_key);
+
+// One key of the web settings (key: 32 letters or digits, NUL terminated)
+struct ntp_auth_key_input_t
+{
+    uint32_t key_id;
+    const char *key;
+};
+
+// Run-time switch and key selection (web admin): use_override_keys = the keys set on the web page (count of them in
+// keys) instead of the compiled keys. Lock-free for the NTP path. Returns true if authentication is available
+// afterwards.
+bool ntp_auth_configure(bool enabled, bool use_override_keys, const ntp_auth_key_input_t *keys, size_t count);
 bool ntp_auth_available();
 size_t ntp_auth_compiled_key_count();
 size_t ntp_auth_key_count();

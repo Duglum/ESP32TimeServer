@@ -187,20 +187,26 @@ bool ntp_auth_initialize()
     return s_crypto_ready;
 }
 
-bool ntp_auth_configure(bool enabled, bool use_override_key, uint32_t override_key_id, const char *override_key)
+bool ntp_auth_configure(bool enabled, bool use_override_keys, const ntp_auth_key_input_t *keys, size_t count)
 {
     key_set_t next{};
-    if (use_override_key)
+    if (use_override_keys)
     {
-        if (override_key_id >= 1 && override_key_id <= 65535 && override_key != nullptr &&
-            key_value_is_valid(override_key, SYMMETRIC_KEY_LENGTH + 1))
+        for (size_t i = 0; keys != nullptr && i < count && next.count < NTP_AUTH_MAX_KEYS; ++i)
         {
-            next.count = 1;
-            next.keys[0] = {override_key_id, NTP_AUTH_ALGORITHM_SHA256_160, static_cast<uint8_t>(SYMMETRIC_KEY_LENGTH), NTP_AUTH_KEY_ACTIVE, {}};
-            memcpy(next.keys[0].key, override_key, SYMMETRIC_KEY_LENGTH);
+            bool duplicate = false;
+            for (size_t k = 0; k < next.count; ++k)
+                duplicate = duplicate || next.keys[k].key_id == keys[i].key_id;
+            if (keys[i].key_id < 1 || keys[i].key_id > 65535 || keys[i].key == nullptr || duplicate ||
+                !key_value_is_valid(keys[i].key, SYMMETRIC_KEY_LENGTH + 1))
+            {
+                ESP_LOGE(TAG, "NTP key %u of the web settings is not valid and is not used", static_cast<unsigned int>(i + 1));
+                continue;
+            }
+            ntp_auth_key_t &key = next.keys[next.count++];
+            key = {keys[i].key_id, NTP_AUTH_ALGORITHM_SHA256_160, static_cast<uint8_t>(SYMMETRIC_KEY_LENGTH), NTP_AUTH_KEY_ACTIVE, {}};
+            memcpy(key.key, keys[i].key, SYMMETRIC_KEY_LENGTH);
         }
-        else
-            ESP_LOGE(TAG, "The NTP key of the web settings is not valid; no key is in use");
     }
     else
         next = s_compiled;

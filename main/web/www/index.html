@@ -214,13 +214,17 @@
         <h2>NTP authentication (symmetric key, SHA-256)</h2>
         <div class="grid">
           <label class="switch span2"><input type="checkbox" name="ntp_auth_enabled"> Answer authenticated NTPv4 requests</label>
-          <label><span class="lt">Key ID (1 to 65535)</span><input type="number" name="ntp_key_id" min="1" max="65535"><small class="def" data-for="ntp_key_id"></small></label>
-          <label><span class="lt">Key (32 letters or digits)</span>
-            <input type="password" name="ntp_key" maxlength="32" autocomplete="new-password" spellcheck="false" placeholder="unchanged">
-            <small class="note" id="ntp-key-state"></small>
-          </label>
-          <label class="switch span2"><input type="checkbox" name="ntp_key_clear"> Use the keys compiled into the firmware</label>
         </div>
+        <h3 class="sub-heading">Keys</h3>
+        <p class="hint first" id="ntp-key-state"></p>
+        <div class="key-table" id="ntp-keys">
+          <span class="key-head">Key ID</span><span class="key-head">Key (32 letters or digits)</span><span></span><span></span>
+        </div>
+        <div class="buttons left key-actions">
+          <button type="button" id="ntp-key-add">Add key</button>
+        </div>
+        <label class="switch"><input type="checkbox" name="ntp_key_clear"> Use the keys compiled into the firmware (ESP32TimeServerSettingsSecrets.h)</label>
+        <p class="hint">Up to 8 keys (SHA-256, truncated to 160 bit). Enter the same key ID and key on the clients, e.g. <code>1 SHA256 ASCII:&lt;key&gt;</code> in chrony.keys. Generate uses the random generator of the browser. Changed keys take effect at once with Apply; Save Settings keeps them.</p>
       </section>
 
       <section class="card">
