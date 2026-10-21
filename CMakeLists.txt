@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Version text of the firmware (application description, console, web admin page). Set before project(): the
+# VERSION argument below has to be numeric for CMake.
+set(PROJECT_VER "3.0.5-WebIf")
 project(ESP32TimeServer
-        VERSION 3.0.4
+        VERSION 3.0.5
         SPDX_LICENSE MIT
         DESCRIPTION "ESP32 NTP Stratum 1 Time Server for your home network"
 )
