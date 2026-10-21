@@ -40,10 +40,10 @@
     <button type="button" id="net-confirm">Keep these network settings</button>
   </div>
   <div id="banner-oneshot" class="banner info" hidden>
-    <div>This start uses settings from <em>Apply</em> that are valid for this start only. Use <em>Save to NVS</em> to keep them.</div>
+    <div>This start uses settings from <em>Apply</em> that are valid for this start only. Use <em>Save Settings</em> to keep them.</div>
   </div>
   <div id="banner-unsaved" class="banner info" hidden>
-    <div>The settings in use differ from the saved settings. They are lost at the next restart unless you use <em>Save to NVS</em>.</div>
+    <div>The settings in use differ from the saved settings. They are lost at the next restart unless you use <em>Save Settings</em>.</div>
   </div>
   <div id="message" class="banner" role="status" hidden></div>
 
@@ -244,13 +244,15 @@
         <p class="hint">An empty password field keeps the stored password (at least 8 characters are needed while OTE is on). ArduinoOTA checks the password with an MD5 challenge and the firmware image is not signed: use a long random password and keep OTE off when it is not needed. While it is on, UDP on the OTE port and mDNS (UDP 5353) are open.</p>
       </section>
 
-      <div class="buttons sticky">
-        <button type="button" class="primary" id="btn-apply" title="In effect now, not stored">Apply</button>
-        <button type="button" id="btn-save" title="Loaded at every start">Save to NVS</button>
-        <button type="button" id="btn-reboot" title="Restart the device">Reboot</button>
-        <button type="button" class="danger" id="btn-factory" title="Back to the compiled settings">Factory reset</button>
+      <div class="action-bar">
+        <div class="buttons">
+          <button type="button" class="primary" id="btn-apply" title="In effect now, not stored">Apply</button>
+          <button type="button" id="btn-save" title="Stored in NVS (flash), loaded at every boot">Save Settings</button>
+          <button type="button" id="btn-reboot" title="Restart the device">Reboot</button>
+          <button type="button" class="danger" id="btn-factory" title="Back to the compiled settings">Factory reset</button>
+        </div>
+        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Factory reset:</strong> back to the compiled settings and the compiled password (the TLS certificate is kept).</p>
       </div>
-      <p class="hint center">Apply: in effect now, not stored. Save to NVS: loaded at every start. Reboot: restarts with the saved settings. Factory reset: back to the compiled settings and the compiled password (the TLS certificate is kept).</p>
     </form>
 
     <section class="card" id="factory-card" hidden>

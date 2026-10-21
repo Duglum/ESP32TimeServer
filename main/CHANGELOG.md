@@ -51,7 +51,7 @@ Contents
 | 22 | **Free-running PTP clock**: set once, then only its frequency is steered (EMAC fine addend); offset and rate are estimated once per second and the hardware time stamps are converted with a continuous mapping | no per-second clock write: the rare errors of up to 33 µs for frames that straddle a write are gone, no write latency in the result, holdover on the learned rate |
 | 23 | **Optional PTP PPS loopback** (`PTPPPSLoopbackPin`): the EMAC PPS output is captured by the same MCPWM timer as the GNSS PPS | PTP clock measured against the PPS in hardware: the constant read delay error of the software measurement (some 100 ns) is removed; simulated error of T2 / hardware T3 16 ns RMS |
 | 24 | **PTP clock from the 80 MHz PLL** instead of the 40 MHz crystal (2026-10-20) | time stamp steps 13 ns instead of 40 ns |
-| 25 | **Web admin page** (HTTPS, TCP 443, 2026-10-21): network, GNSS / PPS, LCD, time zone, LED, MQTT and NTP authentication settings; Apply / Save (NVS) / Factory reset; LCD, LED, MQTT and NTP authentication always compiled in and switched at run time | common settings without rebuilding; per-device TLS key, salted password hash, sessions with CSRF protection, allow-list |
+| 25 | **Web admin page** (HTTPS, TCP 443, 2026-10-21): network, GNSS / PPS, LCD, time zone, LED, MQTT and NTP authentication settings; Apply / Save Settings (NVS) / Reboot / Factory reset; LCD, LED, MQTT and NTP authentication always compiled in and switched at run time | common settings without rebuilding; per-device TLS key, salted password hash, sessions with CSRF protection, allow-list |
 
 No memory leak was found in the review (section 4.13).
 
@@ -359,7 +359,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
   - Live settings (time zone, LCD text options, LED brightness, NTP authentication) are switched immediately. The NTP key set is replaced lock-free (seqlock in `ntp_auth.cpp`, the NTP path copies the key it needs and never waits).
   - Network settings (IPv4, IPv6, DNS) are applied at once and have to be **confirmed within 120 s** from the page. With a new static address the confirmation is only accepted over that address (the page lists the URLs; the session cookie is bound to the host name, so the user logs in again there). Without confirmation the previous network settings come back automatically.
   - Settings that need a restart (FQDN, GPIO pins, GNSS baud rate, LED type, LCD on/off, MQTT): Apply writes them as a **one-shot set** (NVS `webcfg/oneshot`) and restarts once. The one-shot set is erased at the start that uses it, before it is used: if it makes the device crash, the next start is back on the saved settings. If the one-shot set also changed the network, the confirmation runs after the start; without it the device restarts with the saved settings.
-- **Save**: stores the form values in NVS (`webcfg/saved`, versioned blob with CRC); they are loaded at every start. Network values are only saved if they are the ones in use (apply and confirm them first), so a typo cannot lock the device out at the next start.
+- **Save Settings** (button): stores the form values in NVS (flash) (`webcfg/saved`, versioned blob with CRC); they are loaded at every start. Network values are only saved if they are the ones in use (apply and confirm them first), so a typo cannot lock the device out at the next start.
 - **Reboot**: restarts the device (controlled restart with the MQTT notification); applied but unsaved settings are discarded.
 - **Factory reset** (needs the current password): erases `webcfg` (saved and one-shot settings) and `webauth` (password, allow-list), keeps the TLS identity (`webtls`) and the calibrations (`isr_latency`, `ptp_latency`, `gnss_state`), then restarts with the compiled settings and the compiled password.
 - Order at the start: compiled defaults, then the saved settings (if valid for this firmware), then a one-shot set. A saved set from another firmware version (layout change) or one that fails the validation is ignored with a warning.
@@ -391,6 +391,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
 - Status: protocol, baud rate and (UBX) dynamic model of the GNSS receiver in separate lines; IPv6 and DNS addresses in lower case (RFC 5952), one per line, the kind (link-local, SLAAC, ...) in a second line. The page is up to 1240 px wide; below 1000 px the two status groups are stacked so the addresses are not broken.
 - The header shows the host name (first label of the FQDN, also on the login page through `GET /api/info`, the only API call without login, which returns nothing but the host name), the favicon and the FQDN.
 - The login page names the factory default password.
+- The buttons (Apply, Save Settings, Reboot, Factory reset) and their explanation share one panel, which stays visible at the bottom while scrolling (on screens below 680 px it is a normal panel at the end of the form).
 - A banner shows when the settings in use differ from what the next start loads (saved settings, otherwise the compiled defaults).
 - At most 3 sockets with LRU purge, request body at most 4 kB, receive / send timeout 5 s, request headers up to 2 kB (`CONFIG_HTTPD_MAX_REQ_HDR_LEN`, browsers send long headers), mbedTLS dynamic buffers (`CONFIG_MBEDTLS_DYNAMIC_BUFFER`).
 - The server task runs at priority 3 on core 0: below every timing task (PPS 14, GNSS 15, hardware NTP 17 on core 1, NTP sockets 20, Ethernet recovery 6, MQTT 5). Stack 10 kB (TLS handshake, PBKDF2, JSON); a one-time start task (8 kB) creates the key. The task stacks of `main.cpp` are unchanged.
@@ -431,7 +432,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
 2. At the first start the device creates its TLS key (about 1 s) and prints `Web admin certificate SHA-256 fingerprint: AB:CD:...`. Note it.
 3. Open `https://<address>/` (IPv4 or `https://[IPv6]/`). The browser warns about the self-signed certificate: open the certificate details and compare the SHA-256 fingerprint with the console line before accepting it. After a factory reset the fingerprint stays the same; it changes only with a new FQDN or when `webtls` is erased.
 4. Log in with `password` (or the `WebAdminPassword` of the secrets file) and change the password at once (red banner until then).
-5. Change settings, **Apply**, check, **Save**. Network changes: confirm within 120 s (over the new address if a static one was set), then Save.
+5. Change settings, **Apply**, check, **Save Settings**. Network changes: confirm within 120 s (over the new address if a static one was set), then Save Settings.
 6. Forgotten password: factory reset with the button (hold 10 s during the start, `UPTIME_RESTART_BUTTON_ENABLED 1` needed), or `idf.py erase-flash` + flash (erases all NVS data including the calibrations and the TLS key), or erase only the `webauth` namespace with the NVS partition tool.
 
 ## 5. Security and open ports
@@ -647,7 +648,7 @@ Web admin (4.23):
 
 | Namespace | Key | Content | Factory reset |
 |---|---|---|---|
-| `webcfg` | `saved` (blob) | settings saved with "Save": magic, layout version, size, flags, all settings incl. MQTT password and NTP key, CRC-32 | erased |
+| `webcfg` | `saved` (blob) | settings saved with "Save Settings": magic, layout version, size, flags, all settings incl. MQTT password and NTP key, CRC-32 | erased |
 | `webcfg` | `oneshot` (blob) | settings of "Apply" that need a restart; erased at the start that uses them | erased |
 | `webauth` | `pw` (blob) | admin password: PBKDF2-HMAC-SHA256 hash, salt, iterations, CRC-32 | erased |
 | `webauth` | `allow` (blob) | allow-list (at most 8 entries), CRC-32 | erased |

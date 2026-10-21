@@ -179,14 +179,18 @@ button.theme-toggle { font-size: 1.15rem; line-height: 1; padding: .45rem .6rem;
 
 .buttons { display: flex; gap: .6rem; flex-wrap: wrap; justify-content: center; }
 .buttons.left { justify-content: flex-start; }
-.buttons.sticky {
+/* Action bar: buttons and their explanation, stays visible at the bottom while scrolling */
+.action-bar {
   position: sticky; bottom: .5rem;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: .75rem;
+  padding: .75rem 1rem;
   box-shadow: var(--shadow);
+  margin-bottom: 1rem;
 }
+.action-bar .hint { margin-top: .6rem; }
+.action-bar .hint strong { color: var(--text); font-weight: 600; }
 
 .banner {
   border-radius: 10px;
@@ -232,6 +236,7 @@ ul.plain li + li { margin-top: .15rem; }
 @media (max-width: 680px) {
   .grid, .status-groups { grid-template-columns: 1fr; }
   .addr { white-space: normal; overflow-wrap: anywhere; }
+  .action-bar { position: static; } /* the explanation would cover too much of a small screen */
   .status-grid { grid-template-columns: 9.5rem minmax(0, 1fr); }
   .colour-table { grid-template-columns: 1fr 1fr 2rem; }
   .colour-table .state { grid-column: 1 / -1; margin-top: .4rem; }
