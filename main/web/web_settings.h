@@ -181,7 +181,8 @@ bool web_parse_ipv4(const char *text, uint32_t *address_be);
 bool web_parse_ipv6(const char *text, uint8_t address[16]);
 bool web_is_valid_time_zone(const char *tz);
 bool web_is_reserved_gpio(int gpio);
-// MAC address as "xx:xx:xx:xx:xx:xx" or "xx-xx-xx-xx-xx-xx" (any case) to lower case with ':'; false if not valid
+// MAC address as "xx:xx:xx:xx:xx:xx", "xx-xx-xx-xx-xx-xx", "xxxxxxxxxxxx" or "xxxx.xxxx.xxxx" (any case) to lower
+// case with ':'; false if not valid
 bool web_normalise_mac(const char *text, char (&out)[WEB_MAC_TEXT_SIZE]);
 // Hardware (eFuse) MAC of the chip; with one universal MAC address it is the Ethernet MAC
 bool web_hardware_mac(char (&out)[WEB_MAC_TEXT_SIZE]);

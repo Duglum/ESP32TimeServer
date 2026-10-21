@@ -288,19 +288,49 @@ bool web_is_reserved_gpio(int gpio)
 bool web_normalise_mac(const char *text, char (&out)[WEB_MAC_TEXT_SIZE])
 {
     out[0] = '\0';
-    if (text == nullptr || strlen(text) != 17)
+    if (text == nullptr)
         return false;
-    const char separator = text[2];
-    if (separator != ':' && separator != '-')
+    // Separator positions of the accepted forms: xx:xx:xx:xx:xx:xx / xx-xx-..., xxxx.xxxx.xxxx (Cisco),
+    // xxxxxxxxxxxx (no separator)
+    const size_t length = strlen(text);
+    char separator = '\0';
+    size_t group = 0; // hex digits between two separators
+    if (length == 17 && (text[2] == ':' || text[2] == '-'))
+    {
+        separator = text[2];
+        group = 2;
+    }
+    else if (length == 14 && text[4] == '.')
+    {
+        separator = '.';
+        group = 4;
+    }
+    else if (length != 12)
         return false;
-    for (size_t i = 0; i < 17; ++i)
+
+    char digits[12];
+    size_t count = 0;
+    for (size_t i = 0; i < length; ++i)
     {
         const char c = text[i];
-        if (i % 3 == 2 ? c != separator : !isxdigit(static_cast<unsigned char>(c)))
+        if (group != 0 && i % (group + 1) == group)
+        {
+            if (c != separator)
+                return false;
+            continue;
+        }
+        if (!isxdigit(static_cast<unsigned char>(c)) || count == sizeof(digits))
             return false;
-        out[i] = i % 3 == 2 ? ':' : static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        digits[count++] = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     }
-    out[17] = '\0';
+    if (count != sizeof(digits))
+        return false;
+    for (size_t i = 0; i < 6; ++i)
+    {
+        out[i * 3] = digits[i * 2];
+        out[i * 3 + 1] = digits[i * 2 + 1];
+        out[i * 3 + 2] = i < 5 ? ':' : '\0';
+    }
     return true;
 }
 

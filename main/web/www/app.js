@@ -441,6 +441,15 @@
     }
   }
 
+  // xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx (Cisco) or xxxxxxxxxxxx -> lower case with ':'
+  // ('' stays '', null = not valid)
+  function normaliseMac(text) {
+    const t = text.trim().toLowerCase();
+    if (t === '') return '';
+    if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$|^([0-9a-f]{2}-){5}[0-9a-f]{2}$|^([0-9a-f]{4}\.){2}[0-9a-f]{4}$|^[0-9a-f]{12}$/.test(t)) return null;
+    return t.replace(/[^0-9a-f]/g, '').match(/../g).join(':');
+  }
+
   function splitCidr(text, defaultPrefix) {
     const parts = text.split('/');
     if (parts.length > 2) return null;
@@ -549,8 +558,8 @@
       throw new Error('MQTT client limit with the TF card: 50 to 1000');
     }
     // MAC: lower case with ':'; the hardware MAC is sent as "" (= hardware MAC)
-    const mac = f.mac_address.value.trim().toLowerCase().replace(/-/g, ':');
-    if (mac !== '' && !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) throw new Error('MAC address: xx:xx:xx:xx:xx:xx (hexadecimal) expected');
+    const mac = normaliseMac(f.mac_address.value);
+    if (mac === null) throw new Error('MAC address: xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx or xxxxxxxxxxxx (hexadecimal) expected');
     if (mac !== '' && (parseInt(mac.slice(0, 2), 16) & 1) !== 0) throw new Error('MAC address: a unicast address is required (the lowest bit of the first byte must be 0)');
     body.mac_address = mac === state.status.mac_hardware ? '' : mac;
     body.dns = f.dns.value.split(/\r?\n/).map((s) => s.trim()).filter((s) => s !== '');

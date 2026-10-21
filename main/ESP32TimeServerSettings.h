@@ -131,6 +131,7 @@ static constexpr size_t MQTT_TF_Client_Limit = 500;
 // (optional) setting of the ESP32-P4's MAC address support
 // set the value below to "" to use the ESP32-P4's default MAC address, or
 // set the value below to a desired MAC address, such as "80:f1:b2:d1:d9:18"
+// (also accepted: "80-f1-b2-d1-d9-18", "80f1.b2d1.d918" or "80f1b2d1d918", any case)
 static constexpr char MACAddress[] = "";
 
 // (optional) setting a static IP address for the ESP32-P4 support
