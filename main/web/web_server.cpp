@@ -1252,6 +1252,10 @@ namespace
 
 void web_admin_start()
 {
+#if !WEB_ADMIN_ENABLED
+    // WEB_ADMIN_ENABLED 0: no server, no TLS key, no password hash (nothing listens on TCP 443)
+    return;
+#endif
     if (xTaskCreatePinnedToCore(web_admin_start_task, "web_admin_init", START_TASK_STACK, nullptr, TASK_PRIORITY, nullptr, TASK_CORE) != pdPASS)
         ESP_LOGE(TAG, "Web admin: start task could not be created");
 }

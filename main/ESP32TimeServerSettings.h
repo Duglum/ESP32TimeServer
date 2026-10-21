@@ -5,7 +5,7 @@
 //
 // Note: some additional settings are defined in the ESP32TimeServerSettingsSecrets.h file
 //
-// Web admin page (https://<address>/, TCP 443): the network settings, the GNSS protocol
+// Web admin page (https://<address>/, TCP 443, see WEB_ADMIN_ENABLED below): the network settings, the GNSS protocol
 // (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED), the GNSS and PPS pins, the GNSS baud rate, the PTP PPS loopback pin, the
 // LCD, time zone, RGB LED (including the LED_* colours), MQTT and NTP authentication settings below can also be
 // changed on the page. Settings saved there (NVS) take precedence over the values in this file; the values here
@@ -25,6 +25,12 @@
 // NOTE: setting DEBUG_ENABLED to 1 (Enabled) will degrade accuracy and performance during periods of high volume ntp requests
 #define DEBUG_ENABLED 0 // 0 = Disabled; 1 = Enabled
 static constexpr int serialMonitorSpeed = 115200;
+
+// (optional) web admin page: HTTPS settings page on TCP 443 (password in ESP32TimeServerSettingsSecrets.h)
+// 0 = no web server at all (TCP 443 stays closed, no TLS key is created) and only the settings of this file are
+//     used: settings saved on the page are ignored (they stay in NVS and are used again when this is set back to 1)
+// 1 = settings page available; settings saved there take precedence over the values in this file
+#define WEB_ADMIN_ENABLED 1 // 0 = Disabled; 1 = Enabled
 
 // (optional) RGB LED module support; enable support for one module type below at most
 #define RBG_LED_KY_016_MODULE_ENABLED 0 // 0 = Disabled; 1 = Enabled

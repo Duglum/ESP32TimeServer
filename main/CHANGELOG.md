@@ -336,6 +336,8 @@ Other cases:
 
 A settings page on the board replaces `ESP32TimeServerSettings.h` / `ESP32TimeServerSettingsSecrets.h` for the common settings. HTTPS on TCP 443 only, no port 80, no redirect, no option to change that.
 
+`WEB_ADMIN_ENABLED` (`ESP32TimeServerSettings.h`, after `DEBUG_ENABLED`, default 1) switches the page off completely: with 0 no web server task, no TLS key, no password hash, nothing listens on TCP 443, and only the settings of the settings files are used (the previous behaviour). Settings saved on the page stay in NVS untouched and are used again when the switch is set back to 1; a pending one-shot set is erased. The page code is still compiled but never called (the linker removes most of it: the firmware is about 160 kB smaller). The console prints `Web admin page support: Disabled (compiled settings only)` and `Settings: compiled settings (web admin disabled, WEB_ADMIN_ENABLED 0)`. The button recovery at the start still works.
+
 **Settings on the page**
 
 | Group | Settings | Takes effect |
@@ -439,9 +441,9 @@ With the current settings (OTE, MQTT off):
 | Protocol | Port | Who | Remark |
 |---|---|---|---|
 | UDP | 123 | raw NTP path (hardware time stamps) and lwIP sockets (IPv4 `0.0.0.0`, IPv6 `::`, IPv6 link-local) | the sockets get what the raw path leaves to lwIP |
-| **TCP** | **443** | **web admin page (HTTPS only, IPv4 and IPv6 on one dual-stack socket)** | **new on 2026-10-21 (4.23); TLS 1.2 / 1.3, allow-list checked before the handshake, at most 3 connections** |
+| **TCP** | **443** | **web admin page (HTTPS only, IPv4 and IPv6 on one dual-stack socket); closed with `WEB_ADMIN_ENABLED 0`** | **new on 2026-10-21 (4.23); TLS 1.2 / 1.3, allow-list checked before the handshake, at most 3 connections** |
 | UDP | 68 | lwIP DHCP client | only while DHCP is used |
-| UDP | 32769 | control socket of `esp_http_server` | bound to 127.0.0.1 only, not reachable from the network |
+| UDP | 32769 | control socket of `esp_http_server` | bound to 127.0.0.1 only, not reachable from the network; not opened with `WEB_ADMIN_ENABLED 0` |
 | ICMP / ICMPv6 | - | lwIP | ping replies, IPv6 neighbour discovery, MLD; ARP |
 | TCP | all others | none | a SYN gets a RST |
 
@@ -622,6 +624,7 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `NTP_CACHE_MATCH_PORT` | `ntp_cache.c` | 0 | 1 = also compare the client source port |
 | `CACHE_TIMEOUT_MS_IPV4/IPV6` | `ntp_cache.h` | 1800000 | lifetime of a cache entry |
 | `CONFIG_COMPILER_OPTIMIZATION_PERF` | `sdkconfig.defaults`, `sdkconfig` | y | -O2 |
+| `WEB_ADMIN_ENABLED` | `ESP32TimeServerSettings.h` | 1 | 0 = no web admin page (TCP 443 closed) and compiled settings only (4.23) |
 | `WebAdminPassword` | `ESP32TimeServerSettingsSecrets.h` | "password" | password of the web admin page until one is set on the page; again after a factory reset |
 | `DeviceName` | `ESP32TimeServerSettings.h` | "ESP32TimeServer" | default FQDN of the page (host name for DHCP and OTE, certificate name) |
 | `*_ENABLED` of LCD, LED, MQTT, NTP authentication, the pins, the network values, `timeZoneSpec`, `lcdTopLineTitle`, `display*`, `RGB_LED_Brightness_Percent`, `MQTTServerIPAddress` / `MQTTPort`, `MQTTUsername` / `MQTTPassword`, `symmetric_keys` | settings files | as before | defaults of the web admin page (4.23); saved page settings take precedence |

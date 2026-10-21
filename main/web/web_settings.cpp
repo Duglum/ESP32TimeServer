@@ -396,6 +396,21 @@ void web_settings_load_boot()
     web_settings_defaults(s_boot);
     const char *source = "compiled defaults";
 
+#if !WEB_ADMIN_ENABLED
+    // Web admin disabled: only the compiled settings. Saved settings stay in NVS untouched; a pending one-shot set
+    // (from an Apply just before the firmware change) is discarded.
+    nvs_handle_t disabled_handle = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &disabled_handle) == ESP_OK)
+    {
+        if (nvs_erase_key(disabled_handle, NVS_KEY_ONESHOT) == ESP_OK)
+            nvs_commit(disabled_handle);
+        nvs_close(disabled_handle);
+    }
+    s_running = s_boot;
+    ESP_LOGI(TAG, "Settings: compiled settings (web admin disabled, WEB_ADMIN_ENABLED 0)");
+    return;
+#endif
+
     nvs_handle_t handle = 0;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err == ESP_OK)

@@ -8077,6 +8077,12 @@ void write_opening_messages_to_the_console()
     ESP_LOGW(TAG, "Over the Ethernet update support: Disabled");
 #endif
 
+#if WEB_ADMIN_ENABLED
+    ESP_LOGI(TAG, "Web admin page support: Enabled");
+#else
+    ESP_LOGW(TAG, "Web admin page support: Disabled (compiled settings only)");
+#endif
+
     ESP_LOGI(TAG, "");
 }
 
