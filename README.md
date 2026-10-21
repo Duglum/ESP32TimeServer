@@ -24,4 +24,4 @@ Do with it whatever you want within the original MIT license used by Rob, but do
 
 ## Screenshot of the Website:
 
-<img width="3423" height="6203" alt="settings_website_20261021" src="https://github.com/user-attachments/assets/1f96a947-e2cd-4d16-91fc-ec11de81b87a" />
+<img width="1230" height="5953" alt="settings_website_20261021_01" src="https://github.com/user-attachments/assets/bf447f55-7757-43f9-99a0-c453763e0a40" />
