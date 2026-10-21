@@ -100,3 +100,4 @@ AGENTS.md
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+build_flash.cmd
