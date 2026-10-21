@@ -23,3 +23,5 @@ In general it works really good, but i didn't test all features.
 Do with it whatever you want within the original MIT license used by Rob, but don't complain to me if anything breaks.
 
 ## Screenshot of the Website:
+
+<img width="3423" height="6203" alt="settings_website_20261021" src="https://github.com/user-attachments/assets/1f96a947-e2cd-4d16-91fc-ec11de81b87a" />
