@@ -215,7 +215,7 @@
   }
 
   const displayNames = {
-    gnss_protocol: { nmea: 'NMEA Standard Protocol (needs $GNRMC)', ubx: 'U-Blox UBX Protocol' },
+    gnss_protocol: { nmea: 'NMEA Standard Protocol (needs RMC sentence)', ubx: 'U-Blox UBX Protocol' },
     led_type: { none: 'None', ky016: 'KY-016', ws2812: 'WS2812' }
   };
 
