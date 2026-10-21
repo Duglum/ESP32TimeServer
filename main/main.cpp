@@ -68,7 +68,7 @@
 // ---- Features that can be switched on the web admin page ----
 // The *_ENABLED values below in ESP32TimeServerSettings.h are only the run-time defaults now (see
 // web/web_settings.cpp). The code of these features is always compiled in; the settings of this boot decide at run
-// time whether a feature is started (s_lcd_on, s_led_type, s_mqtt_on, ntp_auth_configure()). A feature that is off
+// time whether a feature is started (s_lcd_on, s_led_type, s_mqtt_on, s_ote_on, ntp_auth_configure()). A feature that is off
 // has no task, no driver and no buffers.
 #undef LIQUID_CRYSTAL_DISPLAY_ENABLED
 #define LIQUID_CRYSTAL_DISPLAY_ENABLED 1
@@ -80,6 +80,8 @@
 #define MQTT_ENABLED 1
 #undef SYMMETRIC_KEY_AUTHENTICATION_ENABLED
 #define SYMMETRIC_KEY_AUTHENTICATION_ENABLED 1
+#undef OTE_UPDATES_ENABLED
+#define OTE_UPDATES_ENABLED 1
 
 #include "custom/ntp_auth.h"
 #include "custom/ntp_cache.h"
@@ -138,6 +140,7 @@ static const char *TAG = "main_cpp";
 static const web_settings_t *s_cfg = nullptr;
 static bool s_lcd_on = false;                         // LCD enabled for this boot
 static bool s_mqtt_on = false;                        // MQTT enabled for this boot (fixed after the start)
+static bool s_ote_on = false;                         // Over The Ethernet updates enabled for this boot
 static bool s_gnss_ublox = true;                      // GNSS protocol of this boot: true = u-blox UBX, false = NMEA
 static web_led_type_t s_led_type = web_led_type_t::none; // RGB LED module of this boot
 static std::atomic<uint8_t> s_led_brightness_percent{0};
@@ -8071,12 +8074,6 @@ void write_opening_messages_to_the_console()
     ESP_LOGW(TAG, "Uptime / Reset button support: Disabled");
 #endif
 
-#if OTE_UPDATES_ENABLED
-    ESP_LOGI(TAG, "Over the Ethernet update support: Enabled");
-#else
-    ESP_LOGW(TAG, "Over the Ethernet update support: Disabled");
-#endif
-
 #if WEB_ADMIN_ENABLED
     ESP_LOGI(TAG, "Web admin page support: Enabled");
 #else
@@ -8101,6 +8098,11 @@ void write_settings_messages_to_the_console()
         ESP_LOGI(TAG, "LCD support: Enabled");
     else
         ESP_LOGW(TAG, "LCD support: Disabled");
+
+    if (s_ote_on)
+        ESP_LOGI(TAG, "Over the Ethernet update support: Enabled (%s, UDP port %u)", cfg.ote_device_name, static_cast<unsigned int>(cfg.ote_port));
+    else
+        ESP_LOGW(TAG, "Over the Ethernet update support: Disabled");
 
     if (cfg.ntp_auth_enabled)
         ESP_LOGI(TAG, "Symmetric-key authentication support: Enabled (%s)", cfg.ntp_key_override ? "key of the web settings" : "compiled keys");
@@ -8159,6 +8161,7 @@ void setup_NVS_storage(void)
     s_cfg = &web_settings_boot();
     s_lcd_on = s_cfg->lcd_enabled;
     s_mqtt_on = s_cfg->mqtt_enabled;
+    s_ote_on = s_cfg->ote_enabled;
     s_gnss_ublox = s_cfg->gnss_ublox;
     s_led_type = s_cfg->led_type;
     web_settings_hostname(*s_cfg, s_hostname, sizeof(s_hostname));
@@ -8564,7 +8567,7 @@ static bool render_ote_display()
 static void ote_service_task(void *parameter)
 {
 #if DEBUG_ENABLED
-    ESP_LOGI(TAG, "OTE service task started on port %u", static_cast<unsigned int>(OTEPort));
+    ESP_LOGI(TAG, "OTE service task started on port %u", static_cast<unsigned int>(s_cfg->ote_port));
 #endif
 
 
@@ -8611,6 +8614,7 @@ static void setup_ota()
     };
 
     bool network_begin_ok = Network.begin();
+    (void)network_begin_ok; // only read by the debug output
 
 #if DEBUG_ENABLED
     const network_address_snapshot_t addresses = get_network_address_snapshot();
@@ -8622,14 +8626,15 @@ static void setup_ota()
 
     ESP_LOGI(TAG,
              "Configuring ArduinoOTA: host=%s, port=%u, password_length=%u",
-             s_hostname,
-             static_cast<unsigned int>(OTEPort),
-             static_cast<unsigned int>(strlen(OTEPassword)));
+             s_cfg->ote_device_name,
+             static_cast<unsigned int>(s_cfg->ote_port),
+             static_cast<unsigned int>(strlen(s_cfg->ote_password)));
 #endif
 
-    ArduinoOTA.setPort(OTEPort);
-    ArduinoOTA.setHostname(s_hostname);
-    ArduinoOTA.setPassword(OTEPassword);
+    // Settings of this boot (web admin; defaults DeviceName, OTEPort, OTEPassword)
+    ArduinoOTA.setPort(s_cfg->ote_port);
+    ArduinoOTA.setHostname(s_cfg->ote_device_name);
+    ArduinoOTA.setPassword(s_cfg->ote_password);
     ArduinoOTA.setRebootOnSuccess(false);
     ArduinoOTA.onStart([]()
                        {
@@ -8666,8 +8671,8 @@ static void setup_ota()
     const network_address_snapshot_t ota_addresses = get_network_address_snapshot();
     ESP_LOGI(TAG,
              "ArduinoOTA.begin() returned, listener should be available on %s:%u",
-             ota_addresses.selected[0] == '\0' ? s_hostname : ota_addresses.selected,
-             static_cast<unsigned int>(OTEPort));
+             ota_addresses.selected[0] == '\0' ? s_cfg->ote_device_name : ota_addresses.selected,
+             static_cast<unsigned int>(s_cfg->ote_port));
 #endif
 }
 
@@ -8676,6 +8681,8 @@ static void setup_ota()
 void setup_for_ote_updates()
 {
 #if OTE_UPDATES_ENABLED
+    if (!s_ote_on)
+        return; // switched off in the settings: no listener, no task
 
     display_line(1, "Setup OTE");
     display_line(2, "");
@@ -10272,7 +10279,7 @@ static void update_LED_LCD_Button_task(void *parameter)
         }
 
 #if OTE_UPDATES_ENABLED
-        if (render_ote_display())
+        if (s_ote_on && render_ote_display())
         {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;

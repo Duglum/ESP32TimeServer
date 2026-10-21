@@ -27,6 +27,8 @@ static constexpr size_t WEB_LCD_TITLE_SIZE = 18;    // 17 characters + NUL (the 
 static constexpr size_t WEB_MQTT_URI_SIZE = 128;
 static constexpr size_t WEB_MQTT_CREDENTIAL_SIZE = 65;
 static constexpr size_t WEB_NTP_KEY_SIZE = 33;      // 32 characters + NUL
+static constexpr size_t WEB_OTE_NAME_SIZE = 33;     // OTE device name (mDNS host name), 32 characters + NUL
+static constexpr size_t WEB_OTE_PASSWORD_SIZE = 65; // 64 characters + NUL
 
 enum class web_led_type_t : uint8_t
 {
@@ -98,6 +100,12 @@ struct web_settings_t
     bool ntp_key_override;   // false = the keys of ESP32TimeServerSettingsSecrets.h are used
     uint32_t ntp_key_id;
     char ntp_key[WEB_NTP_KEY_SIZE]; // secret
+
+    // Over The Ethernet updates (ArduinoOTA)
+    bool ote_enabled;
+    char ote_device_name[WEB_OTE_NAME_SIZE]; // announced by mDNS as <name>.local
+    uint16_t ote_port;
+    char ote_password[WEB_OTE_PASSWORD_SIZE]; // secret
 };
 
 // Compiled defaults

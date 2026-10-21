@@ -210,7 +210,10 @@
       mqtt_uri: s.mqtt_uri,
       mqtt_username: s.mqtt_username,
       ntp_auth_enabled: s.ntp_auth_enabled,
-      ntp_key_id: String(s.ntp_key_id)
+      ntp_key_id: String(s.ntp_key_id),
+      ote_enabled: s.ote_enabled,
+      ote_device_name: s.ote_device_name,
+      ote_port: String(s.ote_port)
     };
   }
 
@@ -232,6 +235,8 @@
     f.mqtt_password_clear.checked = false;
     f.ntp_key.value = '';
     f.ntp_key_clear.checked = false;
+    f.ote_password.value = '';
+    $('ote-password-state').textContent = s.ote_password_set ? 'A password is set.' : 'No password is set.';
     $('mqtt-password-state').textContent = s.mqtt_password_set ? 'A password is set.' : 'No password is set.';
     $('ntp-key-state').textContent = s.ntp_key_override
       ? 'A key set on this page is in use (ID ' + s.ntp_key_id + ').'
@@ -338,7 +343,11 @@
       ntp_auth_enabled: f.ntp_auth_enabled.checked,
       ntp_key_id: Number(f.ntp_key_id.value),
       ntp_key: f.ntp_key.value,
-      ntp_key_clear: f.ntp_key_clear.checked
+      ntp_key_clear: f.ntp_key_clear.checked,
+      ote_enabled: f.ote_enabled.checked,
+      ote_device_name: f.ote_device_name.value.trim(),
+      ote_port: Number(f.ote_port.value),
+      ote_password: f.ote_password.value
     };
     for (const [key, name] of ledStates) {
       const hex = normaliseHex(colourRows[key].input.value);

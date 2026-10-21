@@ -223,6 +223,27 @@
         </div>
       </section>
 
+      <section class="card">
+        <h2>Over The Ethernet updates <span class="badge restart">restart</span></h2>
+        <div class="grid">
+          <label class="switch span2"><input type="checkbox" name="ote_enabled"> Accept firmware updates over the network (ArduinoOTA, e.g. from the Arduino IDE or espota.py)</label>
+          <label><span class="lt">OTE device name</span>
+            <input type="text" name="ote_device_name" maxlength="32" spellcheck="false" autocomplete="off">
+            <small class="note">Announced by mDNS as &lt;name&gt;.local. Letters, digits and '-'.</small>
+            <small class="def" data-for="ote_device_name"></small>
+          </label>
+          <label><span class="lt">OTE port (UDP)</span>
+            <input type="number" name="ote_port" min="1024" max="65535">
+            <small class="def" data-for="ote_port"></small>
+          </label>
+          <label class="span2"><span class="lt">OTE password</span>
+            <input type="password" name="ote_password" maxlength="64" autocomplete="new-password" placeholder="unchanged">
+            <small class="note" id="ote-password-state"></small>
+          </label>
+        </div>
+        <p class="hint">An empty password field keeps the stored password (at least 8 characters are needed while OTE is on). ArduinoOTA checks the password with an MD5 challenge and the firmware image is not signed: use a long random password and keep OTE off when it is not needed. While it is on, UDP on the OTE port and mDNS (UDP 5353) are open.</p>
+      </section>
+
       <div class="buttons sticky">
         <button type="button" class="primary" id="btn-apply" title="In effect now, not stored">Apply</button>
         <button type="button" id="btn-save" title="Loaded at every start">Save to NVS</button>

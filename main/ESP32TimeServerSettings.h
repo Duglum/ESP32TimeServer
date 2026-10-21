@@ -7,11 +7,13 @@
 //
 // Web admin page (https://<address>/, TCP 443, see WEB_ADMIN_ENABLED below): the network settings, the GNSS protocol
 // (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED), the GNSS and PPS pins, the GNSS baud rate, the PTP PPS loopback pin, the
-// LCD, time zone, RGB LED (including the LED_* colours), MQTT and NTP authentication settings below can also be
+// LCD, time zone, RGB LED (including the LED_* colours), MQTT, NTP authentication and Over The Ethernet update
+// settings below (OTE password in ESP32TimeServerSettingsSecrets.h) can also be
 // changed on the page. Settings saved there (NVS) take precedence over the values in this file; the values here
-// are the defaults and are used again after a factory reset. The features LCD, RGB LED, MQTT and NTP
-// authentication are always compiled in: their *_ENABLED values below only decide whether they are on by default.
-// DeviceName is the default host name (FQDN) of the page.
+// are the defaults and are used again after a factory reset. The features LCD, RGB LED, MQTT, NTP
+// authentication and OTE updates are always compiled in: their *_ENABLED values below only decide whether they are on
+// by default.
+// DeviceName is the default host name (FQDN) of the page and the default OTE device name.
 //
 
 #pragma once

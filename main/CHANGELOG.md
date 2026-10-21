@@ -348,6 +348,7 @@ A settings page on the board replaces `ESP32TimeServerSettings.h` / `ESP32TimeSe
 | RGB LED | none / KY-016 / WS2812 and their pins (restart), brightness and the colour of each state (start-up, normal, time sync, warning, alert, critical, button pressed; preset or `#RRGGBB`, defaults `LED_startup` ... `LED_button_push`) (at once) | see left |
 | MQTT | on/off, broker URI (`mqtt://` or `mqtts://`, host, port), user name, password | restart |
 | NTP authentication | on/off, key ID and key (32 letters or digits) or the compiled keys | at once |
+| Over The Ethernet updates | on/off (`OTE_UPDATES_ENABLED`), OTE device name (mDNS `<name>.local`, default `DeviceName`), UDP port (`OTEPort`, 1024 to 65535, not 5353 / 32768 / 32769), password (`OTEPassword`, secret, at least 8 characters while OTE is on) | restart |
 | Security | web admin password, allow-list of source networks | at once, stored at once |
 
 Every field shows its compiled default; fields that differ from it are marked. Fields that need a restart carry a "restart" badge.
@@ -412,9 +413,10 @@ Every field shows its compiled default; fields that differ from it are marked. F
 
 **Features compiled in, idle when off**
 
-- LCD, KY-016, WS2812, MQTT and NTP authentication are always compiled in (`main/CMakeLists.txt` no longer reads the settings file); the `*_ENABLED` values in `ESP32TimeServerSettings.h` are now their run-time defaults. In `main.cpp` the five macros are set to 1 after the settings file is included, and the boot settings decide at run time (`s_lcd_on`, `s_led_type`, `s_mqtt_on`, `ntp_auth_configure()`).
+- LCD, KY-016, WS2812, MQTT, NTP authentication and OTE updates are always compiled in (`main/CMakeLists.txt` no longer reads the settings file); the `*_ENABLED` values in `ESP32TimeServerSettings.h` are now their run-time defaults. In `main.cpp` the five macros are set to 1 after the settings file is included, and the boot settings decide at run time (`s_lcd_on`, `s_led_type`, `s_mqtt_on`, `ntp_auth_configure()`).
 - When off: no task, no driver, no buffers. The MQTT report buffers (about 76 kB) are allocated only when MQTT is on (`setup_mqtt_tf_queue()`); the per-request MQTT counters in the NTP paths are skipped; the LED/LCD/button task is not created when neither is used; I2C, LEDC and RMT are not initialised.
-- MQTT and the LCD switch need a restart (the MQTT client, its TF card queue and the I2C bus have no clean stop in this code); the page marks them. A failing LED driver (e.g. wrong pin) switches the LED off for that start instead of stopping the server.
+- MQTT, OTE and the LCD switch need a restart (the MQTT client, its TF card queue, ArduinoOTA and the I2C bus have no clean stop in this code); the page marks them. With OTE off no ArduinoOTA listener, no mDNS and no OTE task are started.
+- `DeviceName` is the default of two fields: the FQDN (network host name, certificate) and the OTE device name (announced by ArduinoOTA via mDNS). A failing LED driver (e.g. wrong pin) switches the LED off for that start instead of stopping the server.
 - New on the page for MQTT: on/off and the broker URI (was `MQTTServerIPAddress` + `MQTTPort`); `mqtts://` brokers are checked against the ESP-IDF CA bundle. New for NTP authentication: on/off.
 - `NTP_MAX_PACKET_SIZE` is now always 72 bytes (the raw path buffers grow by 24 bytes each). With authentication off an authenticated request is dropped as before (it is counted as invalid).
 
@@ -718,8 +720,8 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - The IPv6 prefix length is stored and shown, but lwIP decides on-link with the first 64 bits; prefixes shorter than 64 are refused.
 - Changing the time zone at run time calls `setenv()` / `tzset()` while other tasks may call `localtime_r()`; newlib guards both, a reading during the switch may use the old zone once.
 - The settings blob has a layout version: after a firmware update that changes `web_settings_t` the saved settings are ignored (compiled defaults) until they are saved again.
-- PreferIPvX, MACAddress, OTE and the MQTT reporting details stay compile-time settings. `UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED` is now the default of the GNSS protocol setting: both GNSS paths are compiled in (`setup_gnss_ublox_receiver()`, `setup_gnss_nmea_receiver()`).
-- The settings blob layout version is 2 (GNSS protocol and LED colours added): settings saved with version 1 are ignored once.
+- PreferIPvX, MACAddress and the MQTT reporting details stay compile-time settings. `UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED` is now the default of the GNSS protocol setting: both GNSS paths are compiled in (`setup_gnss_ublox_receiver()`, `setup_gnss_nmea_receiver()`).
+- The settings blob layout version is 3 (2: GNSS protocol and LED colours, 3: OTE settings): settings saved with an older version are ignored once.
 
 ## 13. Recommendations that are not in the code
 

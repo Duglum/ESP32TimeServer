@@ -36,8 +36,8 @@ namespace
 
     constexpr uint32_t BLOB_MAGIC = 0x57534554u; // "WSET"
     // Increase when web_settings_t changes: a saved set of another version is ignored (compiled defaults are used)
-    // 2: GNSS protocol and LED colours added
-    constexpr uint32_t BLOB_VERSION = 2;
+    // 2: GNSS protocol and LED colours added; 3: Over The Ethernet update settings added
+    constexpr uint32_t BLOB_VERSION = 3;
 
     struct settings_blob_t
     {
@@ -382,6 +382,11 @@ void web_settings_defaults(web_settings_t &out)
     }
     copy_text(out.mqtt_username, MQTTUsername);
     copy_text(out.mqtt_password, MQTTPassword);
+
+    out.ote_enabled = OTE_UPDATES_ENABLED != 0;
+    copy_text(out.ote_device_name, DeviceName);
+    out.ote_port = OTEPort;
+    copy_text(out.ote_password, OTEPassword);
 
     out.ntp_auth_enabled = SYMMETRIC_KEY_AUTHENTICATION_ENABLED != 0;
     out.ntp_key_override = false;
@@ -789,6 +794,24 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
     else if (s.ntp_key[0] != '\0')
         FAIL("NTP key without override");
 
+    // ---- Over The Ethernet updates ----
+    {
+        const size_t length = strnlen(s.ote_device_name, WEB_OTE_NAME_SIZE);
+        if (length == 0 || length >= WEB_OTE_NAME_SIZE || s.ote_device_name[0] == '-' || s.ote_device_name[length - 1] == '-')
+            FAIL("OTE device name: 1 to 32 letters, digits or '-' (not at the start or end)");
+        for (size_t i = 0; i < length; ++i)
+            if (!isalnum(static_cast<unsigned char>(s.ote_device_name[i])) && s.ote_device_name[i] != '-')
+                FAIL("OTE device name: only letters, digits and '-'");
+        // UDP ports in use on the device: NTP 123, DHCP 68, mDNS 5353, httpd control socket 32768 / 32769
+        if (s.ote_port < 1024 || s.ote_port == 5353 || s.ote_port == 32768 || s.ote_port == 32769)
+            FAIL("OTE port: 1024 to 65535, not 5353, 32768 or 32769");
+        const size_t password_length = strnlen(s.ote_password, WEB_OTE_PASSWORD_SIZE);
+        if (password_length >= WEB_OTE_PASSWORD_SIZE || !is_printable_ascii(s.ote_password, 0x21, 0x7E))
+            FAIL("OTE password: at most 64 printable ASCII characters without spaces");
+        if (s.ote_enabled && password_length < 8)
+            FAIL("OTE password: at least 8 characters when OTE updates are on");
+    }
+
 #undef FAIL
     return true;
 }
@@ -818,7 +841,10 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            a.mqtt_enabled != b.mqtt_enabled || strcmp(a.mqtt_uri, b.mqtt_uri) != 0 ||
            strcmp(a.mqtt_username, b.mqtt_username) != 0 ||
            !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.mqtt_password),
-                                    reinterpret_cast<const uint8_t *>(b.mqtt_password), WEB_MQTT_CREDENTIAL_SIZE);
+                                    reinterpret_cast<const uint8_t *>(b.mqtt_password), WEB_MQTT_CREDENTIAL_SIZE) ||
+           a.ote_enabled != b.ote_enabled || strcmp(a.ote_device_name, b.ote_device_name) != 0 || a.ote_port != b.ote_port ||
+           !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ote_password),
+                                    reinterpret_cast<const uint8_t *>(b.ote_password), WEB_OTE_PASSWORD_SIZE);
 }
 
 bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)

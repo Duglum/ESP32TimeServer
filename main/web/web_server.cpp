@@ -397,6 +397,10 @@ namespace
         cJSON_AddBoolToObject(object, "ntp_auth_enabled", s.ntp_auth_enabled);
         cJSON_AddBoolToObject(object, "ntp_key_override", s.ntp_key_override);
         cJSON_AddNumberToObject(object, "ntp_key_id", s.ntp_key_id);
+        cJSON_AddBoolToObject(object, "ote_enabled", s.ote_enabled);
+        cJSON_AddStringToObject(object, "ote_device_name", s.ote_device_name);
+        cJSON_AddNumberToObject(object, "ote_port", s.ote_port);
+        cJSON_AddBoolToObject(object, "ote_password_set", s.ote_password[0] != '\0');
     }
 
     bool json_string(cJSON *root, const char *name, char *out, size_t size, char *err, size_t err_size)
@@ -476,7 +480,10 @@ namespace
                   json_string(root, "mqtt_uri", s.mqtt_uri, sizeof(s.mqtt_uri), err, err_size) &&
                   json_string(root, "mqtt_username", s.mqtt_username, sizeof(s.mqtt_username), err, err_size) &&
                   json_bool(root, "ntp_auth_enabled", s.ntp_auth_enabled, err, err_size) &&
-                  json_int(root, "ntp_key_id", s.ntp_key_id, 1, 65535, err, err_size);
+                  json_int(root, "ntp_key_id", s.ntp_key_id, 1, 65535, err, err_size) &&
+                  json_bool(root, "ote_enabled", s.ote_enabled, err, err_size) &&
+                  json_string(root, "ote_device_name", s.ote_device_name, sizeof(s.ote_device_name), err, err_size) &&
+                  json_int(root, "ote_port", s.ote_port, 1, 65535, err, err_size);
         if (!ok)
             return false;
 
@@ -568,6 +575,13 @@ namespace
             memset(s.mqtt_password, 0, sizeof(s.mqtt_password));
         else if (secret[0] != '\0')
             snprintf(s.mqtt_password, sizeof(s.mqtt_password), "%s", secret);
+
+        char ote_password[WEB_OTE_PASSWORD_SIZE] = "";
+        if (!json_string(root, "ote_password", ote_password, sizeof(ote_password), err, err_size))
+            return false;
+        if (ote_password[0] != '\0')
+            snprintf(s.ote_password, sizeof(s.ote_password), "%s", ote_password);
+        memset(ote_password, 0, sizeof(ote_password));
 
         char key[WEB_NTP_KEY_SIZE] = "";
         clear = false;
