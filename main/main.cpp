@@ -1389,6 +1389,7 @@ static bool s_gnss_required_assume_success = false;
 // rather the program sets it to true if it is required (due to an older / ubox noncompliant hardware gnss module being used)
 
 static bool s_use_nmea_fallback = false;
+static std::atomic<uint8_t> s_gnss_dynamic_model{255}; // u-blox dynamic platform model (255 = not known / NMEA)
 static bool s_gnss_is_max_m10s = false;
 static std::atomic<bool> s_gnss_locked{false};
 static std::atomic<int64_t> s_gnss_lock_started_us{0};
@@ -6573,6 +6574,69 @@ static void setup_gnss_nmea_receiver()
 #endif
 }
 
+// Name of a u-blox dynamic platform model (CFG-NAVSPG-DYNMODEL)
+static const char *gnss_dynamic_model_name(uint8_t model)
+{
+    switch (model)
+    {
+    case DYN_MODEL_PORTABLE:
+        return "Portable";
+    case DYN_MODEL_STATIONARY:
+        return "Stationary";
+    case DYN_MODEL_PEDESTRIAN:
+        return "Pedestrian";
+    case DYN_MODEL_AUTOMOTIVE:
+        return "Automotive";
+    case DYN_MODEL_SEA:
+        return "Sea";
+    case DYN_MODEL_AIRBORNE1g:
+        return "Airborne <1g";
+    case DYN_MODEL_AIRBORNE2g:
+        return "Airborne <2g";
+    case DYN_MODEL_AIRBORNE4g:
+        return "Airborne <4g";
+    case DYN_MODEL_WRIST:
+        return "Wrist";
+    case DYN_MODEL_BIKE:
+        return "Bike";
+    case DYN_MODEL_MOWER:
+        return "Mower";
+    case DYN_MODEL_ESCOOTER:
+        return "E-scooter";
+    case DYN_MODEL_RAIL:
+        return "Rail";
+    default:
+        return "unknown";
+    }
+}
+
+// U-Blox UBX protocol: the dynamic platform model of the receiver is set to Stationary (the default of the M10 is
+// Portable; the integration manual recommends Stationary for timing with a fixed antenna). The value is read, written
+// only if it differs (RAM and battery backed RAM, so the flash of the receiver is not worn) and read back.
+static void configure_gnss_dynamic_model()
+{
+    static constexpr uint16_t timeout_ms = 1100;
+    const uint8_t before = s_gnss.getDynamicModel(VAL_LAYER_RAM, timeout_ms); // 255 = no answer
+    if (before == DYN_MODEL_STATIONARY)
+    {
+        s_gnss_dynamic_model.store(before, std::memory_order_relaxed);
+        ESP_LOGI(TAG, "GNSS dynamic model: Stationary");
+        return;
+    }
+    if (before == 255)
+        ESP_LOGW(TAG, "GNSS dynamic model could not be read, trying to set Stationary");
+
+    const bool written = s_gnss.setDynamicModel(DYN_MODEL_STATIONARY, VAL_LAYER_RAM_BBR, timeout_ms);
+    const uint8_t after = s_gnss.getDynamicModel(VAL_LAYER_RAM, timeout_ms);
+    s_gnss_dynamic_model.store(after, std::memory_order_relaxed);
+    if (after == DYN_MODEL_STATIONARY)
+        ESP_LOGI(TAG, "GNSS dynamic model: Stationary (was %s, set and read back)", before == 255 ? "unknown" : gnss_dynamic_model_name(before));
+    else
+        ESP_LOGW(TAG, "GNSS dynamic model: setting Stationary %s, the receiver reports %s",
+                 written ? "was acknowledged but not taken over" : "failed",
+                 after == 255 ? "nothing (no answer)" : gnss_dynamic_model_name(after));
+}
+
 static void setup_gnss()
 {
     // GNSS protocol of the settings (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED is the default)
@@ -6590,6 +6654,11 @@ static void setup_gnss()
 #endif
 
     s_use_nmea_fallback = s_gnss_ublox ? (s_gnss_required_assume_success || !uart1_output_set) : true;
+
+    if (s_gnss_ublox && !s_use_nmea_fallback)
+        configure_gnss_dynamic_model();
+    else if (s_gnss_ublox)
+        ESP_LOGW(TAG, "GNSS dynamic model not set: the receiver does not answer UBX commands reliably (NMEA fallback)");
 
     if (s_use_nmea_fallback && !allowFallbackProcessing)
     {
@@ -7770,7 +7839,6 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
             break;
         s_ipv4_ever_acquired.store(true, std::memory_order_relaxed);
         set_network_ipv4_address(info.got_ip.ip_info.ip);
-        web_net_dns_check_now(); // the lease wrote its DNS servers: let the DNS manager note and order them
 #if MQTT_ENABLED
         if (s_mqtt_on)
         {
@@ -10442,6 +10510,9 @@ void app_get_status(web_app_status_t &status)
     status.stratum_one = get_ntp_reply_status().stratum == 1;
     status.ublox_receiver = s_gnss_ublox;
     status.gnss_baud_in_use = s_detected_gnss_baud;
+    const uint8_t dynamic_model = s_gnss_dynamic_model.load(std::memory_order_relaxed);
+    if (s_gnss_ublox && dynamic_model != 255)
+        snprintf(status.gnss_dynamic_model, sizeof(status.gnss_dynamic_model), "%s", gnss_dynamic_model_name(dynamic_model));
     status.lcd_present = s_lcd_ready;
     status.led_active = s_led_type != web_led_type_t::none;
     status.mqtt_connected = s_mqtt_on && s_mqtt_connected.load(std::memory_order_acquire);

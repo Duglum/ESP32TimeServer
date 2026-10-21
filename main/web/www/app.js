@@ -215,7 +215,7 @@
   }
 
   const displayNames = {
-    gnss_protocol: { nmea: 'NMEA Standard Protocol', ubx: 'U-Blox UBX Protocol' },
+    gnss_protocol: { nmea: 'NMEA Standard Protocol (needs $GNRMC)', ubx: 'U-Blox UBX Protocol' },
     led_type: { none: 'None', ky016: 'KY-016', ws2812: 'WS2812' }
   };
 
@@ -382,7 +382,13 @@
     return (d > 0 ? d + ' d ' : '') + pad(h) + ':' + pad(m) + ':' + pad(s);
   }
 
-  function fillList(id, items, empty, mono) {
+  // IPv6 addresses in the recommended lower case form (RFC 5952); lwIP writes upper case
+  function addressText(text) {
+    return String(text).indexOf(':') >= 0 ? String(text).toLowerCase() : String(text);
+  }
+
+  // One entry per line; addresses as "address (kind)" get the kind in a second line
+  function fillList(id, items, empty, addresses) {
     const list = $(id);
     list.replaceChildren();
     if (!items || items.length === 0) {
@@ -391,8 +397,21 @@
     }
     for (const item of items) {
       const li = document.createElement('li');
-      li.textContent = item;
-      if (mono) li.className = 'mono small';
+      if (addresses) {
+        const m = /^(\S+) \((.+)\)$/.exec(item);
+        const addr = document.createElement('span');
+        addr.className = 'addr';
+        addr.textContent = addressText(m ? m[1] : item);
+        li.appendChild(addr);
+        if (m) {
+          const kind = document.createElement('span');
+          kind.className = 'addr-kind';
+          kind.textContent = m[2];
+          li.appendChild(kind);
+        }
+      } else {
+        li.textContent = item;
+      }
       list.appendChild(li);
     }
   }
@@ -403,8 +422,10 @@
     yesNo($('st-time'), st.stratum_one, 'stratum 1, GNSS and PPS locked',
       st.time_set ? 'not stratum 1 (PPS ' + (st.pps_active ? 'active' : 'missing') + ', GNSS ' + (st.gnss_locked ? 'locked' : 'not locked') + ')' : 'waiting for the GNSS time');
     $('st-utc').textContent = st.utc || 'not set yet';
-    $('st-gnss').textContent = (st.ublox_receiver ? 'U-Blox UBX protocol' : 'NMEA standard protocol') +
-      (st.gnss_baud_in_use ? ', ' + st.gnss_baud_in_use + ' baud' : '');
+    const gnss = [st.ublox_receiver ? 'U-Blox UBX protocol' : 'NMEA standard protocol'];
+    if (st.gnss_baud_in_use) gnss.push(st.gnss_baud_in_use + ' baud');
+    if (st.ublox_receiver) gnss.push(st.gnss_dynamic_model ? st.gnss_dynamic_model + ' mode' : 'dynamic model not known');
+    fillList('st-gnss', gnss, '', false);
     $('st-auth').textContent = st.ntp_auth_available ? 'on' : (state.settings.ntp_auth_enabled ? 'on, but no usable key' : 'off');
     $('st-firmware').textContent = st.firmware + ' (' + st.build + ')';
     $('st-chip').textContent = 'ESP32-P4 ' + st.chip_revision;
@@ -420,7 +441,7 @@
     fillList('st-dns', st.dns, 'none', true);
     fillList('st-dns-v4', st.dns_received_v4, 'none', true);
     fillList('st-dns-v6', st.dns_received_v6, 'none', true);
-    $('st-client').textContent = st.client;
+    $('st-client').textContent = addressText(st.client);
 
     $('banner-default-pw').hidden = !state.default_password;
     $('banner-oneshot').hidden = !state.oneshot_boot;

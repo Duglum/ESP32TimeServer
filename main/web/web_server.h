@@ -26,6 +26,7 @@ struct web_app_status_t
     bool stratum_one;
     bool ublox_receiver;          // UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED: the baud rate is detected automatically
     uint32_t gnss_baud_in_use;
+    char gnss_dynamic_model[16];  // U-Blox UBX: dynamic platform model read from the receiver ("" = not known)
     bool lcd_present;
     bool led_active;
     bool mqtt_connected;

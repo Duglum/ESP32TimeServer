@@ -76,3 +76,5 @@ CONFIG_LWIP_IPV6_NUM_ADDRESSES=5
 # IPv6 DNS servers from router advertisements (RDNSS, RFC 8106); the DNS manager in main/web/web_net.cpp
 # combines them with the DHCPv4 servers
 CONFIG_LWIP_IPV6_RDNSS_MAX_DNS_SERVERS=2
+# DHCPv4 and RDNSS pass their DNS servers to the DNS manager (callback) instead of writing the DNS table
+CONFIG_LWIP_DNS_SETSERVER_WITH_NETIF=y

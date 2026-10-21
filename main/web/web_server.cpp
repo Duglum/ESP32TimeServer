@@ -848,6 +848,7 @@ namespace
         cJSON_AddBoolToObject(status, "stratum_one", sets->app.stratum_one);
         cJSON_AddBoolToObject(status, "ublox_receiver", sets->app.ublox_receiver);
         cJSON_AddNumberToObject(status, "gnss_baud_in_use", sets->app.gnss_baud_in_use);
+        cJSON_AddStringToObject(status, "gnss_dynamic_model", sets->app.gnss_dynamic_model);
         cJSON_AddBoolToObject(status, "lcd_present", sets->app.lcd_present);
         cJSON_AddBoolToObject(status, "led_active", sets->app.led_active);
         cJSON_AddBoolToObject(status, "mqtt_connected", sets->app.mqtt_connected);

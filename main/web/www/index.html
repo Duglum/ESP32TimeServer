@@ -68,7 +68,7 @@
           <dt class="group">Time</dt><dd class="group"></dd>
           <dt>Time service</dt><dd id="st-time"></dd>
           <dt>UTC</dt><dd id="st-utc"></dd>
-          <dt>GNSS receiver</dt><dd id="st-gnss"></dd>
+          <dt>GNSS receiver</dt><dd><ul id="st-gnss" class="plain"></ul></dd>
           <dt>NTP authentication</dt><dd id="st-auth"></dd>
           <dt class="group">Device</dt><dd class="group"></dd>
           <dt>Firmware</dt><dd id="st-firmware"></dd>
@@ -79,13 +79,13 @@
           <dt>Certificate SHA-256</dt><dd id="st-fingerprint" class="mono small"></dd>
         </dl>
         <dl class="status-grid">
-          <dt class="group">Network</dt><dd class="group"></dd>
+          <dt class="group net">Network</dt><dd class="group"></dd>
           <dt>IPv4</dt><dd id="st-ipv4"></dd>
           <dt>IPv6</dt><dd><ul id="st-ipv6" class="plain"></ul></dd>
           <dt>DNS servers in use</dt><dd><ul id="st-dns" class="plain"></ul></dd>
           <dt>DNS received (DHCPv4)</dt><dd><ul id="st-dns-v4" class="plain"></ul></dd>
           <dt>DNS received (IPv6 RA)</dt><dd><ul id="st-dns-v6" class="plain"></ul></dd>
-          <dt>Your address</dt><dd id="st-client" class="mono small"></dd>
+          <dt>Your address</dt><dd id="st-client" class="addr"></dd>
         </dl>
       </div>
     </section>
@@ -98,8 +98,8 @@
         <div class="grid">
           <label class="span2"><span class="lt">Host name and domain (FQDN) <span class="badge restart">restart</span></span>
             <input type="text" name="fqdn" maxlength="253" spellcheck="false" autocomplete="off">
-            <small class="note">The first part is the host name (DHCP, OTE); the full name is used for the certificate.</small>
             <small class="def" data-for="fqdn"></small>
+            <small class="note">E.g. ESP32TimeServer.example.com. Without a domain, the domain of the DHCP server applies if DHCP is used. The first part is the host name (DHCP, OTE), the full name is used for the certificate.</small>
           </label>
           <label class="switch span2"><input type="checkbox" name="ipv4_dhcp"> IPv4 address by DHCP</label>
           <label><span class="lt">IPv4 address / prefix length</span>

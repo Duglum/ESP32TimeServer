@@ -96,7 +96,7 @@ h3.sub-heading { margin: 1.25rem 0 .25rem; }
 .sub { margin: 0; color: var(--muted); font-size: .82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .actions { display: flex; gap: .5rem; flex: none; }
 
-main { max-width: 980px; margin: 1.25rem auto; padding: 0 1rem 6rem; }
+main { max-width: 1240px; margin: 1.25rem auto; padding: 0 1rem 6rem; }
 
 .card {
   background: var(--card);
@@ -205,14 +205,23 @@ button.theme-toggle { font-size: 1.15rem; line-height: 1; padding: .45rem .6rem;
 .banner.ok { border-color: var(--ok); color: var(--ok); }
 .banner.error { background: var(--danger-bg); color: var(--danger); border-color: var(--danger); }
 
-.status-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 2rem; }
-.status-grid { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: .3rem 1rem; margin: 0; align-content: start; }
+.status-groups { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 0 2rem; }
+/* Below 1000 px the two status groups are stacked, so the addresses get the full width */
+@media (max-width: 1000px) {
+  .status-groups { grid-template-columns: 1fr; }
+  .status-grid dt.group.net { margin-top: .6rem; }
+}
+.status-grid { display: grid; grid-template-columns: 10.5rem minmax(0, 1fr); gap: .3rem 1rem; margin: 0; align-content: start; }
 .status-grid dt { color: var(--muted); }
 .status-grid dd { margin: 0; overflow-wrap: anywhere; }
 .status-grid dt.group { grid-column: 1 / -1; color: var(--text); font-weight: 600; margin-top: .6rem; border-bottom: 1px solid var(--border); padding-bottom: .2rem; }
 .status-grid dt.group:first-child { margin-top: 0; }
 .status-grid dd.group { display: none; }
 ul.plain { list-style: none; margin: 0; padding: 0; }
+ul.plain li + li { margin-top: .15rem; }
+/* Addresses: one per line, kept whole on wide screens; the kind (link-local, SLAAC, ...) in a second line */
+.addr { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .8rem; white-space: nowrap; }
+.addr-kind { display: block; color: var(--muted); font-size: .75rem; }
 
 .colour-table { display: grid; grid-template-columns: minmax(9rem, 1.2fr) minmax(7rem, 1fr) minmax(6.5rem, .8fr) 2rem; gap: .5rem .75rem; align-items: center; margin-top: .75rem; }
 .colour-table .state { font-weight: 500; font-size: .9rem; }
@@ -222,6 +231,7 @@ ul.plain { list-style: none; margin: 0; padding: 0; }
 
 @media (max-width: 680px) {
   .grid, .status-groups { grid-template-columns: 1fr; }
+  .addr { white-space: normal; overflow-wrap: anywhere; }
   .status-grid { grid-template-columns: 9.5rem minmax(0, 1fr); }
   .colour-table { grid-template-columns: 1fr 1fr 2rem; }
   .colour-table .state { grid-column: 1 / -1; margin-top: .4rem; }

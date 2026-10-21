@@ -25,9 +25,9 @@ struct web_net_status_t
     size_t ipv6_count;
     char ipv6[8][WEB_IPV6_TEXT_SIZE + 12]; // address and its kind, e.g. "2001:db8::1 (SLAAC)"
     char dns[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE]; // in use
-    size_t dns_received_v4_count;                       // received by DHCPv4 (newest first)
+    size_t dns_received_v4_count;                       // received by DHCPv4 (order of the lease)
     char dns_received_v4[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
-    size_t dns_received_v6_count;                       // received by IPv6 router advertisements (RDNSS)
+    size_t dns_received_v6_count;                       // received by IPv6 router advertisements (RDNSS, order of the RA)
     char dns_received_v6[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
 };
 
@@ -35,10 +35,10 @@ struct web_net_status_t
 // address of previous that is no longer configured is removed. Returns false if a step failed.
 bool web_net_apply(esp_netif_t *netif, const web_settings_t &s, const web_settings_t *previous);
 
-// DNS manager: keeps the DNS table at the configured servers or at the servers received by DHCPv4 and IPv6 router
-// advertisements (RDNSS), checked every 2 s. web_net_dns_check_now() after a new IPv4 lease.
+// DNS manager: receives the DNS servers of DHCPv4 and of IPv6 router advertisements (RDNSS) through the lwIP DNS
+// server callback and keeps the DNS table at the configured servers or a mix of the received ones.
+// Call once before the network comes up.
 void web_net_dns_start();
-void web_net_dns_check_now();
 
 // Current state of the interface for the status part of the page
 void web_net_status(esp_netif_t *netif, const web_settings_t &s, web_net_status_t &status);
