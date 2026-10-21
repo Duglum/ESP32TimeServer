@@ -434,9 +434,10 @@
     $('st-heap').textContent = Math.round(st.free_heap / 1024) + ' kB';
     $('st-mqtt').textContent = state.settings.mqtt_enabled ? (st.mqtt_connected ? 'connected' : 'not connected') : 'off';
     $('st-fingerprint').textContent = state.fingerprint;
-    $('st-ipv4').textContent = st.ipv4_address
-      ? st.ipv4_address + '/' + st.ipv4_prefix + ' via ' + (st.ipv4_gateway || '-') + (st.ipv4_dhcp_running ? ' (DHCP)' : ' (static)')
-      : (st.ipv4_dhcp_running ? 'waiting for DHCP' : 'none');
+    // Same form as the IPv6 lines: address in the first line, gateway and source in the second
+    fillList('st-ipv4', st.ipv4_address
+      ? [st.ipv4_address + '/' + st.ipv4_prefix + ' (via ' + (st.ipv4_gateway || '-') + ', ' + (st.ipv4_dhcp_running ? 'DHCP' : 'static') + ')']
+      : [], st.ipv4_dhcp_running ? 'waiting for DHCP' : 'none', true);
     fillList('st-ipv6', st.ipv6, 'none', true);
     fillList('st-dns', st.dns, 'none', true);
     fillList('st-dns-v4', st.dns_received_v4, 'none', true);
