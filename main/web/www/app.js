@@ -199,7 +199,6 @@
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'eye';
-    button.textContent = '\u{1F441}'; // eye
     button.setAttribute('aria-label', 'Show or hide the text');
     wrap.appendChild(button);
     const entry = { input: input, button: button };
