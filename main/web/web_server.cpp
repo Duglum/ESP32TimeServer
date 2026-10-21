@@ -375,6 +375,7 @@ namespace
         for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
             if (s.dns[i][0] != '\0')
                 cJSON_AddItemToArray(dns, cJSON_CreateString(s.dns[i]));
+        cJSON_AddStringToObject(object, "mac_address", s.mac_address);
         cJSON_AddStringToObject(object, "gnss_protocol", s.gnss_ublox ? "ubx" : "nmea");
         cJSON_AddNumberToObject(object, "gnss_tx_pin", s.gnss_tx_pin);
         cJSON_AddNumberToObject(object, "gnss_rx_pin", s.gnss_rx_pin);
@@ -405,6 +406,21 @@ namespace
         cJSON_AddStringToObject(object, "mqtt_username", s.mqtt_username);
         // Secrets are never sent: only whether they are set
         cJSON_AddBoolToObject(object, "mqtt_password_set", s.mqtt_password[0] != '\0');
+        cJSON_AddStringToObject(object, "mqtt_topic", s.mqtt_topic);
+        cJSON_AddNumberToObject(object, "mqtt_qos", s.mqtt_qos);
+        cJSON_AddBoolToObject(object, "mqtt_retain", s.mqtt_retain);
+        cJSON_AddNumberToObject(object, "mqtt_report_period", s.mqtt_report_period_s);
+        cJSON_AddBoolToObject(object, "mqtt_client_reporting", s.mqtt_client_reporting);
+        cJSON_AddBoolToObject(object, "mqtt_memory_reporting", s.mqtt_memory_reporting);
+        cJSON_AddBoolToObject(object, "mqtt_historical_reporting", s.mqtt_historical_reporting);
+        cJSON_AddBoolToObject(object, "mqtt_distinguish_auth", s.mqtt_distinguish_auth);
+        cJSON_AddNumberToObject(object, "mqtt_tf_client_limit", s.mqtt_tf_client_limit);
+        cJSON_AddNumberToObject(object, "tf_cmd_pin", s.tf_cmd_pin);
+        cJSON_AddNumberToObject(object, "tf_clk_pin", s.tf_clk_pin);
+        cJSON_AddNumberToObject(object, "tf_d0_pin", s.tf_d0_pin);
+        cJSON_AddNumberToObject(object, "tf_d1_pin", s.tf_d1_pin);
+        cJSON_AddNumberToObject(object, "tf_d2_pin", s.tf_d2_pin);
+        cJSON_AddNumberToObject(object, "tf_d3_pin", s.tf_d3_pin);
         cJSON_AddBoolToObject(object, "ntp_auth_enabled", s.ntp_auth_enabled);
         cJSON_AddBoolToObject(object, "ntp_key_override", s.ntp_key_override);
         // The NTP keys are shown on the page (they have to be entered on the clients); the other secrets are not
@@ -491,12 +507,49 @@ namespace
                   json_bool(root, "mqtt_enabled", s.mqtt_enabled, err, err_size) &&
                   json_string(root, "mqtt_uri", s.mqtt_uri, sizeof(s.mqtt_uri), err, err_size) &&
                   json_string(root, "mqtt_username", s.mqtt_username, sizeof(s.mqtt_username), err, err_size) &&
+                  json_string(root, "mqtt_topic", s.mqtt_topic, sizeof(s.mqtt_topic), err, err_size) &&
+                  json_int(root, "mqtt_qos", s.mqtt_qos, 0, 2, err, err_size) &&
+                  json_bool(root, "mqtt_retain", s.mqtt_retain, err, err_size) &&
+                  json_int(root, "mqtt_report_period", s.mqtt_report_period_s, 30, 86400, err, err_size) &&
+                  json_bool(root, "mqtt_client_reporting", s.mqtt_client_reporting, err, err_size) &&
+                  json_bool(root, "mqtt_memory_reporting", s.mqtt_memory_reporting, err, err_size) &&
+                  json_bool(root, "mqtt_historical_reporting", s.mqtt_historical_reporting, err, err_size) &&
+                  json_bool(root, "mqtt_distinguish_auth", s.mqtt_distinguish_auth, err, err_size) &&
+                  json_int(root, "mqtt_tf_client_limit", s.mqtt_tf_client_limit, WEB_MQTT_TF_CLIENT_LIMIT_MIN, WEB_MQTT_TF_CLIENT_LIMIT_MAX, err, err_size) &&
+                  json_int(root, "tf_cmd_pin", s.tf_cmd_pin, 0, 54, err, err_size) &&
+                  json_int(root, "tf_clk_pin", s.tf_clk_pin, 0, 54, err, err_size) &&
+                  json_int(root, "tf_d0_pin", s.tf_d0_pin, 0, 54, err, err_size) &&
+                  json_int(root, "tf_d1_pin", s.tf_d1_pin, 0, 54, err, err_size) &&
+                  json_int(root, "tf_d2_pin", s.tf_d2_pin, 0, 54, err, err_size) &&
+                  json_int(root, "tf_d3_pin", s.tf_d3_pin, 0, 54, err, err_size) &&
                   json_bool(root, "ntp_auth_enabled", s.ntp_auth_enabled, err, err_size) &&
                   json_bool(root, "ote_enabled", s.ote_enabled, err, err_size) &&
                   json_string(root, "ote_device_name", s.ote_device_name, sizeof(s.ote_device_name), err, err_size) &&
                   json_int(root, "ote_port", s.ote_port, 1, 65535, err, err_size);
         if (!ok)
             return false;
+
+        // MAC: "" or the hardware MAC = the hardware MAC (stored as ""), otherwise normalised to lower case with ':'
+        char mac[WEB_MAC_TEXT_SIZE * 2] = "";
+        bool mac_sent = cJSON_GetObjectItemCaseSensitive(root, "mac_address") != nullptr;
+        if (!json_string(root, "mac_address", mac, sizeof(mac), err, err_size))
+            return false;
+        if (mac_sent)
+        {
+            char hardware[WEB_MAC_TEXT_SIZE];
+            char normalised[WEB_MAC_TEXT_SIZE];
+            if (mac[0] == '\0')
+                s.mac_address[0] = '\0';
+            else if (!web_normalise_mac(mac, normalised))
+            {
+                snprintf(err, err_size, "MAC address: xx:xx:xx:xx:xx:xx (hexadecimal) expected");
+                return false;
+            }
+            else if (web_hardware_mac(hardware) && strcmp(hardware, normalised) == 0)
+                s.mac_address[0] = '\0';
+            else
+                snprintf(s.mac_address, sizeof(s.mac_address), "%s", normalised);
+        }
 
         cJSON *protocol = cJSON_GetObjectItemCaseSensitive(root, "gnss_protocol");
         if (protocol != nullptr)
@@ -916,6 +969,11 @@ namespace
         cJSON_AddBoolToObject(status, "lcd_present", sets->app.lcd_present);
         cJSON_AddBoolToObject(status, "led_active", sets->app.led_active);
         cJSON_AddBoolToObject(status, "mqtt_connected", sets->app.mqtt_connected);
+        cJSON_AddBoolToObject(status, "mqtt_tf_queue", sets->app.mqtt_tf_queue);
+        char hardware_mac[WEB_MAC_TEXT_SIZE] = "";
+        web_hardware_mac(hardware_mac);
+        cJSON_AddStringToObject(status, "mac_hardware", hardware_mac);
+        cJSON_AddStringToObject(status, "mac_address", sets->app.mac_address);
         cJSON_AddBoolToObject(status, "ntp_auth_available", sets->app.ntp_auth_available);
         cJSON_AddNumberToObject(status, "ntp_auth_compiled_keys", sets->app.ntp_auth_compiled_keys);
         cJSON_AddNumberToObject(status, "ntp_auth_keys_in_use", sets->app.ntp_auth_keys_in_use);

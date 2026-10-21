@@ -69,7 +69,8 @@
 // The *_ENABLED values below in ESP32TimeServerSettings.h are only the run-time defaults now (see
 // web/web_settings.cpp). The code of these features is always compiled in; the settings of this boot decide at run
 // time whether a feature is started (s_lcd_on, s_led_type, s_mqtt_on, s_ote_on, ntp_auth_configure()). A feature that is off
-// has no task, no driver and no buffers.
+// has no task, no driver and no buffers. The MQTT report contents (client, memory, historical, authenticated /
+// unauthenticated) are switched by s_mqtt_client_reporting ... s_mqtt_distinguish_auth.
 #undef LIQUID_CRYSTAL_DISPLAY_ENABLED
 #define LIQUID_CRYSTAL_DISPLAY_ENABLED 1
 #undef RBG_LED_KY_016_MODULE_ENABLED
@@ -82,6 +83,14 @@
 #define SYMMETRIC_KEY_AUTHENTICATION_ENABLED 1
 #undef OTE_UPDATES_ENABLED
 #define OTE_UPDATES_ENABLED 1
+#undef MQTT_CLIENT_REPORTING_ENABLED
+#define MQTT_CLIENT_REPORTING_ENABLED 1
+#undef MQTT_MEMORY_REPORTING_ENABLED
+#define MQTT_MEMORY_REPORTING_ENABLED 1
+#undef MQTT_HISTORICAL_REPORTING_ENABLED
+#define MQTT_HISTORICAL_REPORTING_ENABLED 1
+#undef MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED
+#define MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED 1
 
 #include "custom/ntp_auth.h"
 #include "custom/ntp_cache.h"
@@ -140,6 +149,12 @@ static const char *TAG = "main_cpp";
 static const web_settings_t *s_cfg = nullptr;
 static bool s_lcd_on = false;                         // LCD enabled for this boot
 static bool s_mqtt_on = false;                        // MQTT enabled for this boot (fixed after the start)
+static int s_mqtt_qos = 0;                            // MQTT QoS of this boot (0, 1 or 2)
+static int s_mqtt_retain = 1;                         // the broker retains the latest report
+static bool s_mqtt_client_reporting = false;          // MQTT report contents of this boot
+static bool s_mqtt_memory_reporting = false;
+static bool s_mqtt_historical_reporting = false;
+static bool s_mqtt_distinguish_auth = false;
 static bool s_ote_on = false;                         // Over The Ethernet updates enabled for this boot
 static bool s_gnss_ublox = true;                      // GNSS protocol of this boot: true = u-blox UBX, false = NMEA
 static web_led_type_t s_led_type = web_led_type_t::none; // RGB LED module of this boot
@@ -1269,10 +1284,11 @@ static bool format_socket_address(const struct sockaddr_storage &address, char *
 
 static constexpr uint32_t MQTTFrequencyOfKeepAliveRequest = 30; // in seconds (do not raise above 30
 
-// MQTT_MAX_REPORT_SIZE is based on MQTT_TF_Client_Limit (in ESP32TimeServerSetting.h)
-// please see the spreadsheet at tools/json_message_calculator.xlsx for calculation details
-// Note: increasing this limit will increase memory usage for MQTT report buffering and may impact system performance.
-static constexpr size_t MQTT_MAX_REPORT_SIZE = 39166;
+// The report buffer is sized at the start from the client limit of the settings (web_mqtt_report_size(), see
+// tools/json_message_calculator.xlsx); MQTT_MAX_REPORT_SIZE is the size for the largest allowed limit and only bounds
+// the reports read back from the TF card.
+// Note: increasing the limit will increase memory usage for MQTT report buffering and may impact system performance.
+static constexpr size_t MQTT_MAX_REPORT_SIZE = web_mqtt_report_size(WEB_MQTT_TF_CLIENT_LIMIT_MAX);
 
 // MQTT_REPORT_SIZE based on MQTT_CLIENT_SIZE (below)
 // please see the spreadsheet at tools/json_message_calculator.xlsx for calculation details
@@ -1362,12 +1378,13 @@ static size_t s_mqtt_client_count = 0;
 static int64_t s_mqtt_last_link_up_us = 0;
 // The report buffers (about 76 kB) are allocated by setup_mqtt() only when MQTT is on for this boot
 static mqtt_report_t *s_mqtt_reports = nullptr;        // [MQTT_REPORT_QUEUE_DEPTH]
-static char *s_mqtt_payload = nullptr;                 // [MQTT_MAX_REPORT_SIZE]
+static char *s_mqtt_payload = nullptr;                 // [s_mqtt_payload_size]
+static size_t s_mqtt_payload_size = 0;
 static char *s_mqtt_final_payload = nullptr;           // [MQTT_REPORT_SIZE]
 static size_t s_mqtt_report_head = 0;
 static std::atomic<size_t> s_mqtt_queued_messages_count{0};
 static uint32_t s_mqtt_queued_messages_discarded = 0;
-static mqtt_client_request_t *s_mqtt_clients = nullptr; // [MQTT_TF_Client_Limit]
+static mqtt_client_request_t *s_mqtt_clients = nullptr; // [s_cfg->mqtt_tf_client_limit], only with client reporting
 static std::atomic<bool> s_tf_queue_available{false};
 static sdmmc_card_t *s_tf_card = nullptr;
 static uint64_t s_tf_queue_next_sequence = 0;
@@ -6813,6 +6830,8 @@ static void format_time_to_ISO8601(time_t value, char *output, size_t output_siz
 
 static void mqtt_enqueue_ntp_request(const struct sockaddr_storage &source_address)
 {
+    if (!s_mqtt_client_reporting) // the events only feed the client table
+        return;
     if (ntp_load_shedding_active() || s_mqtt_ntp_event_queue == nullptr ||
         xQueueSend(s_mqtt_ntp_event_queue, &source_address, 0) != pdTRUE)
         s_ntp_telemetry_events_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -6851,7 +6870,7 @@ static void mqtt_note_ntp_request(const struct sockaddr_storage &source_address)
         }
     }
 
-    if (s_mqtt_client_count < (s_tf_queue_available.load() ? MQTT_TF_Client_Limit : MQTT_CLIENT_LIMIT))
+    if (s_mqtt_client_count < (s_tf_queue_available.load() ? s_cfg->mqtt_tf_client_limit : MQTT_CLIENT_LIMIT))
     {
         mqtt_client_request_t &client = s_mqtt_clients[s_mqtt_client_count];
         client.address_family = source_address.ss_family;
@@ -6917,7 +6936,7 @@ static bool mqtt_publish_report(const char *payload)
     if (!s_mqtt_connected.load())
         return false;
 
-    return esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain) >= 0;
+    return esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, s_mqtt_qos, s_mqtt_retain) >= 0;
 }
 
 static std::vector<std::string> mqtt_tf_queue_files()
@@ -6972,7 +6991,7 @@ static bool mqtt_tf_write_report(const char *payload)
 
 static bool mqtt_enqueue_report(const char *payload)
 {
-    if (MQTT_QOS == 0 || s_mqtt_reports == nullptr)
+    if (s_mqtt_qos == 0 || s_mqtt_reports == nullptr)
         return false;
 
     if (s_tf_queue_available.load())
@@ -7008,12 +7027,12 @@ static bool mqtt_enqueue_report(const char *payload)
 
 static bool mqtt_publish_queued_report(const char *payload)
 {
-    if (MQTT_QOS != 2)
+    if (s_mqtt_qos != 2)
         return mqtt_publish_report(payload);
 
     s_mqtt_restart_publish_id.store(-1);
     s_mqtt_restart_publish_completed.store(false);
-    int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain);
+    int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, s_mqtt_qos, s_mqtt_retain);
     if (message_id < 0)
         return false;
 
@@ -7029,7 +7048,7 @@ static bool mqtt_publish_queued_report(const char *payload)
 
 static void mqtt_send_queued_messages()
 {
-    if (MQTT_QOS == 0 || !s_mqtt_connected.load() || s_mqtt_queued_messages_count.load() == 0 || s_mqtt_reports == nullptr)
+    if (s_mqtt_qos == 0 || !s_mqtt_connected.load() || s_mqtt_queued_messages_count.load() == 0 || s_mqtt_reports == nullptr)
         return;
 
     if (!s_tf_queue_available.load())
@@ -7206,25 +7225,25 @@ static void mqtt_build_report(char *payload, size_t payload_size)
 
     len = json_append(payload, payload_size, len, "\"satellites\":%u", (unsigned int)s_satellite_count.load());
 
-#if MQTT_MEMORY_REPORTING_ENABLED
-    len = json_append(payload, payload_size, len, ",");
-    len = json_append(payload, payload_size, len, "\"memory\":{");
-    // len = json_append(payload, payload_size, len, "\"malloc_cap_8bit\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT));
-    // len = json_append(payload, payload_size, len, "\"malloc_cap_32bit\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_32BIT));
-    // len = json_append(payload, payload_size, len, "\"malloc_cap_internal\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    len = json_append(payload, payload_size, len, "\"malloc_cap_dma\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA));
-    // len = json_append(payload, payload_size, len, "\"malloc_cap_spiram\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    // len = json_append(payload, payload_size, len, "\"malloc_cap_default\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
-    len = json_append(payload, payload_size, len, "\"free_heap\":%lu,", (unsigned long)esp_get_free_heap_size());
-    len = json_append(payload, payload_size, len, "\"minimum_free_heap\":%lu,", (unsigned long)esp_get_minimum_free_heap_size());
-    len = json_append(payload, payload_size, len, "\"largest_free_8bit_block\":%lu", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    len = json_append(payload, payload_size, len, "}},");
+    if (s_mqtt_memory_reporting)
+    {
+        len = json_append(payload, payload_size, len, ",");
+        len = json_append(payload, payload_size, len, "\"memory\":{");
+        // len = json_append(payload, payload_size, len, "\"malloc_cap_8bit\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+        // len = json_append(payload, payload_size, len, "\"malloc_cap_32bit\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_32BIT));
+        // len = json_append(payload, payload_size, len, "\"malloc_cap_internal\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        len = json_append(payload, payload_size, len, "\"malloc_cap_dma\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA));
+        // len = json_append(payload, payload_size, len, "\"malloc_cap_spiram\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        // len = json_append(payload, payload_size, len, "\"malloc_cap_default\":%lu,", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+        len = json_append(payload, payload_size, len, "\"free_heap\":%lu,", (unsigned long)esp_get_free_heap_size());
+        len = json_append(payload, payload_size, len, "\"minimum_free_heap\":%lu,", (unsigned long)esp_get_minimum_free_heap_size());
+        len = json_append(payload, payload_size, len, "\"largest_free_8bit_block\":%lu", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        len = json_append(payload, payload_size, len, "}},");
+    }
+    else
+        len = json_append(payload, payload_size, len, "},");
 
-#else
-    len = json_append(payload, payload_size, len, "},");
-#endif
-
-    if (MQTT_QOS > 0)
+    if (s_mqtt_qos > 0)
     {
         len = json_append(payload, payload_size, len, "\"queued_messages\":{");
         len = json_append(payload, payload_size, len, "\"held\":%lu,", (unsigned long)queued_messages);
@@ -7249,13 +7268,16 @@ static void mqtt_build_report(char *payload, size_t payload_size)
     s_ntp_valid_requests.exchange(0);
     s_ntp_invalid_requests.exchange(0);
 
-#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED && MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED
-    len = json_append(payload, payload_size, len, "\"authenticated\":{\"valid\":%lu,\"invalid\":%lu},", (unsigned long)authenticated_valid, (unsigned long)authenticated_invalid);
-    len = json_append(payload, payload_size, len, "\"unauthenticated\":{\"valid\":%lu,\"invalid\":%lu},", (unsigned long)unauthenticated_valid, (unsigned long)unauthenticated_invalid);
-#else
-    len = json_append(payload, payload_size, len, "\"valid\":%lu,", (unsigned long)(authenticated_valid + unauthenticated_valid));
-    len = json_append(payload, payload_size, len, "\"invalid\":%lu,", (unsigned long)(authenticated_invalid + unauthenticated_invalid));
-#endif
+    if (s_mqtt_distinguish_auth)
+    {
+        len = json_append(payload, payload_size, len, "\"authenticated\":{\"valid\":%lu,\"invalid\":%lu},", (unsigned long)authenticated_valid, (unsigned long)authenticated_invalid);
+        len = json_append(payload, payload_size, len, "\"unauthenticated\":{\"valid\":%lu,\"invalid\":%lu},", (unsigned long)unauthenticated_valid, (unsigned long)unauthenticated_invalid);
+    }
+    else
+    {
+        len = json_append(payload, payload_size, len, "\"valid\":%lu,", (unsigned long)(authenticated_valid + unauthenticated_valid));
+        len = json_append(payload, payload_size, len, "\"invalid\":%lu,", (unsigned long)(authenticated_invalid + unauthenticated_invalid));
+    }
 
     len = json_append(payload, payload_size, len, "\"load_shedding\":%s,", load_shedding_this_period ? "true" : "false");
     len = json_append(payload, payload_size, len, "\"telemetry_dropped\":%lu,", (unsigned long)s_ntp_telemetry_events_dropped.exchange(0));
@@ -7267,71 +7289,73 @@ static void mqtt_build_report(char *payload, size_t payload_size)
     len = json_append(payload, payload_size, len, "\"pps_undisciplined\":%lu", (unsigned long)s_ntp_responses_pps_undisciplined.exchange(0));
     len = json_append(payload, payload_size, len, "}");
 
-#if MQTT_CLIENT_REPORTING_ENABLED
-    len = json_append(payload, payload_size, len, "},");
-    len = json_append(payload, payload_size, len, "\"clients\":[");
-    bool first_client = true;
-    if (xSemaphoreTake(s_mqtt_stats_mutex, portMAX_DELAY) == pdTRUE)
+    if (s_mqtt_client_reporting)
     {
-        std::sort(s_mqtt_clients, s_mqtt_clients + s_mqtt_client_count,
-                  [](const mqtt_client_request_t &left, const mqtt_client_request_t &right)
-                  {
-                      auto address_family_order = [](sa_family_t address_family)
-                      {
-                          if (address_family == AF_INET)
-                              return 0;
-                          if (address_family == AF_INET6)
-                              return 1;
-                          return 2;
-                      };
-                      int left_order = address_family_order(left.address_family);
-                      int right_order = address_family_order(right.address_family);
-                      if (left_order != right_order)
-                          return left_order < right_order;
-                      size_t address_size = left.address_family == AF_INET ? sizeof(struct in_addr) : sizeof(struct in6_addr);
-                      return memcmp(left.address, right.address, address_size) < 0;
-                  });
-        for (size_t index = 0; index < s_mqtt_client_count && len < payload_size; index++)
+        len = json_append(payload, payload_size, len, "},");
+        len = json_append(payload, payload_size, len, "\"clients\":[");
+        bool first_client = true;
+        if (xSemaphoreTake(s_mqtt_stats_mutex, portMAX_DELAY) == pdTRUE)
         {
-            struct sockaddr_storage address{};
-            address.ss_family = s_mqtt_clients[index].address_family;
-            if (address.ss_family == AF_INET)
-                memcpy(&reinterpret_cast<struct sockaddr_in *>(&address)->sin_addr, s_mqtt_clients[index].address, sizeof(struct in_addr));
-            else if (address.ss_family == AF_INET6)
-                memcpy(&reinterpret_cast<struct sockaddr_in6 *>(&address)->sin6_addr, s_mqtt_clients[index].address, sizeof(struct in6_addr));
-            else
-                continue;
+            std::sort(s_mqtt_clients, s_mqtt_clients + s_mqtt_client_count,
+                      [](const mqtt_client_request_t &left, const mqtt_client_request_t &right)
+                      {
+                          auto address_family_order = [](sa_family_t address_family)
+                          {
+                              if (address_family == AF_INET)
+                                  return 0;
+                              if (address_family == AF_INET6)
+                                  return 1;
+                              return 2;
+                          };
+                          int left_order = address_family_order(left.address_family);
+                          int right_order = address_family_order(right.address_family);
+                          if (left_order != right_order)
+                              return left_order < right_order;
+                          size_t address_size = left.address_family == AF_INET ? sizeof(struct in_addr) : sizeof(struct in6_addr);
+                          return memcmp(left.address, right.address, address_size) < 0;
+                      });
+            for (size_t index = 0; index < s_mqtt_client_count && len < payload_size; index++)
+            {
+                struct sockaddr_storage address{};
+                address.ss_family = s_mqtt_clients[index].address_family;
+                if (address.ss_family == AF_INET)
+                    memcpy(&reinterpret_cast<struct sockaddr_in *>(&address)->sin_addr, s_mqtt_clients[index].address, sizeof(struct in_addr));
+                else if (address.ss_family == AF_INET6)
+                    memcpy(&reinterpret_cast<struct sockaddr_in6 *>(&address)->sin6_addr, s_mqtt_clients[index].address, sizeof(struct in6_addr));
+                else
+                    continue;
 
-            char address_text[IP_ADDRESS_TEXT_SIZE] = "";
-            if (!format_socket_address(address, address_text, sizeof(address_text)))
-                continue;
-            int written = snprintf(payload + len, payload_size - len,
-                                   "%s{\"address\":\"%s\",\"requests\":%lu}",
-                                   first_client ? "" : ",", address_text,
-                                   static_cast<unsigned long>(s_mqtt_clients[index].requests));
-            if (written < 0 || static_cast<size_t>(written) >= payload_size - len)
-                break;
-            len += static_cast<size_t>(written);
-            first_client = false;
+                char address_text[IP_ADDRESS_TEXT_SIZE] = "";
+                if (!format_socket_address(address, address_text, sizeof(address_text)))
+                    continue;
+                int written = snprintf(payload + len, payload_size - len,
+                                       "%s{\"address\":\"%s\",\"requests\":%lu}",
+                                       first_client ? "" : ",", address_text,
+                                       static_cast<unsigned long>(s_mqtt_clients[index].requests));
+                if (written < 0 || static_cast<size_t>(written) >= payload_size - len)
+                    break;
+                len += static_cast<size_t>(written);
+                first_client = false;
+            }
+            s_mqtt_client_count = 0;
+            xSemaphoreGive(s_mqtt_stats_mutex);
         }
-        s_mqtt_client_count = 0;
-        xSemaphoreGive(s_mqtt_stats_mutex);
+        len = json_append(payload, payload_size, len, "],");
+        len = json_append(payload, payload_size, len, "\"clients_overflown\":%s", s_mqtt_client_table_overflown.exchange(false) ? "true" : "false");
     }
-    len = json_append(payload, payload_size, len, "],");
-    len = json_append(payload, payload_size, len, "\"clients_overflown\":%s", s_mqtt_client_table_overflown.exchange(false) ? "true" : "false");
-#else
-    len = json_append(payload, payload_size, len, "}");
-#endif
+    else
+        len = json_append(payload, payload_size, len, "}");
 
-#if MQTT_HISTORICAL_REPORTING_ENABLED
-    len = json_append(payload, payload_size, len, "},");
-    len = json_append(payload, payload_size, len, "\"historical\":{");
-    len = json_append(payload, payload_size, len, "\"gnss_receiver_last\":{");
-    len = json_append(payload, payload_size, len, "\"synchronized_and_disciplined\":\"%s\",", last_synchronized_and_disciplined);
-    len = json_append(payload, payload_size, len, "\"gnss_unsynchronized\":\"%s\",", last_gnss_unsynchronized);
-    len = json_append(payload, payload_size, len, "\"pps_undisciplined\":\"%s\"", last_pps_undisciplined);
-    len = json_append(payload, payload_size, len, "}");
-#endif
+    if (s_mqtt_historical_reporting)
+    {
+        len = json_append(payload, payload_size, len, "},");
+        len = json_append(payload, payload_size, len, "\"historical\":{");
+        len = json_append(payload, payload_size, len, "\"gnss_receiver_last\":{");
+        len = json_append(payload, payload_size, len, "\"synchronized_and_disciplined\":\"%s\",", last_synchronized_and_disciplined);
+        len = json_append(payload, payload_size, len, "\"gnss_unsynchronized\":\"%s\",", last_gnss_unsynchronized);
+        len = json_append(payload, payload_size, len, "\"pps_undisciplined\":\"%s\"", last_pps_undisciplined);
+        len = json_append(payload, payload_size, len, "}");
+    }
 
     len = json_append(payload, payload_size, len, "}");
     len = json_append(payload, payload_size, len, "}");
@@ -7353,7 +7377,7 @@ static void mqtt_publish_final_report()
 
     s_mqtt_restart_publish_id.store(-1);
     s_mqtt_restart_publish_completed.store(false);
-    int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, s_mqtt_final_payload, 0, MQTT_QOS, MQTTBrokerRetain);
+    int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, s_mqtt_final_payload, 0, s_mqtt_qos, s_mqtt_retain);
     if (message_id < 0)
         return;
 
@@ -7390,15 +7414,15 @@ static bool mqtt_publish_pending_restart_notification()
     }
 
     bool delivered_or_queued = false;
-    if (MQTT_QOS == 0)
+    if (s_mqtt_qos == 0)
     {
-        delivered_or_queued = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain) >= 0;
+        delivered_or_queued = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, s_mqtt_qos, s_mqtt_retain) >= 0;
     }
     else
     {
         s_mqtt_restart_publish_id.store(-1);
         s_mqtt_restart_publish_completed.store(false);
-        int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain);
+        int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, s_mqtt_qos, s_mqtt_retain);
         if (message_id >= 0)
         {
             s_mqtt_restart_publish_id.store(message_id);
@@ -7426,7 +7450,8 @@ static bool mqtt_publish_pending_restart_notification()
 static void mqtt_service_task(void *parameter)
 {
     bool previously_connected = false;
-    TickType_t next_report = xTaskGetTickCount() + pdMS_TO_TICKS(MQTTReportingPeriod * 1000UL);
+    const TickType_t period = pdMS_TO_TICKS(s_cfg->mqtt_report_period_s * 1000UL); // at most 86400 s
+    TickType_t next_report = xTaskGetTickCount() + period;
     for (;;)
     {
         struct sockaddr_storage source_address{};
@@ -7437,7 +7462,7 @@ static void mqtt_service_task(void *parameter)
 
         bool connected = s_mqtt_connected.load();
         if (connected && !previously_connected)
-            esp_mqtt_client_publish(s_mqtt_client, s_mqtt_status_topic, "online", 0, MQTT_QOS, 1);
+            esp_mqtt_client_publish(s_mqtt_client, s_mqtt_status_topic, "online", 0, s_mqtt_qos, 1);
         previously_connected = connected;
 
         if (connected)
@@ -7448,10 +7473,10 @@ static void mqtt_service_task(void *parameter)
 
         if (xTaskGetTickCount() >= next_report)
         {
-            mqtt_build_report(s_mqtt_payload, MQTT_MAX_REPORT_SIZE);
+            mqtt_build_report(s_mqtt_payload, s_mqtt_payload_size);
             if (!mqtt_publish_report(s_mqtt_payload))
                 mqtt_enqueue_report(s_mqtt_payload);
-            next_report += pdMS_TO_TICKS(MQTTReportingPeriod * 1000UL);
+            next_report += period;
         }
         vTaskDelay(pdMS_TO_TICKS(MQTT_QUEUED_PUBLISH_DELAY_MS));
 
@@ -7509,9 +7534,9 @@ static void controlled_restart(const char *reason)
         bool published = false;
         if (s_mqtt_connected.load())
         {
-            if (MQTT_QOS == 0)
+            if (s_mqtt_qos == 0)
             {
-                published = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain) >= 0;
+                published = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, s_mqtt_qos, s_mqtt_retain) >= 0;
                 if (published)
                     vTaskDelay(pdMS_TO_TICKS(MQTT_RESTART_PUBLISH_TIMEOUT_MS));
             }
@@ -7519,7 +7544,7 @@ static void controlled_restart(const char *reason)
             {
                 s_mqtt_restart_publish_id.store(-1);
                 s_mqtt_restart_publish_completed.store(false);
-                int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, MQTT_QOS, MQTTBrokerRetain);
+                int message_id = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, s_mqtt_qos, s_mqtt_retain);
                 if (message_id >= 0)
                 {
                     s_mqtt_restart_publish_id.store(message_id);
@@ -7544,7 +7569,7 @@ static void controlled_restart(const char *reason)
         else
         {
 
-            if (MQTT_QOS > 0)
+            if (s_mqtt_qos > 0)
             {
                 if (!mqtt_enqueue_report(payload))
                 {
@@ -7596,10 +7621,14 @@ static void setup_mqtt_tf_queue()
     {
         // Report buffers: only allocated when MQTT is on for this boot
         s_mqtt_reports = new (std::nothrow) mqtt_report_t[MQTT_REPORT_QUEUE_DEPTH]();
-        s_mqtt_payload = static_cast<char *>(calloc(MQTT_MAX_REPORT_SIZE, 1));
+        // Without the client list a report fits into MQTT_REPORT_SIZE; with it the buffer is sized for the client limit
+        s_mqtt_payload_size = s_mqtt_client_reporting ? web_mqtt_report_size(s_cfg->mqtt_tf_client_limit) : MQTT_REPORT_SIZE;
+        s_mqtt_payload = static_cast<char *>(calloc(s_mqtt_payload_size, 1));
         s_mqtt_final_payload = static_cast<char *>(calloc(MQTT_REPORT_SIZE, 1));
-        s_mqtt_clients = new (std::nothrow) mqtt_client_request_t[MQTT_TF_Client_Limit]();
-        if (s_mqtt_reports == nullptr || s_mqtt_payload == nullptr || s_mqtt_final_payload == nullptr || s_mqtt_clients == nullptr)
+        if (s_mqtt_client_reporting)
+            s_mqtt_clients = new (std::nothrow) mqtt_client_request_t[s_cfg->mqtt_tf_client_limit]();
+        if (s_mqtt_reports == nullptr || s_mqtt_payload == nullptr || s_mqtt_final_payload == nullptr ||
+            (s_mqtt_client_reporting && s_mqtt_clients == nullptr))
         {
             ESP_LOGE(TAG, "MQTT: not enough memory for the report buffers, MQTT is off for this start");
             delete[] s_mqtt_reports;
@@ -7615,7 +7644,7 @@ static void setup_mqtt_tf_queue()
             return;
         }
 
-        if (MQTT_QOS == 0)
+        if (s_mqtt_qos == 0)
             return;
 
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
@@ -7642,12 +7671,13 @@ static void setup_mqtt_tf_queue()
 
         sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
         slot.width = 4;
-        slot.clk = static_cast<gpio_num_t>(TFCardClockPin);
-        slot.cmd = static_cast<gpio_num_t>(TFCardCommandPin);
-        slot.d0 = static_cast<gpio_num_t>(TFCardData0Pin);
-        slot.d1 = static_cast<gpio_num_t>(TFCardData1Pin);
-        slot.d2 = static_cast<gpio_num_t>(TFCardData2Pin);
-        slot.d3 = static_cast<gpio_num_t>(TFCardData3Pin);
+        // Slot 1 routes the pins through the GPIO matrix, so other pins than the TF slot of the Waveshare boards work
+        slot.clk = static_cast<gpio_num_t>(s_cfg->tf_clk_pin);
+        slot.cmd = static_cast<gpio_num_t>(s_cfg->tf_cmd_pin);
+        slot.d0 = static_cast<gpio_num_t>(s_cfg->tf_d0_pin);
+        slot.d1 = static_cast<gpio_num_t>(s_cfg->tf_d1_pin);
+        slot.d2 = static_cast<gpio_num_t>(s_cfg->tf_d2_pin);
+        slot.d3 = static_cast<gpio_num_t>(s_cfg->tf_d3_pin);
         slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
         esp_vfs_fat_mount_config_t mount_config{};
         mount_config.format_if_mount_failed = false;
@@ -7744,11 +7774,7 @@ static void setup_mqtt()
     if (s_mqtt_on)
     {
 
-        // static assertions report the error if the condition is not true at compile time
-        static_assert(MQTT_QOS >= 0, "MQTT_QOS must be 0, 1, or 2");
-        static_assert(MQTT_QOS <= 2, "MQTT_QOS must be 0, 1, or 2");
-
-        if (s_cfg->mqtt_uri[0] == '\0' || s_mqtt_payload == nullptr || MQTT_QOS < 0 || MQTT_QOS > 2)
+        if (s_cfg->mqtt_uri[0] == '\0' || s_mqtt_payload == nullptr || s_mqtt_qos < 0 || s_mqtt_qos > 2)
         {
             s_mqtt_setup_failed.store(true);
             return;
@@ -7762,8 +7788,8 @@ static void setup_mqtt()
             return;
         }
         snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "%s", s_cfg->mqtt_uri); // validated: mqtt:// or mqtts://, host and port
-        snprintf(s_mqtt_report_topic, sizeof(s_mqtt_report_topic), "%s/report", MQTTTopic);
-        snprintf(s_mqtt_status_topic, sizeof(s_mqtt_status_topic), "%s/status", MQTTTopic);
+        snprintf(s_mqtt_report_topic, sizeof(s_mqtt_report_topic), "%s/report", s_cfg->mqtt_topic); // topic: at most 100 characters
+        snprintf(s_mqtt_status_topic, sizeof(s_mqtt_status_topic), "%s/status", s_cfg->mqtt_topic);
 
         esp_mqtt_client_config_t config{};
         config.broker.address.uri = s_mqtt_uri;
@@ -7774,7 +7800,7 @@ static void setup_mqtt()
         config.session.keepalive = MQTTFrequencyOfKeepAliveRequest;
         config.session.last_will.topic = s_mqtt_status_topic;
         config.session.last_will.msg = "offline";
-        config.session.last_will.qos = MQTT_QOS;
+        config.session.last_will.qos = s_mqtt_qos;
         config.session.last_will.retain = 1;
         config.task.priority = 23;
         s_mqtt_client = esp_mqtt_client_init(&config);
@@ -8113,26 +8139,27 @@ void write_settings_messages_to_the_console()
     if (s_mqtt_on)
     {
         ESP_LOGI(TAG, "MQTT support: Enabled");
-#if MQTT_CLIENT_REPORTING_ENABLED
-        ESP_LOGI(TAG, "MQTT client reporting: Enabled");
-#else
-        ESP_LOGW(TAG, "MQTT client reporting: Disabled");
-#endif
-#if MQTT_MEMORY_REPORTING_ENABLED
-        ESP_LOGI(TAG, "MQTT memory reporting: Enabled");
-#else
-        ESP_LOGW(TAG, "MQTT memory reporting: Disabled");
-#endif
-#if MQTT_HISTORICAL_REPORTING_ENABLED
-        ESP_LOGI(TAG, "MQTT historical reporting: Enabled");
-#else
-        ESP_LOGW(TAG, "MQTT historical reporting: Disabled");
-#endif
-#if MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED
-        ESP_LOGI(TAG, "MQTT distinguish authenticated and unauthenticated reporting: Enabled");
-#else
-        ESP_LOGW(TAG, "MQTT distinguish authenticated and unauthenticated reporting: Disabled");
-#endif
+        ESP_LOGI(TAG, "MQTT topic: %s, QoS %d, retain %s, reporting period %lu s", cfg.mqtt_topic, static_cast<int>(cfg.mqtt_qos),
+                 cfg.mqtt_retain ? "on" : "off", static_cast<unsigned long>(cfg.mqtt_report_period_s));
+        if (cfg.mqtt_client_reporting)
+            ESP_LOGI(TAG, "MQTT client reporting: Enabled (up to %u clients with the TF card queue)", static_cast<unsigned int>(cfg.mqtt_tf_client_limit));
+        else
+            ESP_LOGW(TAG, "MQTT client reporting: Disabled");
+        if (cfg.mqtt_memory_reporting)
+            ESP_LOGI(TAG, "MQTT memory reporting: Enabled");
+        else
+            ESP_LOGW(TAG, "MQTT memory reporting: Disabled");
+        if (cfg.mqtt_historical_reporting)
+            ESP_LOGI(TAG, "MQTT historical reporting: Enabled");
+        else
+            ESP_LOGW(TAG, "MQTT historical reporting: Disabled");
+        if (cfg.mqtt_distinguish_auth)
+            ESP_LOGI(TAG, "MQTT distinguish authenticated and unauthenticated reporting: Enabled");
+        else
+            ESP_LOGW(TAG, "MQTT distinguish authenticated and unauthenticated reporting: Disabled");
+        if (cfg.mqtt_qos > 0)
+            ESP_LOGI(TAG, "TF card pins (MQTT report queue): CMD %d, CLK %d, D0 %d, D1 %d, D2 %d, D3 %d", cfg.tf_cmd_pin, cfg.tf_clk_pin,
+                     cfg.tf_d0_pin, cfg.tf_d1_pin, cfg.tf_d2_pin, cfg.tf_d3_pin);
     }
     else
         ESP_LOGW(TAG, "MQTT support: Disabled");
@@ -8162,6 +8189,12 @@ void setup_NVS_storage(void)
     s_cfg = &web_settings_boot();
     s_lcd_on = s_cfg->lcd_enabled;
     s_mqtt_on = s_cfg->mqtt_enabled;
+    s_mqtt_qos = s_cfg->mqtt_qos;
+    s_mqtt_retain = s_cfg->mqtt_retain ? 1 : 0;
+    s_mqtt_client_reporting = s_cfg->mqtt_client_reporting;
+    s_mqtt_memory_reporting = s_cfg->mqtt_memory_reporting;
+    s_mqtt_historical_reporting = s_cfg->mqtt_historical_reporting;
+    s_mqtt_distinguish_auth = s_cfg->mqtt_distinguish_auth;
     s_ote_on = s_cfg->ote_enabled;
     s_gnss_ublox = s_cfg->gnss_ublox;
     s_led_type = s_cfg->led_type;
@@ -8338,8 +8371,9 @@ static std::string configure_mac_address()
     }
 #endif
 
-    // If MACAddress is empty or matches the real MAC, do nothing
-    if ((MACAddress[0] == '\0') || (std::strcmp(real_mac_address_str, MACAddress) == 0))
+    // MAC of the settings (MACAddress or the web admin, lower case): empty or the real MAC = do nothing
+    const char *configured_mac = s_cfg->mac_address;
+    if ((configured_mac[0] == '\0') || (std::strcmp(real_mac_address_str, configured_mac) == 0))
     {
 #if DEBUG_ENABLED
         ESP_LOGI(TAG, "No need to change the MAC address.");
@@ -8349,10 +8383,10 @@ static std::string configure_mac_address()
 
     // Parse the desired MAC
     uint8_t mac[6] = {};
-    if (!parse_mac_id_string(MACAddress, mac))
+    if (!parse_mac_id_string(configured_mac, mac))
     {
 #if DEBUG_ENABLED
-        ESP_LOGE(TAG, "The MAC address in settings is invalid: %s - the MAC ID will not be changed", MACAddress);
+        ESP_LOGE(TAG, "The MAC address in settings is invalid: %s - the MAC ID will not be changed", configured_mac);
 #endif
         return std::string(real_mac_address_str);
     }
@@ -8362,16 +8396,16 @@ static std::string configure_mac_address()
     if (err != ESP_OK)
     {
 #if DEBUG_ENABLED
-        ESP_LOGE(TAG, "Failed to set MAC address to %s: %s", MACAddress, esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to set MAC address to %s: %s", configured_mac, esp_err_to_name(err));
 #endif
         return std::string(real_mac_address_str);
     }
 
 #if DEBUG_ENABLED
-    ESP_LOGI(TAG, "MAC address changed to: %s", MACAddress);
+    ESP_LOGI(TAG, "MAC address changed to: %s", configured_mac);
 #endif
 
-    return std::string(MACAddress);
+    return std::string(configured_mac);
 }
 
 void setup_ethernet_connection()
@@ -9805,7 +9839,7 @@ static bool run_authenticated_interleaved_startup_health_test(int socket_fd, con
 static startup_health_mqtt_metrics_result_t check_startup_health_mqtt_metrics(const startup_health_test_results_t &results)
 {
 #if MQTT_ENABLED && MQTT_CLIENT_REPORTING_ENABLED
-    if (s_mqtt_ntp_event_queue == nullptr || s_mqtt_stats_mutex == nullptr)
+    if (!s_mqtt_client_reporting || s_mqtt_ntp_event_queue == nullptr || s_mqtt_stats_mutex == nullptr)
         return startup_health_mqtt_metrics_result_t::could_not_determine;
 
     uint32_t expected_authenticated_valid = 0;
@@ -10534,6 +10568,8 @@ void app_get_status(web_app_status_t &status)
     status.lcd_present = s_lcd_ready;
     status.led_active = s_led_type != web_led_type_t::none;
     status.mqtt_connected = s_mqtt_on && s_mqtt_connected.load(std::memory_order_acquire);
+    status.mqtt_tf_queue = s_mqtt_on && s_tf_queue_available.load(std::memory_order_acquire);
+    snprintf(status.mac_address, sizeof(status.mac_address), "%s", MACToBeUsed.c_str());
     status.ntp_auth_available = ntp_auth_available();
     status.ntp_auth_compiled_keys = ntp_auth_compiled_key_count();
     status.ntp_auth_keys_in_use = ntp_auth_key_count();

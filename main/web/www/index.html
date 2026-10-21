@@ -80,6 +80,7 @@
         </dl>
         <dl class="status-grid">
           <dt class="group net">Network</dt><dd class="group"></dd>
+          <dt>MAC</dt><dd id="st-mac" class="addr"></dd>
           <dt>IPv4</dt><dd><ul id="st-ipv4" class="plain"></ul></dd>
           <dt>IPv6</dt><dd><ul id="st-ipv6" class="plain"></ul></dd>
           <dt>DNS servers in use</dt><dd><ul id="st-dns" class="plain"></ul></dd>
@@ -124,8 +125,14 @@
             <small class="note">Empty: the servers received by DHCP (IPv4) and by IPv6 router advertisements (RDNSS) are used, both families mixed. Configured servers replace them.</small>
             <small class="def" data-for="dns"></small>
           </label>
+          <label class="span2"><span class="lt">MAC address <span class="badge restart">restart</span></span>
+            <input type="text" name="mac_address" maxlength="17" spellcheck="false" autocomplete="off" placeholder="xx:xx:xx:xx:xx:xx">
+            <small class="note">Hardware MAC of this board: <span id="mac-hardware" class="mono"></span>; in use: <span id="mac-in-use" class="mono"></span>.</small>
+            <small class="note">The hardware MAC (or an empty field) keeps the MAC of the chip. Another unicast address replaces it after the restart (the lowest bit of the first byte must be 0; locally administered addresses have the second bit set, e.g. 02:…). DHCP and SLAAC may then give the device other addresses: open the page by its name or new address and confirm within 120 s, otherwise the device restarts with the previous settings.</small>
+            <small class="def" data-for="mac_address"></small>
+          </label>
         </div>
-        <p class="hint">Network changes take effect at once and have to be confirmed within 120 s, otherwise the previous settings come back. Save them after the confirmation.</p>
+        <p class="hint">Network changes take effect at once (the MAC address after a restart) and have to be confirmed within 120 s, otherwise the previous settings come back. Save them after the confirmation.</p>
       </section>
 
       <section class="card">
@@ -208,6 +215,55 @@
           <label class="switch span2"><input type="checkbox" name="mqtt_password_clear"> Clear the MQTT password</label>
         </div>
         <p class="hint">An empty password field keeps the stored password. Secrets are never sent back to the browser.</p>
+        <div class="grid section-gap">
+          <label><span class="lt">Topic</span>
+            <input type="text" name="mqtt_topic" maxlength="100" spellcheck="false" autocomplete="off">
+            <small class="note">Reports are published to &lt;topic&gt;/report, online / offline to &lt;topic&gt;/status.</small>
+            <small class="def" data-for="mqtt_topic"></small>
+          </label>
+          <label><span class="lt">Quality of service (QoS)</span>
+            <select name="mqtt_qos">
+              <option value="0">0: at most once, nothing is queued</option>
+              <option value="1">1: at least once, queued while disconnected</option>
+              <option value="2">2: exactly once, queued while disconnected</option>
+            </select>
+            <small class="def" data-for="mqtt_qos"></small>
+          </label>
+          <label><span class="lt">Reporting period (s)</span>
+            <input type="number" name="mqtt_report_period" min="30" max="86400">
+            <small class="note">30 to 86400 s, e.g. 900 = 15 min.</small>
+            <small class="def" data-for="mqtt_report_period"></small>
+          </label>
+          <label class="switch"><input type="checkbox" name="mqtt_retain"> Broker retains the latest report (retain flag)</label>
+        </div>
+        <h3 class="sub-heading">Report contents</h3>
+        <p class="hint first">Every report has the status, uptime, satellites and NTP request counts. Additionally:</p>
+        <div class="grid">
+          <label class="switch span2"><input type="checkbox" name="mqtt_client_reporting"> Client activity: requests per client address</label>
+          <label class="switch span2"><input type="checkbox" name="mqtt_memory_reporting"> Memory usage: free heap, minimum free heap, largest free block</label>
+          <label class="switch span2"><input type="checkbox" name="mqtt_historical_reporting"> Historical information: last time synchronised and disciplined, last GNSS and PPS faults</label>
+          <label class="switch span2"><input type="checkbox" name="mqtt_distinguish_auth"> Separate counts for authenticated and unauthenticated NTP requests</label>
+        </div>
+        <h3 class="sub-heading">Report queue on a TF card (QoS 1 and 2)</h3>
+        <p class="hint first">Without a usable TF card (FAT32) only the last 4 reports are queued, in RAM, with at most 50 clients each: they are lost at a power failure or crash, and the oldest report is dropped first. Flash is not used, so it does not wear out. With a TF card the reports are queued on the card (an empty 16 GB card can hold more than 36,000 reports) with up to the client limit below; when the card is full, the oldest reports are dropped first.</p>
+        <div class="grid">
+          <label><span class="lt">Client limit per report with the TF card</span>
+            <input type="number" name="mqtt_tf_client_limit" min="50" max="1000">
+            <small class="note" id="mqtt-buffer-note"></small>
+            <small class="def" data-for="mqtt_tf_client_limit"></small>
+          </label>
+        </div>
+        <h3 class="sub-heading">TF card pins</h3>
+        <p class="callout">Waveshare ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH and ESP32-P4-WIFI-POE-ETH: the TF card slot is wired to these pins. If you use one of these boards, do not change them.</p>
+        <div class="grid three">
+          <label><span class="lt">CMD (GPIO)</span><input type="number" name="tf_cmd_pin" min="0" max="54"><small class="def" data-for="tf_cmd_pin"></small></label>
+          <label><span class="lt">CLK (GPIO)</span><input type="number" name="tf_clk_pin" min="0" max="54"><small class="def" data-for="tf_clk_pin"></small></label>
+          <label><span class="lt">D0 (GPIO)</span><input type="number" name="tf_d0_pin" min="0" max="54"><small class="def" data-for="tf_d0_pin"></small></label>
+          <label><span class="lt">D1 (GPIO)</span><input type="number" name="tf_d1_pin" min="0" max="54"><small class="def" data-for="tf_d1_pin"></small></label>
+          <label><span class="lt">D2 (GPIO)</span><input type="number" name="tf_d2_pin" min="0" max="54"><small class="def" data-for="tf_d2_pin"></small></label>
+          <label><span class="lt">D3 (GPIO)</span><input type="number" name="tf_d3_pin" min="0" max="54"><small class="def" data-for="tf_d3_pin"></small></label>
+        </div>
+        <p class="hint">4-bit SD mode. The pins are always reserved for the card, also while MQTT or QoS 1 / 2 are off.</p>
       </section>
 
       <section class="card">

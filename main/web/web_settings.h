@@ -26,6 +26,10 @@ static constexpr size_t WEB_TZ_SIZE = 64;
 static constexpr size_t WEB_LCD_TITLE_SIZE = 18;    // 17 characters + NUL (the last 3 LCD columns are status indicators)
 static constexpr size_t WEB_MQTT_URI_SIZE = 128;
 static constexpr size_t WEB_MQTT_CREDENTIAL_SIZE = 65;
+static constexpr size_t WEB_MQTT_TOPIC_SIZE = 101;  // 100 characters + NUL (topics <topic>/report and <topic>/status)
+static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MIN = 50;   // MQTT_CLIENT_LIMIT (report queue in RAM)
+static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MAX = 1000; // report buffer about 77 kB (no PSRAM)
+static constexpr size_t WEB_MAC_TEXT_SIZE = 18;     // "xx:xx:xx:xx:xx:xx" + NUL
 static constexpr size_t WEB_NTP_KEY_SIZE = 33;      // 32 characters + NUL
 static constexpr size_t WEB_NTP_MAX_KEYS = 8;       // NTP_AUTH_MAX_KEYS
 static constexpr size_t WEB_OTE_NAME_SIZE = 33;     // OTE device name (mDNS host name), 32 characters + NUL
@@ -71,6 +75,7 @@ struct web_settings_t
     uint8_t ipv6_prefix;
     char ipv6_gateway[WEB_IPV6_TEXT_SIZE]; // "" = use the routers learned from router advertisements
     char dns[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
+    char mac_address[WEB_MAC_TEXT_SIZE]; // "" = the hardware MAC of the chip, else lower case "xx:xx:xx:xx:xx:xx"
 
     // GNSS and PPS
     bool gnss_ublox; // true = u-blox UBX protocol (baud rate found automatically), false = NMEA standard protocol
@@ -102,6 +107,23 @@ struct web_settings_t
     char mqtt_uri[WEB_MQTT_URI_SIZE];
     char mqtt_username[WEB_MQTT_CREDENTIAL_SIZE];
     char mqtt_password[WEB_MQTT_CREDENTIAL_SIZE]; // secret
+    char mqtt_topic[WEB_MQTT_TOPIC_SIZE];
+    uint8_t mqtt_qos;                // 0, 1 or 2
+    bool mqtt_retain;                // the broker keeps the latest report
+    uint32_t mqtt_report_period_s;
+    bool mqtt_client_reporting;      // requests per client address
+    bool mqtt_memory_reporting;
+    bool mqtt_historical_reporting;  // times of the last synchronisation and faults
+    bool mqtt_distinguish_auth;      // separate counts for authenticated and unauthenticated requests
+    uint16_t mqtt_tf_client_limit;   // client addresses per report while the reports are queued on the TF card
+
+    // TF card (MQTT report queue for QoS 1 and 2), SDMMC slot 1 in 4-bit mode
+    int8_t tf_cmd_pin;
+    int8_t tf_clk_pin;
+    int8_t tf_d0_pin;
+    int8_t tf_d1_pin;
+    int8_t tf_d2_pin;
+    int8_t tf_d3_pin;
 
     // NTP symmetric-key authentication
     bool ntp_auth_enabled;
@@ -159,6 +181,13 @@ bool web_parse_ipv4(const char *text, uint32_t *address_be);
 bool web_parse_ipv6(const char *text, uint8_t address[16]);
 bool web_is_valid_time_zone(const char *tz);
 bool web_is_reserved_gpio(int gpio);
+// MAC address as "xx:xx:xx:xx:xx:xx" or "xx-xx-xx-xx-xx-xx" (any case) to lower case with ':'; false if not valid
+bool web_normalise_mac(const char *text, char (&out)[WEB_MAC_TEXT_SIZE]);
+// Hardware (eFuse) MAC of the chip; with one universal MAC address it is the Ethernet MAC
+bool web_hardware_mac(char (&out)[WEB_MAC_TEXT_SIZE]);
+// Size of the MQTT report buffer for a client limit (tools/json_message_calculator.xlsx: 1166 bytes plus 76 bytes per
+// client; 50 clients = 4966 = MQTT_REPORT_SIZE, 500 clients = 39166)
+constexpr size_t web_mqtt_report_size(size_t client_limit) { return 1166 + 76 * client_limit; }
 
 // Constant time comparison of two byte ranges of the same length
 bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length);

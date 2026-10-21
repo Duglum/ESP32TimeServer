@@ -17,6 +17,7 @@
 extern "C"
 {
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_rom_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -36,8 +37,9 @@ namespace
 
     constexpr uint32_t BLOB_MAGIC = 0x57534554u; // "WSET"
     // Increase when web_settings_t changes: a saved set of another version is ignored (compiled defaults are used)
-    // 2: GNSS protocol and LED colours added; 3: Over The Ethernet update settings added; 4: up to 8 NTP keys
-    constexpr uint32_t BLOB_VERSION = 4;
+    // 2: GNSS protocol and LED colours added; 3: Over The Ethernet update settings added; 4: up to 8 NTP keys;
+    // 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins
+    constexpr uint32_t BLOB_VERSION = 5;
 
     struct settings_blob_t
     {
@@ -263,12 +265,12 @@ bool web_is_valid_time_zone(const char *tz)
 bool web_is_reserved_gpio(int gpio)
 {
     // Waveshare ESP32-P4-ETH: RMII and SMI of the Ethernet PHY, UART0 (console), strapping pins (34 to 38, partly
-    // RMII as well), USB Serial/JTAG, TF card slot and the LCD I2C bus
+    // RMII as well), USB Serial/JTAG and the LCD I2C bus. The TF card pins are settings of their own (default 39 to
+    // 44, the TF slot of the board) and are checked against the other pins by web_settings_validate().
     static constexpr int reserved[] = {
         28, 29, 30, 31, 34, 35, 49, 50, 51, 52, // Ethernet RMII, MDC, MDIO, PHY reset, REF_CLK
         36, 37, 38,                             // strapping; 37/38 = UART0 console
         24, 25,                                 // USB Serial/JTAG
-        39, 40, 41, 42, 43, 44,                 // TF card (MQTT report queue)
         7, 8,                                   // LCD I2C (SCL, SDA)
     };
     if (gpio < 0 || gpio > 54)
@@ -281,6 +283,37 @@ bool web_is_reserved_gpio(int gpio)
         return true;
 #endif
     return false;
+}
+
+bool web_normalise_mac(const char *text, char (&out)[WEB_MAC_TEXT_SIZE])
+{
+    out[0] = '\0';
+    if (text == nullptr || strlen(text) != 17)
+        return false;
+    const char separator = text[2];
+    if (separator != ':' && separator != '-')
+        return false;
+    for (size_t i = 0; i < 17; ++i)
+    {
+        const char c = text[i];
+        if (i % 3 == 2 ? c != separator : !isxdigit(static_cast<unsigned char>(c)))
+            return false;
+        out[i] = i % 3 == 2 ? ':' : static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    }
+    out[17] = '\0';
+    return true;
+}
+
+bool web_hardware_mac(char (&out)[WEB_MAC_TEXT_SIZE])
+{
+    uint8_t mac[6] = {};
+    if (esp_efuse_mac_get_default(mac) != ESP_OK)
+    {
+        out[0] = '\0';
+        return false;
+    }
+    snprintf(out, WEB_MAC_TEXT_SIZE, "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return true;
 }
 
 bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length)
@@ -335,6 +368,9 @@ void web_settings_defaults(web_settings_t &out)
     out.ipv6_prefix = 64;
     copy_text(out.dns[0], PrimaryDNS);
     copy_text(out.dns[1], SecondaryDNS);
+    // MACAddress: "" = hardware MAC; an invalid value was ignored before as well (hardware MAC)
+    if (MACAddress[0] != '\0' && !web_normalise_mac(MACAddress, out.mac_address))
+        ESP_LOGW(TAG, "MACAddress \"%s\" in ESP32TimeServerSettings.h is not valid, the hardware MAC is used", MACAddress);
 
 #ifdef UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
     out.gnss_ublox = UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED != 0;
@@ -382,6 +418,21 @@ void web_settings_defaults(web_settings_t &out)
     }
     copy_text(out.mqtt_username, MQTTUsername);
     copy_text(out.mqtt_password, MQTTPassword);
+    copy_text(out.mqtt_topic, MQTTTopic);
+    out.mqtt_qos = static_cast<uint8_t>(MQTT_QOS);
+    out.mqtt_retain = MQTTBrokerRetain != 0;
+    out.mqtt_report_period_s = MQTTReportingPeriod;
+    out.mqtt_client_reporting = MQTT_CLIENT_REPORTING_ENABLED != 0;
+    out.mqtt_memory_reporting = MQTT_MEMORY_REPORTING_ENABLED != 0;
+    out.mqtt_historical_reporting = MQTT_HISTORICAL_REPORTING_ENABLED != 0;
+    out.mqtt_distinguish_auth = MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED != 0;
+    out.mqtt_tf_client_limit = static_cast<uint16_t>(MQTT_TF_Client_Limit);
+    out.tf_cmd_pin = static_cast<int8_t>(TFCardCommandPin);
+    out.tf_clk_pin = static_cast<int8_t>(TFCardClockPin);
+    out.tf_d0_pin = static_cast<int8_t>(TFCardData0Pin);
+    out.tf_d1_pin = static_cast<int8_t>(TFCardData1Pin);
+    out.tf_d2_pin = static_cast<int8_t>(TFCardData2Pin);
+    out.tf_d3_pin = static_cast<int8_t>(TFCardData3Pin);
 
     out.ote_enabled = OTE_UPDATES_ENABLED != 0;
     copy_text(out.ote_device_name, DeviceName);
@@ -680,13 +731,26 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
             FAIL("DNS server %u is not an IPv4 or IPv6 address", static_cast<unsigned>(i + 1));
     }
 
+    // ---- MAC address ----
+    if (s.mac_address[0] != '\0')
+    {
+        char normalised[WEB_MAC_TEXT_SIZE];
+        if (!web_normalise_mac(s.mac_address, normalised) || strcmp(normalised, s.mac_address) != 0)
+            FAIL("MAC address: xx:xx:xx:xx:xx:xx (hexadecimal) expected");
+        const unsigned first = static_cast<unsigned>(strtoul(s.mac_address, nullptr, 16));
+        if ((first & 0x01u) != 0)
+            FAIL("MAC address: a unicast address is required (the lowest bit of the first byte must be 0)");
+        if (strcmp(s.mac_address, "00:00:00:00:00:00") == 0)
+            FAIL("MAC address: 00:00:00:00:00:00 cannot be used");
+    }
+
     // ---- GPIOs ----
     struct pin_use_t
     {
         int pin;
         const char *name;
     };
-    pin_use_t pins[8];
+    pin_use_t pins[14];
     size_t pin_count = 0;
     auto add_pin = [&](int pin, const char *name) -> bool
     {
@@ -703,6 +767,10 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         FAIL("PPS pin: GPIO %d cannot be used", s.gnss_pps_pin);
     if (s.ptp_loopback_pin != -1 && !add_pin(s.ptp_loopback_pin, "PTP PPS loopback"))
         FAIL("PTP PPS loopback pin: GPIO %d cannot be used", s.ptp_loopback_pin);
+    // TF card: always taken (on the Waveshare boards the slot is wired to these pins)
+    if (!add_pin(s.tf_cmd_pin, "TF CMD") || !add_pin(s.tf_clk_pin, "TF CLK") || !add_pin(s.tf_d0_pin, "TF D0") ||
+        !add_pin(s.tf_d1_pin, "TF D1") || !add_pin(s.tf_d2_pin, "TF D2") || !add_pin(s.tf_d3_pin, "TF D3"))
+        FAIL("TF card pins: one of the GPIOs cannot be used");
     switch (s.led_type)
     {
     case web_led_type_t::none:
@@ -778,6 +846,17 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
             FAIL("MQTT user name: at most 64 printable ASCII characters");
         if (strnlen(s.mqtt_password, WEB_MQTT_CREDENTIAL_SIZE) >= WEB_MQTT_CREDENTIAL_SIZE || !is_printable_ascii(s.mqtt_password, 0x20, 0x7E))
             FAIL("MQTT password: at most 64 printable ASCII characters");
+        const size_t topic_length = strnlen(s.mqtt_topic, WEB_MQTT_TOPIC_SIZE);
+        if (topic_length == 0 || topic_length >= WEB_MQTT_TOPIC_SIZE || !is_printable_ascii(s.mqtt_topic, 0x21, 0x7E) ||
+            strpbrk(s.mqtt_topic, "+#") != nullptr)
+            FAIL("MQTT topic: 1 to 100 printable ASCII characters without spaces, '+' and '#'");
+        if (s.mqtt_qos > 2)
+            FAIL("MQTT QoS: 0, 1 or 2");
+        if (s.mqtt_report_period_s < 30 || s.mqtt_report_period_s > 86400)
+            FAIL("MQTT reporting period: 30 to 86400 s");
+        if (s.mqtt_tf_client_limit < WEB_MQTT_TF_CLIENT_LIMIT_MIN || s.mqtt_tf_client_limit > WEB_MQTT_TF_CLIENT_LIMIT_MAX)
+            FAIL("MQTT client limit with TF card: %u to %u", static_cast<unsigned>(WEB_MQTT_TF_CLIENT_LIMIT_MIN),
+                 static_cast<unsigned>(WEB_MQTT_TF_CLIENT_LIMIT_MAX));
     }
 
     // ---- NTP authentication ----
@@ -833,7 +912,8 @@ bool web_settings_network_differs(const web_settings_t &a, const web_settings_t 
     for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
         if (strcmp(a.dns[i], b.dns[i]) != 0)
             return true;
-    return false;
+    // The MAC needs a restart; addresses from DHCP and SLAAC may change with it, so it has to be confirmed as well
+    return strcmp(a.mac_address, b.mac_address) != 0;
 }
 
 bool web_settings_restart_fields_differ(const web_settings_t &a, const web_settings_t &b)
@@ -844,6 +924,13 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            a.lcd_enabled != b.lcd_enabled ||
            a.led_type != b.led_type || a.led_red_pin != b.led_red_pin || a.led_green_pin != b.led_green_pin ||
            a.led_blue_pin != b.led_blue_pin || a.led_ws2812_pin != b.led_ws2812_pin ||
+           strcmp(a.mac_address, b.mac_address) != 0 ||
+           a.tf_cmd_pin != b.tf_cmd_pin || a.tf_clk_pin != b.tf_clk_pin || a.tf_d0_pin != b.tf_d0_pin ||
+           a.tf_d1_pin != b.tf_d1_pin || a.tf_d2_pin != b.tf_d2_pin || a.tf_d3_pin != b.tf_d3_pin ||
+           strcmp(a.mqtt_topic, b.mqtt_topic) != 0 || a.mqtt_qos != b.mqtt_qos || a.mqtt_retain != b.mqtt_retain ||
+           a.mqtt_report_period_s != b.mqtt_report_period_s || a.mqtt_client_reporting != b.mqtt_client_reporting ||
+           a.mqtt_memory_reporting != b.mqtt_memory_reporting || a.mqtt_historical_reporting != b.mqtt_historical_reporting ||
+           a.mqtt_distinguish_auth != b.mqtt_distinguish_auth || a.mqtt_tf_client_limit != b.mqtt_tf_client_limit ||
            a.mqtt_enabled != b.mqtt_enabled || strcmp(a.mqtt_uri, b.mqtt_uri) != 0 ||
            strcmp(a.mqtt_username, b.mqtt_username) != 0 ||
            !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.mqtt_password),

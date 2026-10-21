@@ -310,6 +310,8 @@
       ipv6_cidr: s.ipv6_address ? s.ipv6_address + '/' + s.ipv6_prefix : '',
       ipv6_gateway: s.ipv6_gateway,
       dns: (s.dns || []).join('\n'),
+      // "" = hardware MAC: the field shows the hardware MAC
+      mac_address: s.mac_address || (state && state.status ? state.status.mac_hardware : ''),
       gnss_protocol: s.gnss_protocol,
       gnss_tx_pin: String(s.gnss_tx_pin),
       gnss_rx_pin: String(s.gnss_rx_pin),
@@ -331,6 +333,21 @@
       mqtt_enabled: s.mqtt_enabled,
       mqtt_uri: s.mqtt_uri,
       mqtt_username: s.mqtt_username,
+      mqtt_topic: s.mqtt_topic,
+      mqtt_qos: String(s.mqtt_qos),
+      mqtt_retain: s.mqtt_retain,
+      mqtt_report_period: String(s.mqtt_report_period),
+      mqtt_client_reporting: s.mqtt_client_reporting,
+      mqtt_memory_reporting: s.mqtt_memory_reporting,
+      mqtt_historical_reporting: s.mqtt_historical_reporting,
+      mqtt_distinguish_auth: s.mqtt_distinguish_auth,
+      mqtt_tf_client_limit: String(s.mqtt_tf_client_limit),
+      tf_cmd_pin: String(s.tf_cmd_pin),
+      tf_clk_pin: String(s.tf_clk_pin),
+      tf_d0_pin: String(s.tf_d0_pin),
+      tf_d1_pin: String(s.tf_d1_pin),
+      tf_d2_pin: String(s.tf_d2_pin),
+      tf_d3_pin: String(s.tf_d3_pin),
       ntp_auth_enabled: s.ntp_auth_enabled,
       ote_enabled: s.ote_enabled,
       ote_device_name: s.ote_device_name,
@@ -340,7 +357,8 @@
 
   const displayNames = {
     gnss_protocol: { nmea: 'NMEA Standard Protocol (needs RMC sentence)', ubx: 'U-Blox UBX Protocol' },
-    led_type: { none: 'None', ky016: 'KY-016', ws2812: 'WS2812' }
+    led_type: { none: 'None', ky016: 'KY-016', ws2812: 'WS2812' },
+    mqtt_qos: { 0: '0 (at most once)', 1: '1 (at least once)', 2: '2 (exactly once)' }
   };
 
   function fillForm(s) {
@@ -379,6 +397,8 @@
       if (name === 'dns') text = value ? value.replace(/\n/g, ', ') : '(empty: received servers)';
       if (name === 'ptp_loopback_pin' && value === '') text = 'off';
       if (name === 'led_brightness') text += ' %';
+      if (name === 'mqtt_report_period') text += ' s';
+      if (name === 'mac_address' && !state.defaults.mac_address) text = 'the hardware MAC';
       if (displayNames[name]) text = displayNames[name][value] || text;
       small.textContent = 'Default: ' + text;
       const differs = String(currentValue(name)).replace(/\r/g, '') !== String(value);
@@ -406,6 +426,12 @@
     document.querySelectorAll('.led-ws2812').forEach((el) => { el.hidden = type !== 'ws2812'; });
     $('brightness-out').textContent = f.led_brightness.value + ' %';
     f.mqtt_password.disabled = f.mqtt_password_clear.checked;
+    // The client limit only matters with the client list; the report buffer is sized from it (RAM, no PSRAM)
+    f.mqtt_tf_client_limit.disabled = !f.mqtt_client_reporting.checked;
+    const limit = Number(f.mqtt_tf_client_limit.value);
+    $('mqtt-buffer-note').textContent = f.mqtt_client_reporting.checked && Number.isInteger(limit) && limit >= 50 && limit <= 1000
+      ? 'Report buffer: ' + ((1166 + 76 * limit) / 1024).toFixed(1) + ' kB of RAM (1166 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.'
+      : (f.mqtt_client_reporting.checked ? '50 to 1000.' : 'Only used with client activity reporting.');
     const compiledOnly = f.ntp_key_clear.checked;
     document.querySelectorAll('#ntp-keys input, #ntp-keys button').forEach((el) => { el.disabled = compiledOnly; });
     $('ntp-key-add').disabled = compiledOnly || ntpKeyRows.length >= 8;
@@ -461,6 +487,21 @@
       mqtt_username: f.mqtt_username.value,
       mqtt_password: f.mqtt_password.value,
       mqtt_password_clear: f.mqtt_password_clear.checked,
+      mqtt_topic: f.mqtt_topic.value.trim(),
+      mqtt_qos: Number(f.mqtt_qos.value),
+      mqtt_retain: f.mqtt_retain.checked,
+      mqtt_report_period: Number(f.mqtt_report_period.value),
+      mqtt_client_reporting: f.mqtt_client_reporting.checked,
+      mqtt_memory_reporting: f.mqtt_memory_reporting.checked,
+      mqtt_historical_reporting: f.mqtt_historical_reporting.checked,
+      mqtt_distinguish_auth: f.mqtt_distinguish_auth.checked,
+      mqtt_tf_client_limit: Number(f.mqtt_tf_client_limit.value),
+      tf_cmd_pin: pin('tf_cmd_pin', 'TF card CMD pin'),
+      tf_clk_pin: pin('tf_clk_pin', 'TF card CLK pin'),
+      tf_d0_pin: pin('tf_d0_pin', 'TF card D0 pin'),
+      tf_d1_pin: pin('tf_d1_pin', 'TF card D1 pin'),
+      tf_d2_pin: pin('tf_d2_pin', 'TF card D2 pin'),
+      tf_d3_pin: pin('tf_d3_pin', 'TF card D3 pin'),
       ntp_auth_enabled: f.ntp_auth_enabled.checked,
       ntp_key_clear: f.ntp_key_clear.checked,
       ote_enabled: f.ote_enabled.checked,
@@ -501,6 +542,17 @@
       body.ipv6_address = v6.address;
       body.ipv6_prefix = v6.prefix;
     }
+    if (!Number.isInteger(body.mqtt_report_period) || body.mqtt_report_period < 30 || body.mqtt_report_period > 86400) {
+      throw new Error('MQTT reporting period: 30 to 86400 s');
+    }
+    if (!Number.isInteger(body.mqtt_tf_client_limit) || body.mqtt_tf_client_limit < 50 || body.mqtt_tf_client_limit > 1000) {
+      throw new Error('MQTT client limit with the TF card: 50 to 1000');
+    }
+    // MAC: lower case with ':'; the hardware MAC is sent as "" (= hardware MAC)
+    const mac = f.mac_address.value.trim().toLowerCase().replace(/-/g, ':');
+    if (mac !== '' && !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) throw new Error('MAC address: xx:xx:xx:xx:xx:xx (hexadecimal) expected');
+    if (mac !== '' && (parseInt(mac.slice(0, 2), 16) & 1) !== 0) throw new Error('MAC address: a unicast address is required (the lowest bit of the first byte must be 0)');
+    body.mac_address = mac === state.status.mac_hardware ? '' : mac;
     body.dns = f.dns.value.split(/\r?\n/).map((s) => s.trim()).filter((s) => s !== '');
     if (body.dns.length > 3) throw new Error('At most 3 DNS servers');
     return body;
@@ -573,7 +625,12 @@
     $('ptp-chip').textContent = st.chip_revision;
     $('st-uptime').textContent = duration(st.uptime_s);
     $('st-heap').textContent = Math.round(st.free_heap / 1024) + ' kB';
-    $('st-mqtt').textContent = state.settings.mqtt_enabled ? (st.mqtt_connected ? 'connected' : 'not connected') : 'off';
+    $('st-mqtt').textContent = state.settings.mqtt_enabled
+      ? (st.mqtt_connected ? 'connected' : 'not connected') + (st.mqtt_tf_queue ? ', reports queued on the TF card' : '')
+      : 'off';
+    $('st-mac').textContent = st.mac_address + (st.mac_address === st.mac_hardware ? ' (hardware MAC)' : ' (set, hardware MAC ' + st.mac_hardware + ')');
+    $('mac-hardware').textContent = st.mac_hardware;
+    $('mac-in-use').textContent = st.mac_address;
     $('st-fingerprint').textContent = state.fingerprint;
     // Same form as the IPv6 lines: address in the first line, gateway and source in the second
     fillList('st-ipv4', st.ipv4_address

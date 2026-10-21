@@ -93,6 +93,10 @@ h1 { font-size: 1.15rem; margin: 0; overflow: hidden; text-overflow: ellipsis; w
 h2 { font-size: 1.05rem; margin: 0 0 1rem; display: flex; align-items: center; gap: .5rem; }
 h3 { font-size: .95rem; margin: 0 0 .5rem; }
 h3.sub-heading { margin: 1.25rem 0 .25rem; }
+.section-gap { margin-top: 1rem; }
+.hint.first + .grid { margin-top: .75rem; }
+.grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.callout { margin: .25rem 0 .75rem; padding: .55rem .75rem; border-left: 3px solid var(--warn); border-radius: 6px; background: var(--warn-bg); color: var(--warn); font-size: .85rem; }
 .sub { margin: 0; color: var(--muted); font-size: .82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .actions { display: flex; gap: .5rem; flex: none; }
 

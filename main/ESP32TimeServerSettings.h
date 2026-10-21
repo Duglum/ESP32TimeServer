@@ -124,10 +124,8 @@ static constexpr int MQTT_QOS = 0;
 //   be managed on a FIFO basis.
 //
 //   Note: Adjust MQTT_TF_Client_Limit based on the expected number of unique clients and available TF card storage.
-//         Also changing MQTT_TF_Client_Limit means the value of MQTT_MAX_REPORT_SIZE may need to be adjusted accordingly.
-//         This requires a manual recalculation of MQTT_MAX_REPORT_SIZE based on the new MQTT_TF_Client_Limit.
-//         The reason this value is shown in the settings but MQTT_MAX_REPORT_SIZE is not is simply to draw
-//         your attention to the limit below - and if you're ok with it great - otherwise there is more work to do.
+//         The report buffer is sized from it at the start (1166 bytes plus 76 bytes per client, RAM), so no other
+//         value has to be recalculated. Allowed: 50 to 1000 (also on the web admin page).
 static constexpr size_t MQTT_TF_Client_Limit = 500;
 
 // (optional) setting of the ESP32-P4's MAC address support
