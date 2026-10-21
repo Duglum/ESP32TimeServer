@@ -15,10 +15,14 @@ extern "C"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_net_stack.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "lwip/dns.h"
 #include "lwip/ip6_addr.h"
 #include "lwip/nd6.h"
 #include "lwip/netif.h"
 #include "lwip/sockets.h"
+#include "lwip/tcpip.h"
 }
 
 #if !defined(CONFIG_LWIP_HOOK_ND6_GET_GW_CUSTOM)
@@ -79,40 +83,143 @@ namespace
         return ESP_OK;
     }
 
-    void to_esp_ip(const char *text, esp_ip_addr_t &out)
+    // ---- DNS servers ----
+    // lwIP has one table of DNS_MAX_SERVERS (3) entries. The DHCPv4 client and the RDNSS option of IPv6 router
+    // advertisements both write into it from slot 0, so the last one wins. The DNS manager below runs every 2 s in
+    // the lwIP thread: entries it did not write were received (DHCPv4 or RDNSS) and are remembered per address
+    // family; then the table is set to the configured servers or, without configured servers, to a mix of the
+    // received ones (IPv4, IPv6, then the second IPv4 or IPv6 server).
+    constexpr int64_t DNS_CHECK_PERIOD_US = 2000000;
+    portMUX_TYPE s_dns_lock = portMUX_INITIALIZER_UNLOCKED; // protects the lists below (short copies only)
+    ip_addr_t s_dns_configured[WEB_DNS_SERVER_COUNT];
+    size_t s_dns_configured_count = 0;
+    ip_addr_t s_dns_received_v4[WEB_DNS_SERVER_COUNT];
+    size_t s_dns_received_v4_count = 0;
+    ip_addr_t s_dns_received_v6[WEB_DNS_SERVER_COUNT];
+    size_t s_dns_received_v6_count = 0;
+    ip_addr_t s_dns_written[WEB_DNS_SERVER_COUNT]; // lwIP thread only: what the manager wrote last
+    esp_timer_handle_t s_dns_timer = nullptr;
+    std::atomic<bool> s_dns_check_queued{false};
+
+    bool contains(const ip_addr_t *list, size_t count, const ip_addr_t &address)
     {
-        memset(&out, 0, sizeof(out));
-        uint32_t v4 = 0;
-        uint8_t v6[16];
-        if (web_parse_ipv4(text, &v4))
+        for (size_t i = 0; i < count; ++i)
+            if (ip_addr_eq(&list[i], &address))
+                return true;
+        return false;
+    }
+
+    // Newest first, without duplicates (called with s_dns_lock held)
+    void remember_received(const ip_addr_t &address)
+    {
+        const bool ipv6 = IP_IS_V6_VAL(address);
+        ip_addr_t *list = ipv6 ? s_dns_received_v6 : s_dns_received_v4;
+        size_t &count = ipv6 ? s_dns_received_v6_count : s_dns_received_v4_count;
+        size_t position = count < WEB_DNS_SERVER_COUNT ? count : WEB_DNS_SERVER_COUNT - 1;
+        for (size_t i = 0; i < count; ++i)
+            if (ip_addr_eq(&list[i], &address))
+                position = i;
+        for (size_t i = position; i > 0; --i)
+            list[i] = list[i - 1];
+        list[0] = address;
+        if (count < WEB_DNS_SERVER_COUNT && position == count)
+            ++count;
+    }
+
+    // Table the manager wants (called with s_dns_lock held)
+    void desired_table(ip_addr_t (&table)[WEB_DNS_SERVER_COUNT])
+    {
+        for (ip_addr_t &entry : table)
+            ip_addr_set_zero(&entry);
+        if (s_dns_configured_count > 0)
         {
-            out.type = ESP_IPADDR_TYPE_V4;
-            out.u_addr.ip4.addr = v4;
+            for (size_t i = 0; i < s_dns_configured_count; ++i)
+                table[i] = s_dns_configured[i];
+            return;
         }
-        else if (web_parse_ipv6(text, v6))
+        size_t n = 0;
+        size_t v4 = 0;
+        size_t v6 = 0;
+        while (n < WEB_DNS_SERVER_COUNT && (v4 < s_dns_received_v4_count || v6 < s_dns_received_v6_count))
         {
-            out.type = ESP_IPADDR_TYPE_V6;
-            memcpy(out.u_addr.ip6.addr, v6, 16);
+            if (v4 < s_dns_received_v4_count)
+                table[n++] = s_dns_received_v4[v4++];
+            if (n < WEB_DNS_SERVER_COUNT && v6 < s_dns_received_v6_count)
+                table[n++] = s_dns_received_v6[v6++];
         }
     }
 
-    bool apply_dns(esp_netif_t *netif, const char (*dns_servers)[WEB_IPV6_TEXT_SIZE])
+    // lwIP thread
+    void dns_check_in_lwip_thread(void *)
     {
-        bool any = false;
-        for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
-            any = any || dns_servers[i][0] != '\0';
-        if (!any)
-            return true; // nothing configured: the servers of the DHCP lease (or none) stay in use
-
-        static constexpr esp_netif_dns_type_t types[WEB_DNS_SERVER_COUNT] = {ESP_NETIF_DNS_MAIN, ESP_NETIF_DNS_BACKUP, ESP_NETIF_DNS_FALLBACK};
-        bool ok = true;
+        s_dns_check_queued.store(false, std::memory_order_release);
+        ip_addr_t table[WEB_DNS_SERVER_COUNT];
+        taskENTER_CRITICAL(&s_dns_lock);
         for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
         {
-            esp_netif_dns_info_t info{};
-            to_esp_ip(dns_servers[i], info.ip); // an empty entry clears the slot
-            ok = esp_netif_set_dns_info(netif, types[i], &info) == ESP_OK && ok;
+            const ip_addr_t *current = dns_getserver(static_cast<u8_t>(i));
+            if (current != nullptr && !ip_addr_isany(current) && !contains(s_dns_written, WEB_DNS_SERVER_COUNT, *current) &&
+                !contains(s_dns_configured, s_dns_configured_count, *current))
+                remember_received(*current);
         }
-        return ok;
+        desired_table(table);
+        taskEXIT_CRITICAL(&s_dns_lock);
+
+        for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
+        {
+            const ip_addr_t *current = dns_getserver(static_cast<u8_t>(i));
+            if (current == nullptr || !ip_addr_eq(current, &table[i]))
+                dns_setserver(static_cast<u8_t>(i), &table[i]);
+            s_dns_written[i] = table[i];
+        }
+    }
+
+    void queue_dns_check()
+    {
+        if (!s_dns_check_queued.exchange(true, std::memory_order_acq_rel) &&
+            tcpip_try_callback(dns_check_in_lwip_thread, nullptr) != ERR_OK)
+            s_dns_check_queued.store(false, std::memory_order_release);
+    }
+
+    void dns_timer_callback(void *)
+    {
+        queue_dns_check(); // only posts a message to the lwIP thread (esp_timer task, must not block)
+    }
+
+    void set_configured_dns(struct netif *netif, const char (*servers)[WEB_IPV6_TEXT_SIZE])
+    {
+        ip_addr_t parsed[WEB_DNS_SERVER_COUNT];
+        size_t count = 0;
+        for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
+        {
+            uint32_t v4 = 0;
+            uint8_t v6[16];
+            if (web_parse_ipv4(servers[i], &v4))
+            {
+                ip_addr_set_zero_ip4(&parsed[count]);
+                ip_2_ip4(&parsed[count])->addr = v4;
+                ++count;
+            }
+            else if (web_parse_ipv6(servers[i], v6))
+            {
+                ip_addr_set_zero_ip6(&parsed[count]);
+                memcpy(ip_2_ip6(&parsed[count])->addr, v6, 16);
+                if (netif != nullptr)
+                    ip6_addr_assign_zone(ip_2_ip6(&parsed[count]), IP6_UNICAST, netif); // link-local servers
+                ++count;
+            }
+        }
+        taskENTER_CRITICAL(&s_dns_lock);
+        memcpy(s_dns_configured, parsed, sizeof(parsed));
+        s_dns_configured_count = count;
+        taskEXIT_CRITICAL(&s_dns_lock);
+        queue_dns_check();
+    }
+
+    void format_list(const ip_addr_t *list, size_t count, char (*out)[WEB_IPV6_TEXT_SIZE])
+    {
+        for (size_t i = 0; i < count; ++i)
+            ipaddr_ntoa_r(&list[i], out[i], WEB_IPV6_TEXT_SIZE);
     }
 } // namespace
 
@@ -225,19 +332,25 @@ bool web_net_apply(esp_netif_t *netif, const web_settings_t &s, const web_settin
         esp_netif_tcpip_exec(slaac_in_lwip_thread, &request);
     }
 
-    // ---- DNS ----
-    if (!apply_dns(netif, s.dns))
-    {
-        ESP_LOGE(TAG, "DNS servers could not be set");
-        ok = false;
-    }
+    // ---- DNS (set by the DNS manager in the lwIP thread) ----
+    set_configured_dns(lwip_netif, s.dns);
     return ok;
 }
 
-void web_net_reapply_dns(esp_netif_t *netif, const char (*dns_servers)[WEB_IPV6_TEXT_SIZE])
+void web_net_dns_start()
 {
-    if (netif != nullptr)
-        apply_dns(netif, dns_servers);
+    if (s_dns_timer != nullptr)
+        return;
+    esp_timer_create_args_t args{};
+    args.callback = dns_timer_callback;
+    args.name = "dns_manager";
+    if (esp_timer_create(&args, &s_dns_timer) != ESP_OK || esp_timer_start_periodic(s_dns_timer, DNS_CHECK_PERIOD_US) != ESP_OK)
+        ESP_LOGE(TAG, "DNS manager could not be started");
+}
+
+void web_net_dns_check_now()
+{
+    queue_dns_check();
 }
 
 void web_net_status(esp_netif_t *netif, const web_settings_t &s, web_net_status_t &status)
@@ -272,6 +385,17 @@ void web_net_status(esp_netif_t *netif, const web_settings_t &s, web_net_status_
                                                                                     : "SLAAC, global";
         snprintf(status.ipv6[status.ipv6_count++], sizeof(status.ipv6[0]), "%s (%s)", text, kind);
     }
+
+    ip_addr_t received_v4[WEB_DNS_SERVER_COUNT];
+    ip_addr_t received_v6[WEB_DNS_SERVER_COUNT];
+    taskENTER_CRITICAL(&s_dns_lock);
+    memcpy(received_v4, s_dns_received_v4, sizeof(received_v4));
+    memcpy(received_v6, s_dns_received_v6, sizeof(received_v6));
+    status.dns_received_v4_count = s_dns_received_v4_count;
+    status.dns_received_v6_count = s_dns_received_v6_count;
+    taskEXIT_CRITICAL(&s_dns_lock);
+    format_list(received_v4, status.dns_received_v4_count, status.dns_received_v4);
+    format_list(received_v6, status.dns_received_v6_count, status.dns_received_v6);
 
     static constexpr esp_netif_dns_type_t types[WEB_DNS_SERVER_COUNT] = {ESP_NETIF_DNS_MAIN, ESP_NETIF_DNS_BACKUP, ESP_NETIF_DNS_FALLBACK};
     for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)

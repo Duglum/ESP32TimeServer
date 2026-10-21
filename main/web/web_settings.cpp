@@ -36,7 +36,8 @@ namespace
 
     constexpr uint32_t BLOB_MAGIC = 0x57534554u; // "WSET"
     // Increase when web_settings_t changes: a saved set of another version is ignored (compiled defaults are used)
-    constexpr uint32_t BLOB_VERSION = 1;
+    // 2: GNSS protocol and LED colours added
+    constexpr uint32_t BLOB_VERSION = 2;
 
     struct settings_blob_t
     {
@@ -290,6 +291,31 @@ bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length)
     return difference == 0;
 }
 
+// RGB value of a colour name of ESP32TimeServerSettings.h (LED_startup ...)
+static uint32_t web_led_colour_rgb(RGB_LED_Colour colour)
+{
+    switch (colour)
+    {
+    case RGB_LED_Colour::red:
+        return 0xFF0000;
+    case RGB_LED_Colour::green:
+        return 0x00FF00;
+    case RGB_LED_Colour::blue:
+        return 0x0000FF;
+    case RGB_LED_Colour::yellow:
+        return 0xFFFF00;
+    case RGB_LED_Colour::white:
+        return 0xFFFFFF;
+    case RGB_LED_Colour::orange:
+        return 0xFFA500;
+    case RGB_LED_Colour::pink:
+        return 0xFFC0CB;
+    case RGB_LED_Colour::off:
+    default:
+        return 0x000000;
+    }
+}
+
 void web_settings_defaults(web_settings_t &out)
 {
     out = web_settings_t{};
@@ -310,6 +336,11 @@ void web_settings_defaults(web_settings_t &out)
     copy_text(out.dns[0], PrimaryDNS);
     copy_text(out.dns[1], SecondaryDNS);
 
+#ifdef UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
+    out.gnss_ublox = UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED != 0;
+#else
+    out.gnss_ublox = true;
+#endif
     out.gnss_tx_pin = static_cast<int8_t>(TXPin);
     out.gnss_rx_pin = static_cast<int8_t>(RXPin);
     out.gnss_pps_pin = static_cast<int8_t>(PPSPin);
@@ -334,6 +365,13 @@ void web_settings_defaults(web_settings_t &out)
     out.led_green_pin = static_cast<int8_t>(LEDGreenPin);
     out.led_blue_pin = static_cast<int8_t>(LEDBluePin);
     out.led_ws2812_pin = static_cast<int8_t>(WS2812DataPin);
+    out.led_rgb[static_cast<size_t>(web_led_state_t::startup)] = web_led_colour_rgb(LED_startup);
+    out.led_rgb[static_cast<size_t>(web_led_state_t::normal)] = web_led_colour_rgb(LED_normal);
+    out.led_rgb[static_cast<size_t>(web_led_state_t::sync)] = web_led_colour_rgb(LED_sync);
+    out.led_rgb[static_cast<size_t>(web_led_state_t::warning)] = web_led_colour_rgb(LED_warning);
+    out.led_rgb[static_cast<size_t>(web_led_state_t::alert)] = web_led_colour_rgb(LED_alert);
+    out.led_rgb[static_cast<size_t>(web_led_state_t::critical)] = web_led_colour_rgb(LED_critical);
+    out.led_rgb[static_cast<size_t>(web_led_state_t::button)] = web_led_colour_rgb(LED_button_push);
 
     out.mqtt_enabled = MQTT_ENABLED != 0;
     if (MQTTServerIPAddress[0] != '\0')
@@ -434,15 +472,6 @@ void web_settings_set_running(const web_settings_t &in)
     if (s_mutex != nullptr)
         xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_running = in;
-    if (s_mutex != nullptr)
-        xSemaphoreGive(s_mutex);
-}
-
-void web_settings_get_running_dns(char (*out)[WEB_IPV6_TEXT_SIZE])
-{
-    if (s_mutex != nullptr)
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-    memcpy(out, s_running.dns, sizeof(s_running.dns));
     if (s_mutex != nullptr)
         xSemaphoreGive(s_mutex);
 }
@@ -691,6 +720,9 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         FAIL("Time zone is not a valid POSIX TZ string");
     if (s.led_brightness_percent > 100)
         FAIL("LED brightness: 0 to 100 %%");
+    for (size_t i = 0; i < WEB_LED_STATE_COUNT; ++i)
+        if (s.led_rgb[i] > 0xFFFFFFu)
+            FAIL("LED colour %u is not a 24-bit RGB value", static_cast<unsigned>(i + 1));
 
     // ---- MQTT ----
     {
@@ -762,7 +794,7 @@ bool web_settings_network_differs(const web_settings_t &a, const web_settings_t 
 
 bool web_settings_restart_fields_differ(const web_settings_t &a, const web_settings_t &b)
 {
-    return strcmp(a.fqdn, b.fqdn) != 0 ||
+    return strcmp(a.fqdn, b.fqdn) != 0 || a.gnss_ublox != b.gnss_ublox ||
            a.gnss_tx_pin != b.gnss_tx_pin || a.gnss_rx_pin != b.gnss_rx_pin || a.gnss_pps_pin != b.gnss_pps_pin ||
            a.gnss_baud != b.gnss_baud || a.ptp_loopback_pin != b.ptp_loopback_pin ||
            a.lcd_enabled != b.lcd_enabled ||
@@ -780,7 +812,8 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
         return false;
     return strcmp(a.lcd_title, b.lcd_title) == 0 && a.lcd_24_hour == b.lcd_24_hour && a.lcd_pad_hour == b.lcd_pad_hour &&
            a.lcd_show_time_zone == b.lcd_show_time_zone && strcmp(a.time_zone, b.time_zone) == 0 &&
-           a.led_brightness_percent == b.led_brightness_percent && a.ntp_auth_enabled == b.ntp_auth_enabled &&
+           a.led_brightness_percent == b.led_brightness_percent && memcmp(a.led_rgb, b.led_rgb, sizeof(a.led_rgb)) == 0 &&
+           a.ntp_auth_enabled == b.ntp_auth_enabled &&
            a.ntp_key_override == b.ntp_key_override && a.ntp_key_id == b.ntp_key_id &&
            web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_key), reinterpret_cast<const uint8_t *>(b.ntp_key), WEB_NTP_KEY_SIZE);
 }

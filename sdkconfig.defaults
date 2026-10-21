@@ -73,3 +73,6 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 CONFIG_LWIP_HOOK_ND6_GET_GW_CUSTOM=y
 # Link-local + SLAAC (global and unique local) + the static IPv6 address of the web settings + one spare
 CONFIG_LWIP_IPV6_NUM_ADDRESSES=5
+# IPv6 DNS servers from router advertisements (RDNSS, RFC 8106); the DNS manager in main/web/web_net.cpp
+# combines them with the DHCPv4 servers
+CONFIG_LWIP_IPV6_RDNSS_MAX_DNS_SERVERS=2

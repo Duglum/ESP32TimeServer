@@ -24,15 +24,21 @@ struct web_net_status_t
     char ipv4_gateway[WEB_IPV4_TEXT_SIZE];
     size_t ipv6_count;
     char ipv6[8][WEB_IPV6_TEXT_SIZE + 12]; // address and its kind, e.g. "2001:db8::1 (SLAAC)"
-    char dns[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
+    char dns[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE]; // in use
+    size_t dns_received_v4_count;                       // received by DHCPv4 (newest first)
+    char dns_received_v4[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
+    size_t dns_received_v6_count;                       // received by IPv6 router advertisements (RDNSS)
+    char dns_received_v6[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
 };
 
 // Applies the network part of s. previous = the network settings in use before (nullptr at boot): a static IPv6
 // address of previous that is no longer configured is removed. Returns false if a step failed.
 bool web_net_apply(esp_netif_t *netif, const web_settings_t &s, const web_settings_t *previous);
 
-// The DHCP client overwrites the DNS servers with the ones of the lease: call after every new IPv4 lease
-void web_net_reapply_dns(esp_netif_t *netif, const char (*dns_servers)[WEB_IPV6_TEXT_SIZE]);
+// DNS manager: keeps the DNS table at the configured servers or at the servers received by DHCPv4 and IPv6 router
+// advertisements (RDNSS), checked every 2 s. web_net_dns_check_now() after a new IPv4 lease.
+void web_net_dns_start();
+void web_net_dns_check_now();
 
 // Current state of the interface for the status part of the page
 void web_net_status(esp_netif_t *netif, const web_settings_t &s, web_net_status_t &status);

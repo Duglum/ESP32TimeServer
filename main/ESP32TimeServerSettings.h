@@ -5,8 +5,9 @@
 //
 // Note: some additional settings are defined in the ESP32TimeServerSettingsSecrets.h file
 //
-// Web admin page (https://<address>/, TCP 443): the network settings, the GNSS and PPS pins, the GNSS baud rate,
-// the PTP PPS loopback pin, the LCD, time zone, RGB LED, MQTT and NTP authentication settings below can also be
+// Web admin page (https://<address>/, TCP 443): the network settings, the GNSS protocol
+// (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED), the GNSS and PPS pins, the GNSS baud rate, the PTP PPS loopback pin, the
+// LCD, time zone, RGB LED (including the LED_* colours), MQTT and NTP authentication settings below can also be
 // changed on the page. Settings saved there (NVS) take precedence over the values in this file; the values here
 // are the defaults and are used again after a factory reset. The features LCD, RGB LED, MQTT and NTP
 // authentication are always compiled in: their *_ENABLED values below only decide whether they are on by default.

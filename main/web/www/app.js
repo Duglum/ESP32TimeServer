@@ -12,25 +12,43 @@
   let refreshTimer = 0;
   let countdownTimer = 0;
 
-  // ---- Dark mode: stored in this browser only ----
+  // ---- Theme: the system setting unless one was chosen with the button (stored in this browser) ----
+  const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
   function storedTheme() {
     try { return localStorage.getItem('theme'); } catch (e) { return null; }
   }
-  function applyTheme(theme) {
-    document.documentElement.setAttribute('data-theme', theme);
-    // The button shows the mode it switches to: U+2600 (sun) = light mode, U+1F319 (crescent moon) = dark mode
-    const toggle = $('theme-toggle');
-    toggle.textContent = theme === 'dark' ? '☀️' : '\u{1F319}';
-    toggle.setAttribute('aria-label', theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
-    toggle.title = toggle.getAttribute('aria-label');
+  function currentTheme() {
+    const stored = storedTheme();
+    if (stored === 'dark' || stored === 'light') return stored;
+    return darkQuery && darkQuery.matches ? 'dark' : 'light';
   }
-  // Dark mode is the default; a choice made with the button is kept in this browser
-  applyTheme(storedTheme() === 'light' ? 'light' : 'dark');
+  function applyTheme() {
+    const theme = currentTheme();
+    const stored = storedTheme();
+    if (stored === 'dark' || stored === 'light') document.documentElement.setAttribute('data-theme', stored);
+    else document.documentElement.removeAttribute('data-theme'); // CSS follows the system
+    // The button shows the mode in use: U+1F319 (crescent moon) = dark, U+2600 (sun) = light
+    const toggle = $('theme-toggle');
+    toggle.textContent = theme === 'dark' ? '\u{1F319}' : '☀️';
+    const label = theme === 'dark' ? 'Dark mode (click for light mode)' : 'Light mode (click for dark mode)';
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+  }
+  applyTheme();
+  if (darkQuery && darkQuery.addEventListener) darkQuery.addEventListener('change', applyTheme);
   $('theme-toggle').addEventListener('click', () => {
-    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-    applyTheme(next);
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
     try { localStorage.setItem('theme', next); } catch (e) { /* storage not available */ }
+    applyTheme();
   });
+
+  // ---- Header ----
+  function setHost(fqdn) {
+    const host = String(fqdn || '').split('.')[0] || 'ESP32 Time Server';
+    $('hdr-host').textContent = host;
+    $('hdr-sub').textContent = fqdn && fqdn.indexOf('.') > 0 ? fqdn + ' · ESP32 Time Server' : 'ESP32 Time Server';
+    document.title = host + ' – ESP32 Time Server';
+  }
 
   // ---- Messages ----
   function show(text, kind) {
@@ -65,13 +83,97 @@
     csrf = '';
     state = null;
     clearInterval(refreshTimer);
+    clearInterval(countdownTimer);
     $('app').hidden = true;
     $('logout').hidden = true;
-    $('banner-default-pw').hidden = true;
-    $('banner-network').hidden = true;
-    $('banner-oneshot').hidden = true;
+    for (const id of ['banner-default-pw', 'banner-network', 'banner-oneshot', 'banner-unsaved']) $(id).hidden = true;
     $('login-card').hidden = false;
     $('login-password').focus();
+    api('/api/info').then((r) => { if (r.status === 200) setHost(r.data.hostname); });
+  }
+
+  // ---- LED colours ----
+  const ledStates = [
+    ['startup', 'Start-up', 'until the server is ready'],
+    ['normal', 'Normal', 'operating normally'],
+    ['sync', 'Time sync', 'the time is being set'],
+    ['warning', 'Warning', 'GNSS / PPS problem, queued MQTT reports'],
+    ['alert', 'Alert', 'no IP address, load shedding'],
+    ['critical', 'Critical', 'Ethernet, GNSS link or MQTT failure'],
+    ['button', 'Button pressed', 'uptime button']
+  ];
+  const presets = [
+    ['#000000', 'Off'], ['#FF0000', 'Red'], ['#00FF00', 'Green'], ['#0000FF', 'Blue'], ['#FFFF00', 'Yellow'],
+    ['#FFFFFF', 'White'], ['#FFA500', 'Orange'], ['#FFC0CB', 'Pink']
+  ];
+  const colourRows = {};
+
+  function normaliseHex(text) {
+    const t = String(text || '').trim().toUpperCase();
+    const m = /^#?([0-9A-F]{6})$/.exec(t);
+    return m ? '#' + m[1] : null;
+  }
+
+  function buildColourTable() {
+    const table = $('led-colours');
+    for (const [key, name, meaning] of ledStates) {
+      const label = document.createElement('div');
+      label.className = 'state';
+      label.textContent = name;
+      const small = document.createElement('small');
+      small.textContent = meaning;
+      label.appendChild(small);
+
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', name + ' colour');
+      for (const [hex, presetName] of presets) {
+        const o = document.createElement('option');
+        o.value = hex;
+        o.textContent = presetName;
+        select.appendChild(o);
+      }
+      const custom = document.createElement('option');
+      custom.value = 'custom';
+      custom.textContent = 'Custom';
+      select.appendChild(custom);
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = 7;
+      input.placeholder = '#RRGGBB';
+      input.spellcheck = false;
+      input.setAttribute('aria-label', name + ' colour as #RRGGBB');
+
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+
+      select.addEventListener('change', () => {
+        if (select.value !== 'custom') input.value = select.value;
+        else input.focus();
+        updateColourRow(key);
+        markDefaults();
+      });
+      input.addEventListener('input', () => { updateColourRow(key, true); markDefaults(); });
+
+      table.append(label, select, input, swatch);
+      colourRows[key] = { select, input, swatch };
+    }
+  }
+
+  function updateColourRow(key, fromInput) {
+    const row = colourRows[key];
+    const hex = normaliseHex(row.input.value);
+    row.input.classList.toggle('bad', hex === null);
+    if (fromInput) row.select.value = hex && presets.some((p) => p[0] === hex) ? hex : 'custom';
+    // CSSOM (allowed by the CSP, unlike style attributes)
+    row.swatch.style.backgroundColor = hex || 'transparent';
+  }
+
+  function setColours(colours) {
+    for (const [key] of ledStates) {
+      colourRows[key].input.value = (colours && colours[key]) || '#000000';
+      updateColourRow(key, true);
+    }
   }
 
   // ---- Settings <-> form ----
@@ -86,6 +188,7 @@
       ipv6_cidr: s.ipv6_address ? s.ipv6_address + '/' + s.ipv6_prefix : '',
       ipv6_gateway: s.ipv6_gateway,
       dns: (s.dns || []).join('\n'),
+      gnss_protocol: s.gnss_protocol,
       gnss_tx_pin: String(s.gnss_tx_pin),
       gnss_rx_pin: String(s.gnss_rx_pin),
       gnss_pps_pin: String(s.gnss_pps_pin),
@@ -111,6 +214,11 @@
     };
   }
 
+  const displayNames = {
+    gnss_protocol: { nmea: 'NMEA Standard Protocol', ubx: 'U-Blox UBX Protocol' },
+    led_type: { none: 'None', ky016: 'KY-016', ws2812: 'WS2812' }
+  };
+
   function fillForm(s) {
     const values = formValues(s);
     for (const name of Object.keys(values)) {
@@ -119,6 +227,7 @@
       if (el.type === 'checkbox') el.checked = !!values[name];
       else el.value = values[name];
     }
+    setColours(s.led_colors);
     f.mqtt_password.value = '';
     f.mqtt_password_clear.checked = false;
     f.ntp_key.value = '';
@@ -143,26 +252,41 @@
       const name = small.getAttribute('data-for');
       const value = defaults[name];
       let text = value === '' || value === undefined ? '(empty)' : String(value);
-      if (name === 'dns') text = text.replace(/\n/g, ', ');
+      if (typeof value === 'boolean') text = value ? 'on' : 'off';
+      if (name === 'dns') text = value ? value.replace(/\n/g, ', ') : '(empty: received servers)';
       if (name === 'ptp_loopback_pin' && value === '') text = 'off';
+      if (name === 'led_brightness') text += ' %';
+      if (displayNames[name]) text = displayNames[name][value] || text;
       small.textContent = 'Default: ' + text;
       const differs = String(currentValue(name)).replace(/\r/g, '') !== String(value);
       small.classList.toggle('differs', differs);
       f[name].classList.toggle('is-changed', differs);
     });
+    for (const [key] of ledStates) {
+      const row = colourRows[key];
+      const def = state.defaults.led_colors ? state.defaults.led_colors[key] : null;
+      const differs = def !== null && normaliseHex(row.input.value) !== def;
+      row.input.classList.toggle('is-changed', differs);
+      row.input.title = 'Default: ' + (def || '');
+    }
   }
 
   function updateDependent() {
     const dhcp = f.ipv4_dhcp.checked;
     f.ipv4_cidr.disabled = dhcp;
     f.ipv4_gateway.disabled = dhcp;
+    const ubx = f.gnss_protocol.value === 'ubx';
+    f.gnss_baud.disabled = ubx;
+    $('baud-note').hidden = !ubx;
     const type = f.led_type.value;
     document.querySelectorAll('.led-ky016').forEach((el) => { el.hidden = type !== 'ky016'; });
     document.querySelectorAll('.led-ws2812').forEach((el) => { el.hidden = type !== 'ws2812'; });
-    f.led_brightness.disabled = type === 'none';
     $('brightness-out').textContent = f.led_brightness.value + ' %';
     f.mqtt_password.disabled = f.mqtt_password_clear.checked;
     f.ntp_key.disabled = f.ntp_key_clear.checked;
+    if (state) {
+      $('ptp-chip-warning').hidden = state.status.ptp_loopback_supported || f.ptp_loopback_pin.value.trim() === '';
+    }
   }
 
   function splitCidr(text, defaultPrefix) {
@@ -173,11 +297,11 @@
     return { address: parts[0].trim(), prefix: prefix };
   }
 
-  function pin(name, allowEmpty) {
+  function pin(name, label, allowEmpty) {
     const text = f[name].value.trim();
     if (text === '' && allowEmpty) return -1;
     const value = Number(text);
-    if (!Number.isInteger(value)) throw new Error('GPIO number expected: ' + name.replace(/_/g, ' '));
+    if (text === '' || !Number.isInteger(value)) throw new Error(label + ': GPIO number expected');
     return value;
   }
 
@@ -187,11 +311,12 @@
       ipv4_dhcp: f.ipv4_dhcp.checked,
       ipv6_slaac: f.ipv6_slaac.checked,
       ipv6_gateway: f.ipv6_gateway.value.trim(),
-      gnss_tx_pin: pin('gnss_tx_pin'),
-      gnss_rx_pin: pin('gnss_rx_pin'),
-      gnss_pps_pin: pin('gnss_pps_pin'),
+      gnss_protocol: f.gnss_protocol.value,
+      gnss_tx_pin: pin('gnss_tx_pin', 'GNSS TX pin'),
+      gnss_rx_pin: pin('gnss_rx_pin', 'GNSS RX pin'),
+      gnss_pps_pin: pin('gnss_pps_pin', 'PPS pin'),
       gnss_baud: Number(f.gnss_baud.value),
-      ptp_loopback_pin: pin('ptp_loopback_pin', true),
+      ptp_loopback_pin: pin('ptp_loopback_pin', 'PTP PPS loopback pin', true),
       lcd_enabled: f.lcd_enabled.checked,
       lcd_title: f.lcd_title.value,
       lcd_24_hour: f.lcd_24_hour.checked,
@@ -200,10 +325,11 @@
       time_zone: f.time_zone.value.trim(),
       led_type: f.led_type.value,
       led_brightness: Number(f.led_brightness.value),
-      led_red_pin: pin('led_red_pin'),
-      led_green_pin: pin('led_green_pin'),
-      led_blue_pin: pin('led_blue_pin'),
-      led_ws2812_pin: pin('led_ws2812_pin'),
+      led_red_pin: pin('led_red_pin', 'LED red pin'),
+      led_green_pin: pin('led_green_pin', 'LED green pin'),
+      led_blue_pin: pin('led_blue_pin', 'LED blue pin'),
+      led_ws2812_pin: pin('led_ws2812_pin', 'WS2812 data pin'),
+      led_colors: {},
       mqtt_enabled: f.mqtt_enabled.checked,
       mqtt_uri: f.mqtt_uri.value.trim(),
       mqtt_username: f.mqtt_username.value,
@@ -214,9 +340,14 @@
       ntp_key: f.ntp_key.value,
       ntp_key_clear: f.ntp_key_clear.checked
     };
+    for (const [key, name] of ledStates) {
+      const hex = normaliseHex(colourRows[key].input.value);
+      if (!hex) throw new Error('LED colour "' + name + '": #RRGGBB expected');
+      body.led_colors[key] = hex;
+    }
     if (!body.ipv4_dhcp) {
       const v4 = splitCidr(f.ipv4_cidr.value.trim(), NaN);
-      if (!v4) throw new Error('IPv4 address: a.b.c.d/prefix expected');
+      if (!v4) throw new Error('IPv4 address: a.b.c.d/prefix length expected');
       body.ipv4_address = v4.address;
       body.ipv4_prefix = v4.prefix;
       body.ipv4_gateway = f.ipv4_gateway.value.trim();
@@ -227,7 +358,7 @@
       body.ipv6_prefix = 64;
     } else {
       const v6 = splitCidr(v6text, 64);
-      if (!v6) throw new Error('IPv6 address: address/prefix expected');
+      if (!v6) throw new Error('IPv6 address: address/prefix length expected');
       body.ipv6_address = v6.address;
       body.ipv6_prefix = v6.prefix;
     }
@@ -251,39 +382,51 @@
     return (d > 0 ? d + ' d ' : '') + pad(h) + ':' + pad(m) + ':' + pad(s);
   }
 
-  function renderStatus() {
-    const st = state.status;
-    $('hdr-host').textContent = state.settings.fqdn;
-    $('st-firmware').textContent = st.firmware + ' (' + st.build + ')';
-    $('st-uptime').textContent = duration(st.uptime_s);
-    $('st-utc').textContent = st.utc || 'not set yet';
-    yesNo($('st-time'), st.stratum_one, 'stratum 1, GNSS and PPS locked',
-      st.time_set ? 'not stratum 1 (PPS ' + (st.pps_active ? 'active' : 'missing') + ', GNSS ' + (st.gnss_locked ? 'locked' : 'not locked') + ')' : 'waiting for GNSS time');
-    $('st-gnss').textContent = (st.ublox_receiver ? 'u-blox protocol, baud rate detected automatically' : 'NMEA') +
-      (st.gnss_baud_in_use ? ', ' + st.gnss_baud_in_use + ' baud' : '');
-    $('baud-note').textContent = st.ublox_receiver ? 'Only used with a receiver that is not u-blox compatible (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED 0).' : '';
-    $('st-ipv4').textContent = st.ipv4_address
-      ? st.ipv4_address + '/' + st.ipv4_prefix + ' via ' + (st.ipv4_gateway || '-') + (st.ipv4_dhcp_running ? ' (from DHCP)' : ' (static)')
-      : (st.ipv4_dhcp_running ? 'waiting for DHCP' : 'none');
-    const list = $('st-ipv6');
+  function fillList(id, items, empty, mono) {
+    const list = $(id);
     list.replaceChildren();
-    for (const a of st.ipv6) {
+    if (!items || items.length === 0) {
+      list.textContent = empty;
+      return;
+    }
+    for (const item of items) {
       const li = document.createElement('li');
-      li.textContent = a;
-      li.className = 'mono small';
+      li.textContent = item;
+      if (mono) li.className = 'mono small';
       list.appendChild(li);
     }
-    if (st.ipv6.length === 0) list.textContent = 'none';
-    $('st-dns').textContent = st.dns.length ? st.dns.join(', ') : 'none';
-    $('st-mqtt').textContent = state.settings.mqtt_enabled ? (st.mqtt_connected ? 'connected' : 'not connected') : 'off';
+  }
+
+  function renderStatus() {
+    const st = state.status;
+    setHost(state.settings.fqdn);
+    yesNo($('st-time'), st.stratum_one, 'stratum 1, GNSS and PPS locked',
+      st.time_set ? 'not stratum 1 (PPS ' + (st.pps_active ? 'active' : 'missing') + ', GNSS ' + (st.gnss_locked ? 'locked' : 'not locked') + ')' : 'waiting for the GNSS time');
+    $('st-utc').textContent = st.utc || 'not set yet';
+    $('st-gnss').textContent = (st.ublox_receiver ? 'U-Blox UBX protocol' : 'NMEA standard protocol') +
+      (st.gnss_baud_in_use ? ', ' + st.gnss_baud_in_use + ' baud' : '');
     $('st-auth').textContent = st.ntp_auth_available ? 'on' : (state.settings.ntp_auth_enabled ? 'on, but no usable key' : 'off');
+    $('st-firmware').textContent = st.firmware + ' (' + st.build + ')';
+    $('st-chip').textContent = 'ESP32-P4 ' + st.chip_revision;
+    $('ptp-chip').textContent = st.chip_revision;
+    $('st-uptime').textContent = duration(st.uptime_s);
     $('st-heap').textContent = Math.round(st.free_heap / 1024) + ' kB';
-    $('st-client').textContent = st.client;
+    $('st-mqtt').textContent = state.settings.mqtt_enabled ? (st.mqtt_connected ? 'connected' : 'not connected') : 'off';
     $('st-fingerprint').textContent = state.fingerprint;
+    $('st-ipv4').textContent = st.ipv4_address
+      ? st.ipv4_address + '/' + st.ipv4_prefix + ' via ' + (st.ipv4_gateway || '-') + (st.ipv4_dhcp_running ? ' (DHCP)' : ' (static)')
+      : (st.ipv4_dhcp_running ? 'waiting for DHCP' : 'none');
+    fillList('st-ipv6', st.ipv6, 'none', true);
+    fillList('st-dns', st.dns, 'none', true);
+    fillList('st-dns-v4', st.dns_received_v4, 'none', true);
+    fillList('st-dns-v6', st.dns_received_v6, 'none', true);
+    $('st-client').textContent = st.client;
 
     $('banner-default-pw').hidden = !state.default_password;
     $('banner-oneshot').hidden = !state.oneshot_boot;
+    $('banner-unsaved').hidden = state.oneshot_boot || !state.unsaved_changes;
     renderPending(state.network_pending);
+    updateDependent();
   }
 
   function renderPending(p) {
@@ -323,8 +466,7 @@
     renderStatus();
     if (fill) {
       fillForm(state.settings);
-      const lines = state.allow_list || [];
-      $('allow-list').value = lines.join('\n');
+      $('allow-list').value = (state.allow_list || []).join('\n');
     }
     return true;
   }
@@ -332,6 +474,12 @@
   function startRefresh() {
     clearInterval(refreshTimer);
     refreshTimer = setInterval(() => { if (state) loadState(false); }, 10000);
+  }
+
+  function stopAfterRestart(text) {
+    clearInterval(refreshTimer);
+    clearInterval(countdownTimer);
+    show(text, 'warn');
   }
 
   function setBusy(busy) {
@@ -381,10 +529,9 @@
       return;
     }
     if (path === '/api/apply' && r.data.restart) {
-      show('Applied. The device restarts once with these settings' +
-        (r.data.network_changed ? '; the network settings have to be confirmed within 120 s after the start' : '') +
-        '. Reload this page in about a minute.', 'warn');
-      clearInterval(refreshTimer);
+      stopAfterRestart('Applied. The device restarts once with these settings' +
+        (r.data.network_changed ? '; confirm the network settings within 120 s after the start' : '') +
+        '. Reload this page in about a minute.');
       return;
     }
     if (path === '/api/apply') {
@@ -399,6 +546,15 @@
   $('btn-apply').addEventListener('click', () => submitSettings('/api/apply'));
   $('btn-save').addEventListener('click', () => submitSettings('/api/save'));
 
+  $('btn-reboot').addEventListener('click', async () => {
+    if (!window.confirm('Restart the device now? Applied settings that were not saved are discarded.')) return;
+    setBusy(true);
+    const r = await api('/api/reboot', {});
+    setBusy(false);
+    if (r.status === 200) stopAfterRestart(r.data.message + ' Reload this page in about a minute.');
+    else show(r.data.error || 'Restart failed', 'error');
+  });
+
   $('net-confirm').addEventListener('click', async () => {
     const r = await api('/api/network/confirm', {});
     if (r.status === 200) {
@@ -411,7 +567,8 @@
 
   $('btn-factory').addEventListener('click', () => {
     $('factory-card').hidden = false;
-    $('factory-password').focus();
+    $('factory-card').scrollIntoView({ block: 'center', behavior: 'smooth' });
+    $('factory-password').focus({ preventScroll: true });
   });
   $('factory-cancel').addEventListener('click', () => {
     $('factory-card').hidden = true;
@@ -426,8 +583,7 @@
     $('factory-password').value = '';
     if (r.status === 200) {
       $('factory-card').hidden = true;
-      show(r.data.message + ' Log in with the compiled password after the restart.', 'warn');
-      clearInterval(refreshTimer);
+      stopAfterRestart(r.data.message + ' Log in with the compiled password after the restart.');
     } else {
       show(r.data.error || 'Factory reset failed', 'error');
     }
@@ -470,5 +626,6 @@
   });
 
   // ---- Start ----
+  buildColourTable();
   loadState(true).then((ok) => { if (ok) startRefresh(); else showLogin(); });
 })();

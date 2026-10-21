@@ -138,8 +138,10 @@ static const char *TAG = "main_cpp";
 static const web_settings_t *s_cfg = nullptr;
 static bool s_lcd_on = false;                         // LCD enabled for this boot
 static bool s_mqtt_on = false;                        // MQTT enabled for this boot (fixed after the start)
+static bool s_gnss_ublox = true;                      // GNSS protocol of this boot: true = u-blox UBX, false = NMEA
 static web_led_type_t s_led_type = web_led_type_t::none; // RGB LED module of this boot
 static std::atomic<uint8_t> s_led_brightness_percent{0};
+static std::atomic<uint32_t> s_led_rgb[WEB_LED_STATE_COUNT] = {}; // 0xRRGGBB per LED state (web_led_state_t)
 static std::atomic<bool> s_lcd_24_hour{false};
 static std::atomic<bool> s_lcd_pad_hour{false};
 static std::atomic<bool> s_lcd_show_time_zone{false};
@@ -1169,7 +1171,7 @@ static std::atomic<bool> s_ntp_external_responses_enabled{false};
 static std::atomic<bool> s_ntp_server_ready{false};
 #if RBG_LED_KY_016_MODULE_ENABLED || RBG_LED_WS2812_MODULE_ENABLED
 static std::atomic<bool> s_gnss_pps_startup_qualification_in_progress{false};
-static void control_RGB_LED(RGB_LED_Colour Colour, bool enabled);
+static void control_RGB_LED(uint32_t rgb_colour, bool enabled);
 #endif
 #if RBG_LED_WS2812_MODULE_ENABLED
 static led_strip_handle_t s_ws2812_strip = nullptr;
@@ -4020,8 +4022,7 @@ static bool parse_nmea_rmc_sentence(const char *sentence, nmea_rmc_time_t *time_
     return true;
 }
 
-#if UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
-#else
+// NMEA satellite count (GSV sentences), used with the NMEA standard protocol
 static constexpr size_t NMEA_GSV_GROUP_LIMIT = 8;
 static constexpr uint32_t NMEA_GSV_GROUP_EXPIRY_MS = 10000UL;
 
@@ -4198,7 +4199,6 @@ static void process_nmea_gsv_sentence(const char *sentence)
     if (group->published)
         publish_nmea_gsv_satellite_count(now_ms);
 }
-#endif
 
 static bool wait_for_nmea_rmc_time(nmea_rmc_time_t *time_data, uint32_t timeout_ms)
 {
@@ -4233,10 +4233,8 @@ static bool wait_for_nmea_rmc_time(nmea_rmc_time_t *time_data, uint32_t timeout_
             if (ch == '\r' || ch == '\n')
             {
                 sentence[index] = '\0';
-#if UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
-#else
-                process_nmea_gsv_sentence(sentence);
-#endif
+                if (!s_gnss_ublox)
+                    process_nmea_gsv_sentence(sentence);
                 if (parse_nmea_rmc_sentence(sentence, time_data))
                     return true;
 
@@ -4670,13 +4668,13 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
 
 static bool configure_gnss_outputs(bool *uart1_output_set_result)
 {
-#if UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
-    bool i2c_output_disabled = s_gnss.setI2COutput(0);
-    bool uart2_output_disabled = s_gnss.setUART2Output(0);
-#else
     bool i2c_output_disabled = true;
     bool uart2_output_disabled = true;
-#endif
+    if (s_gnss_ublox)
+    {
+        i2c_output_disabled = s_gnss.setI2COutput(0);
+        uart2_output_disabled = s_gnss.setUART2Output(0);
+    }
 
     bool uart1_output_set = s_gnss.setUART1Output(COM_TYPE_UBX | COM_TYPE_NMEA);
 
@@ -6378,10 +6376,10 @@ static bool wait_for_gnss_startup_qualification()
     }
 }
 
-static void setup_gnss()
+// u-blox (UBX) receiver: the baud rate is found by scanning, raised to the highest supported rate and stored with
+// the identity of the receiver in NVS (gnss_state), so later starts take the fast path
+static void setup_gnss_ublox_receiver()
 {
-
-#if UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
     static constexpr int maxAttemptsToInitializeGNSS = 10;
     gnss_nvs_data_t stored_gnss_data{};
     bool gnss_nvs_load_ok = load_gnss_nvs_data(&stored_gnss_data);
@@ -6397,25 +6395,16 @@ static void setup_gnss()
     }
     bool gnss_nvs_should_be_saved = first_time_initial_setup;
     uint32_t highest_candidate_baud = get_highest_candidate_gnss_baud();
-#else
-    bool first_time_initial_setup = false;
-    uint32_t highest_candidate_baud = s_cfg->gnss_baud;
-#endif
 
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "Startup mode: %s", first_time_initial_setup ? "First time initial setup" : "Not first time initial setup");
 #endif
 
     uint32_t startup_target_baud = highest_candidate_baud;
-
-#if UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
     if (has_complete_gnss_nvs_data)
         startup_target_baud = stored_gnss_data.max_baud;
 
     bool known_module_fast_path = has_complete_gnss_nvs_data;
-#else
-    bool known_module_fast_path = false;
-#endif
 
 #if DEBUG_ENABLED
     ESP_LOGI(TAG,
@@ -6423,8 +6412,6 @@ static void setup_gnss()
              known_module_fast_path ? "known module fast path" : "first-time scan path",
              static_cast<unsigned long>(startup_target_baud));
 #endif
-
-#if UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
 
     bool gnss_communication_confirmed = false;
     uint32_t initial_working_baud = 0;
@@ -6524,8 +6511,38 @@ static void setup_gnss()
 
     s_gnss_is_max_m10s = strstr(current_identity.value, "MAX-M10S") != nullptr;
 
-#else
 
+#if DEBUG_ENABLED
+    ESP_LOGI(TAG, "GNSS module profile: %s", s_gnss_is_max_m10s ? "MAX-M10S" : "generic/fallback");
+
+    ESP_LOGI(TAG, "GNSS startup mode: baud=%lu, initialization=%s",
+             static_cast<unsigned long>(s_detected_gnss_baud),
+             s_gnss_required_assume_success ? "assume_success" : "confirmed");
+#endif
+
+    if (gnss_nvs_should_be_saved && s_detected_gnss_baud > 0)
+    {
+        bool save_ok = save_gnss_nvs_data(current_identity, initial_working_baud, s_detected_gnss_baud);
+#if DEBUG_ENABLED
+        ESP_LOGI(TAG,
+                 "GNSS identity persistence: type=%s, value=%s, initial_baud=%lu, max_baud=%lu, save=%s",
+                 current_identity.type,
+                 current_identity.value,
+                 static_cast<unsigned long>(initial_working_baud),
+                 static_cast<unsigned long>(s_detected_gnss_baud),
+                 save_ok ? "ok" : "failed");
+#else
+        (void)save_ok;
+#endif
+    }
+    (void)first_time_initial_setup; // only read by the debug output
+    (void)startup_target_baud;
+}
+
+// Receiver with the NMEA standard protocol only: fixed baud rate of the settings, NMEA processing
+static void setup_gnss_nmea_receiver()
+{
+    const uint32_t highest_candidate_baud = s_cfg->gnss_baud;
     s_gnss_target_baud = highest_candidate_baud;
     s_detected_gnss_baud = highest_candidate_baud;
     s_gnss_is_max_m10s = false;
@@ -6546,34 +6563,23 @@ static void setup_gnss()
              static_cast<unsigned long>(baud),
              assume_success ? "true" : "false",
              begin_result ? "success" : "failed");
-#endif
-
+#else
+    (void)begin_result;
 #endif
 
 #if DEBUG_ENABLED
-    ESP_LOGI(TAG, "GNSS module profile: %s", s_gnss_is_max_m10s ? "MAX-M10S" : "generic/fallback");
-
-    ESP_LOGI(TAG, "GNSS startup mode: baud=%lu, initialization=%s",
-             static_cast<unsigned long>(s_detected_gnss_baud),
-             s_gnss_required_assume_success ? "assume_success" : "confirmed");
+    ESP_LOGI(TAG, "GNSS module profile: generic/fallback (NMEA)");
+    ESP_LOGI(TAG, "GNSS startup mode: baud=%lu", static_cast<unsigned long>(s_detected_gnss_baud));
 #endif
+}
 
-#if UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
-    if (gnss_nvs_should_be_saved && s_detected_gnss_baud > 0)
-    {
-        bool save_ok = save_gnss_nvs_data(current_identity, initial_working_baud, s_detected_gnss_baud);
-#if DEBUG_ENABLED
-        ESP_LOGI(TAG,
-                 "GNSS identity persistence: type=%s, value=%s, initial_baud=%lu, max_baud=%lu, save=%s",
-                 current_identity.type,
-                 current_identity.value,
-                 static_cast<unsigned long>(initial_working_baud),
-                 static_cast<unsigned long>(s_detected_gnss_baud),
-                 save_ok ? "ok" : "failed");
-#endif
-    }
-
-#endif
+static void setup_gnss()
+{
+    // GNSS protocol of the settings (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED is the default)
+    if (s_gnss_ublox)
+        setup_gnss_ublox_receiver();
+    else
+        setup_gnss_nmea_receiver();
 
     bool uart1_output_set = false;
     configure_gnss_outputs(&uart1_output_set);
@@ -6583,11 +6589,7 @@ static void setup_gnss()
         ESP_LOGW(TAG, "GNSS UART1 output configuration failed. Continuing with the module's current output settings.");
 #endif
 
-#if UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
-    s_use_nmea_fallback = s_gnss_required_assume_success || !uart1_output_set;
-#else
-    s_use_nmea_fallback = true;
-#endif
+    s_use_nmea_fallback = s_gnss_ublox ? (s_gnss_required_assume_success || !uart1_output_set) : true;
 
     if (s_use_nmea_fallback && !allowFallbackProcessing)
     {
@@ -7768,12 +7770,7 @@ static void arduino_eth_event_handler(arduino_event_id_t event, arduino_event_in
             break;
         s_ipv4_ever_acquired.store(true, std::memory_order_relaxed);
         set_network_ipv4_address(info.got_ip.ip_info.ip);
-        {
-            // A DHCP lease replaces the DNS servers: the servers of the settings (if any) take precedence
-            char dns_servers[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
-            web_settings_get_running_dns(dns_servers);
-            web_net_reapply_dns(ETH.netif(), dns_servers);
-        }
+        web_net_dns_check_now(); // the lease wrote its DNS servers: let the DNS manager note and order them
 #if MQTT_ENABLED
         if (s_mqtt_on)
         {
@@ -7953,6 +7950,7 @@ static void setup_ethernet()
 
     // Network settings of this boot (web settings, defaults from ESP32TimeServerSettings.h): IPv4 DHCP or static,
     // IPv6 SLAAC and an optional static IPv6 address with gateway, DNS servers
+    web_net_dns_start();
     if (!web_net_apply(ETH.netif(), *s_cfg, nullptr))
         ESP_LOGE(TAG, "Some network settings could not be applied");
     const bool static_ip_applied = !s_cfg->ipv4_dhcp;
@@ -8087,6 +8085,7 @@ void setup_NVS_storage(void)
     s_cfg = &web_settings_boot();
     s_lcd_on = s_cfg->lcd_enabled;
     s_mqtt_on = s_cfg->mqtt_enabled;
+    s_gnss_ublox = s_cfg->gnss_ublox;
     s_led_type = s_cfg->led_type;
     web_settings_hostname(*s_cfg, s_hostname, sizeof(s_hostname));
     s_live_settings_mutex = xSemaphoreCreateMutex();
@@ -8166,7 +8165,7 @@ static void setup_the_RGB_LED()
         s_led_type = web_led_type_t::none;
         return;
     }
-    control_RGB_LED(LED_startup, true);
+    control_RGB_LED(s_led_rgb[static_cast<size_t>(web_led_state_t::startup)].load(std::memory_order_relaxed), true);
 }
 
 void setup_the_LCD(void)
@@ -10053,47 +10052,12 @@ static int get_required_top_line_message()
 }
 
 #if RBG_LED_KY_016_MODULE_ENABLED || RBG_LED_WS2812_MODULE_ENABLED
-static void control_RGB_LED(RGB_LED_Colour Colour, bool enabled)
+// rgb = 0xRRGGBB (colour of the settings for the current state), enabled = false: LED dark (flashing)
+static void control_RGB_LED(uint32_t rgb_colour, bool enabled)
 {
-    uint8_t red_duty = 0;
-    uint8_t green_duty = 0;
-    uint8_t blue_duty = 0;
-
-    if (enabled)
-    {
-        switch (Colour)
-        {
-        case RGB_LED_Colour::red:
-            red_duty = 255;
-            break;
-        case RGB_LED_Colour::green:
-            green_duty = 255;
-            break;
-        case RGB_LED_Colour::blue:
-            blue_duty = 255;
-            break;
-        case RGB_LED_Colour::yellow:
-            red_duty = 255;
-            green_duty = 255;
-            break;
-        case RGB_LED_Colour::white:
-            red_duty = 255;
-            green_duty = 255;
-            blue_duty = 255;
-            break;
-        case RGB_LED_Colour::orange:
-            red_duty = 255;
-            green_duty = 165; // 128
-            break;
-        case RGB_LED_Colour::pink:
-            red_duty = 255;
-            green_duty = 192;
-            blue_duty = 203;
-            break;
-        case RGB_LED_Colour::off:
-            break;
-        }
-    }
+    uint8_t red_duty = enabled ? static_cast<uint8_t>(rgb_colour >> 16) : 0;
+    uint8_t green_duty = enabled ? static_cast<uint8_t>(rgb_colour >> 8) : 0;
+    uint8_t blue_duty = enabled ? static_cast<uint8_t>(rgb_colour) : 0;
 
     // Brightness of the settings (live), applied to both module types
     const uint32_t brightness = (255u * s_led_brightness_percent.load(std::memory_order_relaxed) + 50u) / 100u;
@@ -10126,7 +10090,7 @@ static void control_RGB_LED(RGB_LED_Colour Colour, bool enabled)
 
 static void update_RGB_LED()
 {
-    RGB_LED_Colour Colour;
+    web_led_state_t state;
     bool flashing = false;
 
     if (s_open_for_business_message_written.load(std::memory_order_acquire))
@@ -10135,11 +10099,11 @@ static void update_RGB_LED()
         switch (get_required_top_line_message())
         {
         case 0: // The server is operating normally
-            Colour = LED_normal;
+            state = web_led_state_t::normal;
             break;
 
         case 3: // There are queued MQTT items
-            Colour = LED_warning;
+            state = web_led_state_t::warning;
             flashing = true;
             break;
 
@@ -10147,11 +10111,11 @@ static void update_RGB_LED()
         case 6: // GNSS missing or invalid
         case 7: // GNSS sync stale
         case 8: // GNSS has lost its satellite lock
-            Colour = LED_warning;
+            state = web_led_state_t::warning;
             break;
 
         case 11: // Not connected to the MQTT broker
-            Colour = LED_critical;
+            state = web_led_state_t::critical;
             flashing = true;
             break;
 
@@ -10160,40 +10124,41 @@ static void update_RGB_LED()
         case 4:  // Sanity check mismatch
         case 9:  // Communication failure with the GNSS receiver
         case 14: // Transport layer stalled
-            Colour = LED_critical;
+            state = web_led_state_t::critical;
             break;
 
         case 12: // Load shedding active
-            Colour = LED_alert;
+            state = web_led_state_t::alert;
             flashing = true;
             break;
 
         case 13: // No usable IP address
-            Colour = LED_alert;
+            state = web_led_state_t::alert;
             break;
 
         case 98: // The server is setting its time
-            Colour = LED_sync;
+            state = web_led_state_t::sync;
             break;
 
         case 99: // The button is being pressed
-            Colour = LED_button_push;
+            state = web_led_state_t::button;
             break;
 
         default: // should not get here
-            Colour = LED_normal;
+            state = web_led_state_t::normal;
             break;
         }
     }
     else
     {
-        Colour = LED_startup;
+        state = web_led_state_t::startup;
         flashing = s_gnss_pps_startup_qualification_in_progress.load(std::memory_order_acquire) ||
                    s_pps_discipline_active.load();
     }
 
     const bool enabled = !flashing || ((esp_timer_get_time() / 1000000LL) % 2 == 0);
-    control_RGB_LED(Colour, enabled);
+    // Colours of the settings (live)
+    control_RGB_LED(s_led_rgb[static_cast<size_t>(state)].load(std::memory_order_relaxed), enabled);
 }
 #endif
 
@@ -10422,6 +10387,8 @@ void app_apply_live_settings(const web_settings_t &settings)
     s_lcd_pad_hour.store(settings.lcd_pad_hour, std::memory_order_relaxed);
     s_lcd_show_time_zone.store(settings.lcd_show_time_zone, std::memory_order_relaxed);
     s_led_brightness_percent.store(settings.led_brightness_percent, std::memory_order_relaxed);
+    for (size_t state = 0; state < WEB_LED_STATE_COUNT; ++state)
+        s_led_rgb[state].store(settings.led_rgb[state] & 0xFFFFFFu, std::memory_order_relaxed);
     apply_timezone_settings();
     ntp_auth_configure(settings.ntp_auth_enabled, settings.ntp_key_override, settings.ntp_key_id, settings.ntp_key);
 }
@@ -10464,11 +10431,16 @@ void app_get_status(web_app_status_t &status)
     const app_metadata_t *meta = get_app_metadata();
     snprintf(status.firmware_version, sizeof(status.firmware_version), "v%s", meta->version);
     snprintf(status.build, sizeof(status.build), "%s %s %s", meta->build_date, meta->build_time, meta->git_sha);
+    esp_chip_info_t chip_info{};
+    esp_chip_info(&chip_info);
+    snprintf(status.chip_revision, sizeof(status.chip_revision), "v%u.%u",
+             static_cast<unsigned int>(chip_info.revision / 100) % 100u, static_cast<unsigned int>(chip_info.revision % 100));
+    status.ptp_loopback_supported = chip_info.revision >= 300;
     status.time_set = s_time_has_been_set.load(std::memory_order_acquire);
     status.pps_active = s_pps_discipline_active.load(std::memory_order_acquire);
     status.gnss_locked = s_gnss_locked.load(std::memory_order_acquire);
     status.stratum_one = get_ntp_reply_status().stratum == 1;
-    status.ublox_receiver = UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED != 0;
+    status.ublox_receiver = s_gnss_ublox;
     status.gnss_baud_in_use = s_detected_gnss_baud;
     status.lcd_present = s_lcd_ready;
     status.led_active = s_led_type != web_led_type_t::none;

@@ -18,6 +18,8 @@ struct web_app_status_t
 {
     char firmware_version[24];
     char build[48];
+    char chip_revision[8];        // e.g. "v3.2"
+    bool ptp_loopback_supported;  // chip revision 3.0 or newer (PTP PPS loopback)
     bool time_set;
     bool pps_active;
     bool gnss_locked;

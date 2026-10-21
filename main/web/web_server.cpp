@@ -14,6 +14,7 @@
 #include "web_tls.h"
 
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -345,6 +346,9 @@ namespace
     }
 
     // ---- JSON <-> settings ----
+    // Names of the LED states in the JSON (order of web_led_state_t)
+    const char *const s_led_state_names[WEB_LED_STATE_COUNT] = {"startup", "normal", "sync", "warning", "alert", "critical", "button"};
+
     void settings_to_json(cJSON *object, const web_settings_t &s)
     {
         cJSON_AddStringToObject(object, "fqdn", s.fqdn);
@@ -360,6 +364,7 @@ namespace
         for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
             if (s.dns[i][0] != '\0')
                 cJSON_AddItemToArray(dns, cJSON_CreateString(s.dns[i]));
+        cJSON_AddStringToObject(object, "gnss_protocol", s.gnss_ublox ? "ubx" : "nmea");
         cJSON_AddNumberToObject(object, "gnss_tx_pin", s.gnss_tx_pin);
         cJSON_AddNumberToObject(object, "gnss_rx_pin", s.gnss_rx_pin);
         cJSON_AddNumberToObject(object, "gnss_pps_pin", s.gnss_pps_pin);
@@ -377,6 +382,13 @@ namespace
         cJSON_AddNumberToObject(object, "led_green_pin", s.led_green_pin);
         cJSON_AddNumberToObject(object, "led_blue_pin", s.led_blue_pin);
         cJSON_AddNumberToObject(object, "led_ws2812_pin", s.led_ws2812_pin);
+        cJSON *colours = cJSON_AddObjectToObject(object, "led_colors");
+        for (size_t i = 0; i < WEB_LED_STATE_COUNT; ++i)
+        {
+            char hex[8];
+            snprintf(hex, sizeof(hex), "#%06lX", static_cast<unsigned long>(s.led_rgb[i] & 0xFFFFFFu));
+            cJSON_AddStringToObject(colours, s_led_state_names[i], hex);
+        }
         cJSON_AddBoolToObject(object, "mqtt_enabled", s.mqtt_enabled);
         cJSON_AddStringToObject(object, "mqtt_uri", s.mqtt_uri);
         cJSON_AddStringToObject(object, "mqtt_username", s.mqtt_username);
@@ -467,6 +479,46 @@ namespace
                   json_int(root, "ntp_key_id", s.ntp_key_id, 1, 65535, err, err_size);
         if (!ok)
             return false;
+
+        cJSON *protocol = cJSON_GetObjectItemCaseSensitive(root, "gnss_protocol");
+        if (protocol != nullptr)
+        {
+            if (cJSON_IsString(protocol) && strcmp(protocol->valuestring, "ubx") == 0)
+                s.gnss_ublox = true;
+            else if (cJSON_IsString(protocol) && strcmp(protocol->valuestring, "nmea") == 0)
+                s.gnss_ublox = false;
+            else
+            {
+                snprintf(err, err_size, "Field gnss_protocol: ubx or nmea expected");
+                return false;
+            }
+        }
+
+        cJSON *colours = cJSON_GetObjectItemCaseSensitive(root, "led_colors");
+        if (colours != nullptr)
+        {
+            if (!cJSON_IsObject(colours))
+            {
+                snprintf(err, err_size, "Field led_colors: object expected");
+                return false;
+            }
+            for (size_t i = 0; i < WEB_LED_STATE_COUNT; ++i)
+            {
+                cJSON *colour = cJSON_GetObjectItemCaseSensitive(colours, s_led_state_names[i]);
+                if (colour == nullptr)
+                    continue;
+                const char *text = cJSON_IsString(colour) ? colour->valuestring : nullptr;
+                bool valid = text != nullptr && text[0] == '#' && strlen(text) == 7;
+                for (size_t k = 1; valid && k < 7; ++k)
+                    valid = isxdigit(static_cast<unsigned char>(text[k])) != 0;
+                if (!valid)
+                {
+                    snprintf(err, err_size, "LED colour %s: #RRGGBB expected", s_led_state_names[i]);
+                    return false;
+                }
+                s.led_rgb[i] = static_cast<uint32_t>(strtoul(text + 1, nullptr, 16));
+            }
+        }
 
         cJSON *led = cJSON_GetObjectItemCaseSensitive(root, "led_type");
         if (led != nullptr)
@@ -739,7 +791,8 @@ namespace
             cJSON_AddNullToObject(root, "saved");
         bool network_confirm = false;
         cJSON_AddBoolToObject(root, "oneshot_boot", web_settings_boot_was_oneshot(&network_confirm));
-        cJSON_AddBoolToObject(root, "running_equals_saved", saved && web_settings_equal(sets->running, sets->saved));
+        // Settings in use differ from what the next start would load (saved settings, else the compiled defaults)
+        cJSON_AddBoolToObject(root, "unsaved_changes", !web_settings_equal(sets->running, saved ? sets->saved : sets->defaults));
         add_confirm_info(root);
 
         cJSON *allow = cJSON_AddArrayToObject(root, "allow_list");
@@ -769,8 +822,16 @@ namespace
         for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
             if (sets->net.dns[i][0] != '\0')
                 cJSON_AddItemToArray(dns, cJSON_CreateString(sets->net.dns[i]));
+        cJSON *dns_v4 = cJSON_AddArrayToObject(status, "dns_received_v4");
+        for (size_t i = 0; i < sets->net.dns_received_v4_count; ++i)
+            cJSON_AddItemToArray(dns_v4, cJSON_CreateString(sets->net.dns_received_v4[i]));
+        cJSON *dns_v6 = cJSON_AddArrayToObject(status, "dns_received_v6");
+        for (size_t i = 0; i < sets->net.dns_received_v6_count; ++i)
+            cJSON_AddItemToArray(dns_v6, cJSON_CreateString(sets->net.dns_received_v6[i]));
         cJSON_AddStringToObject(status, "firmware", sets->app.firmware_version);
         cJSON_AddStringToObject(status, "build", sets->app.build);
+        cJSON_AddStringToObject(status, "chip_revision", sets->app.chip_revision);
+        cJSON_AddBoolToObject(status, "ptp_loopback_supported", sets->app.ptp_loopback_supported);
         cJSON_AddNumberToObject(status, "uptime_s", static_cast<double>(esp_timer_get_time() / 1000000LL));
         char now_text[32] = "";
         const time_t now = time(nullptr);
@@ -1013,6 +1074,27 @@ namespace
         return send_ok(req, "Password changed and stored. All other sessions were closed.");
     }
 
+    esp_err_t handle_reboot(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        ESP_LOGW(TAG, "Web admin: restart requested");
+        const esp_err_t err = send_ok(req, "The device restarts now. Applied settings that were not saved are discarded.");
+        schedule_restart("web_admin_reboot");
+        return err;
+    }
+
+    // Without login: only the host name, for the title of the login page
+    esp_err_t handle_info(httpd_req_t *req)
+    {
+        char hostname[WEB_HOSTNAME_MAX_LEN + 1];
+        web_settings_hostname(web_settings_boot(), hostname, sizeof(hostname));
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "hostname", hostname);
+        return send_json(req, "200 OK", root);
+    }
+
     esp_err_t handle_allow_list(httpd_req_t *req)
     {
         char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
@@ -1075,6 +1157,8 @@ namespace
             {"/api/factory-reset", HTTP_POST, handle_factory_reset},
             {"/api/password", HTTP_POST, handle_password},
             {"/api/allow-list", HTTP_POST, handle_allow_list},
+            {"/api/reboot", HTTP_POST, handle_reboot},
+            {"/api/info", HTTP_GET, handle_info},
         };
         for (const route_t &route : routes)
         {

@@ -35,6 +35,19 @@ enum class web_led_type_t : uint8_t
     ws2812 = 2,
 };
 
+// States shown by the RGB LED; each has a colour in the settings (LED_startup ... LED_button_push)
+enum class web_led_state_t : uint8_t
+{
+    startup = 0,
+    normal,
+    sync,
+    warning,
+    alert,
+    critical,
+    button,
+};
+static constexpr size_t WEB_LED_STATE_COUNT = 7;
+
 struct web_settings_t
 {
     // Network
@@ -50,6 +63,7 @@ struct web_settings_t
     char dns[WEB_DNS_SERVER_COUNT][WEB_IPV6_TEXT_SIZE];
 
     // GNSS and PPS
+    bool gnss_ublox; // true = u-blox UBX protocol (baud rate found automatically), false = NMEA standard protocol
     int8_t gnss_tx_pin;
     int8_t gnss_rx_pin;
     int8_t gnss_pps_pin;
@@ -71,6 +85,7 @@ struct web_settings_t
     int8_t led_green_pin;
     int8_t led_blue_pin;
     int8_t led_ws2812_pin;
+    uint32_t led_rgb[WEB_LED_STATE_COUNT]; // colour per state, 0xRRGGBB
 
     // MQTT
     bool mqtt_enabled;
@@ -102,8 +117,6 @@ bool web_settings_boot_was_oneshot(bool *network_confirm_required);
 // Settings currently in use (live settings may have been changed by "Apply" since the boot). Thread safe.
 void web_settings_get_running(web_settings_t &out);
 void web_settings_set_running(const web_settings_t &in);
-// Only the DNS servers of the running settings (small copy for tasks with a small stack)
-void web_settings_get_running_dns(char (*out)[WEB_IPV6_TEXT_SIZE]);
 
 // Settings saved in NVS. Returns false if nothing is saved (or the saved data is unusable).
 bool web_settings_get_saved(web_settings_t &out);
