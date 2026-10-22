@@ -891,6 +891,20 @@ namespace
         cJSON *root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "csrf", csrf);
         cJSON_AddBoolToObject(root, "default_password", web_auth_default_password_active());
+        // OTE password still the compiled OTEPassword of ESP32TimeServerSettingsSecrets.h (only the flag is sent).
+        // Copied into zeroed buffers first: bytes after the terminating NUL must not count.
+        {
+            char current[WEB_OTE_PASSWORD_SIZE] = {};
+            char compiled[WEB_OTE_PASSWORD_SIZE] = {};
+            snprintf(current, sizeof(current), "%s", sets->running.ote_password);
+            snprintf(compiled, sizeof(compiled), "%s", sets->defaults.ote_password);
+            const bool is_default = current[0] != ' ' &&
+                                    web_constant_time_equal(reinterpret_cast<const uint8_t *>(current),
+                                                            reinterpret_cast<const uint8_t *>(compiled), sizeof(current));
+            memset(current, 0, sizeof(current));
+            memset(compiled, 0, sizeof(compiled));
+            cJSON_AddBoolToObject(root, "ote_password_default", is_default);
+        }
         cJSON_AddStringToObject(root, "fingerprint", s_identity.fingerprint);
         settings_to_json(cJSON_AddObjectToObject(root, "settings"), sets->running);
         settings_to_json(cJSON_AddObjectToObject(root, "defaults"), sets->defaults);

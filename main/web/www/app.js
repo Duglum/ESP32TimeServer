@@ -436,6 +436,8 @@
     $('ntp-key-add').disabled = compiledOnly || ntpKeyRows.length >= 8;
     syncPasswordEyes();
     if (state) {
+      // Updates switched on while the OTE password is still the published compiled default (and no new one is typed)
+      $('ote-default-pw-warning').hidden = !(f.ote_enabled.checked && state.ote_password_default && f.ote_password.value === '');
       $('ptp-chip-warning').hidden = state.status.ptp_loopback_supported || f.ptp_loopback_pin.value.trim() === '';
     }
   }
