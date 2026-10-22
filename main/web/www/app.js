@@ -43,10 +43,12 @@
   });
 
   // ---- Header ----
+  // First line: the FQDN when it has a domain, otherwise the host name; the tab title keeps the short host name
   function setHost(fqdn) {
-    const host = String(fqdn || '').split('.')[0] || 'ESP32 Time Server';
-    $('hdr-host').textContent = host;
-    $('hdr-sub').textContent = fqdn && fqdn.indexOf('.') > 0 ? fqdn + ' · ESP32 Time Server' : 'ESP32 Time Server';
+    const name = String(fqdn || '').replace(/\.$/, '');
+    const host = name.split('.')[0] || 'ESP32 Time Server';
+    $('hdr-host').textContent = name.indexOf('.') > 0 ? name : host;
+    $('hdr-sub').textContent = 'ESP32 Time Server';
     document.title = host + ' – ESP32 Time Server';
   }
 
