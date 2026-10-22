@@ -120,6 +120,9 @@ main { max-width: 1240px; margin: 1.25rem auto; padding: 0 1rem 6rem; }
 label { display: flex; flex-direction: column; gap: .3rem; font-weight: 500; font-size: .9rem; }
 label .lt { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
 label.switch { flex-direction: row; align-items: center; gap: .55rem; font-weight: 500; }
+/* Check box with a description below it, indented to the label text (box 1.1rem + gap .55rem) */
+.switch-block { display: flex; flex-direction: column; gap: .25rem; }
+.switch-block > small.note { padding-left: 1.65rem; }
 
 input[type="text"], input[type="password"], input[type="number"], select, textarea {
   font: inherit;

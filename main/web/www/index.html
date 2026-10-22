@@ -169,7 +169,10 @@
       <section class="card">
         <h2>LCD and time zone</h2>
         <div class="grid">
-          <label class="switch span2"><input type="checkbox" name="lcd_enabled"> LCD (20 × 4, I2C on GPIO 7 / 8) <span class="badge restart">restart</span></label>
+          <div class="span2 switch-block">
+            <label class="switch"><input type="checkbox" name="lcd_enabled"> Enable LCD Display <span class="badge restart">restart</span></label>
+            <small class="note">20 × 4 character LCD (HD44780) with a PCF8574 I2C backpack: SDA on GPIO 8, SCL on GPIO 7, I2C address 0x27 or 0x3F (found automatically).</small>
+          </div>
           <label><span class="lt">Top line title (at most 17 characters)</span><input type="text" name="lcd_title" maxlength="17"><small class="def" data-for="lcd_title"></small></label>
           <label><span class="lt">Time zone (POSIX TZ string)</span><input type="text" name="time_zone" maxlength="63" spellcheck="false" placeholder="CET-1CEST,M3.5.0,M10.5.0/3"><small class="def" data-for="time_zone"></small></label>
           <label class="switch"><input type="checkbox" name="lcd_24_hour"> 24-hour clock</label>
