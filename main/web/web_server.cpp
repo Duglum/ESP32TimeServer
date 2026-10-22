@@ -1317,13 +1317,16 @@ namespace
         return result.body_consumed ? ESP_OK : ESP_FAIL;
     }
 
-    // Without login: only the host name, for the title of the login page
+    // Without login: only the names, for the header of the login page (the FQDN is also in the certificate, which
+    // every client gets before the login)
     esp_err_t handle_info(httpd_req_t *req)
     {
         char hostname[WEB_HOSTNAME_MAX_LEN + 1];
-        web_settings_hostname(web_settings_boot(), hostname, sizeof(hostname));
+        const web_settings_t &boot = web_settings_boot();
+        web_settings_hostname(boot, hostname, sizeof(hostname));
         cJSON *root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "hostname", hostname);
+        cJSON_AddStringToObject(root, "fqdn", boot.fqdn);
         return send_json(req, "200 OK", root);
     }
 

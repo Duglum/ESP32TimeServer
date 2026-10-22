@@ -91,7 +91,7 @@
     for (const id of ['banner-default-pw', 'banner-network', 'banner-oneshot', 'banner-unsaved']) $(id).hidden = true;
     $('login-card').hidden = false;
     $('login-password').focus();
-    api('/api/info').then((r) => { if (r.status === 200) setHost(r.data.hostname); });
+    api('/api/info').then((r) => { if (r.status === 200) setHost(r.data.fqdn || r.data.hostname); });
   }
 
   // ---- LED colours ----
