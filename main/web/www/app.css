@@ -97,6 +97,13 @@ h2 + h3.sub-heading { margin-top: 0; }
 .section-gap { margin-top: 1rem; }
 .hint.first + .grid { margin-top: .75rem; }
 .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* Explanation block of a card (Firmware Update) */
+.help { color: var(--muted); font-size: .84rem; line-height: 1.5; margin: 0 0 .5rem; }
+.help p { margin: 0 0 .55rem; }
+.help ol { margin: 0 0 .55rem; padding-left: 1.3rem; }
+.help li { margin-bottom: .35rem; }
+.help strong, .help em { color: var(--text); }
+.help code { overflow-wrap: anywhere; }
 .callout { margin: .25rem 0 .75rem; padding: .55rem .75rem; border-left: 3px solid var(--warn); border-radius: 6px; background: var(--warn-bg); color: var(--warn); font-size: .85rem; }
 .sub { margin: 0; color: var(--muted); font-size: .82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .actions { display: flex; gap: .5rem; flex: none; }
