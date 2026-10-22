@@ -1,3 +1,6 @@
+# remove comment below to compile for boards with chip revision older than 3.0. Untested if current release works with them.
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+
 # Required to build on ESP-IDF v5.5.3+
 CONFIG_FREERTOS_HZ=1000
 
