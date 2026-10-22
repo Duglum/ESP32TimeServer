@@ -1235,6 +1235,36 @@ namespace
         return err;
     }
 
+    // Restart once with Over The Ethernet updates on: the settings in use with ote_enabled = true are written as a
+    // one-shot set. The restart after that start (e.g. the one after an upload) returns to the saved settings.
+    esp_err_t handle_ote_once(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        if (s_pending->active)
+            return send_error(req, "409 Conflict", "Confirm or wait for the pending network change first");
+        web_settings_t *settings = new (std::nothrow) web_settings_t{}; // about 1 kB: not on the server task stack
+        if (settings == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        web_settings_get_running(*settings);
+        settings->ote_enabled = true;
+        char err[128] = "";
+        if (!web_settings_validate(*settings, err, sizeof(err)))
+        {
+            delete settings;
+            return send_error(req, "400 Bad Request", err);
+        }
+        const esp_err_t write_err = web_settings_save_oneshot(*settings, false);
+        delete settings;
+        if (write_err != ESP_OK)
+            return send_error(req, "500 Internal Server Error", "One-shot settings could not be written");
+        ESP_LOGW(TAG, "Web admin: restart with Over The Ethernet updates on until the next restart");
+        const esp_err_t send_err = send_ok(req, "The device restarts now and accepts firmware updates until its next restart.");
+        schedule_restart("web_admin_ote_once");
+        return send_err;
+    }
+
     // Firmware upload (Over The Ethernet update, see web_ote.h). Two ways to authenticate:
     //  - the page: session cookie, same origin and the CSRF header, as every other state changing request
     //  - scripts (tools/ote_upload.py): "Authorization: Bearer <OTE password>", inside the TLS connection;
@@ -1394,6 +1424,7 @@ namespace
             {"/api/allow-list", HTTP_POST, handle_allow_list},
             {"/api/reboot", HTTP_POST, handle_reboot},
             {"/api/ote", HTTP_POST, handle_ote},
+            {"/api/ote/once", HTTP_POST, handle_ote_once},
             {"/api/info", HTTP_GET, handle_info},
         };
         for (const route_t &route : routes)
@@ -1454,7 +1485,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 16;
+        config.max_uri_handlers = 20; // 17 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

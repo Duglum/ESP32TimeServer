@@ -825,6 +825,19 @@
   $('btn-apply').addEventListener('click', () => submitSettings('/api/apply'));
   $('btn-save').addEventListener('click', () => submitSettings('/api/save'));
 
+  $('ote-once').addEventListener('click', async () => {
+    let question = 'Restart the device now with firmware updates enabled until its next restart?';
+    if (state.ote_password_default) {
+      question += '\n\nThe OTE password is still the default from ESP32TimeServerSettingsSecrets.h, which is published with the source code: tools/ote_upload.py accepts it until the next restart.';
+    }
+    if (!window.confirm(question)) return;
+    setBusy(true);
+    const r = await api('/api/ote/once', {});
+    setBusy(false);
+    if (r.status === 200) stopAfterRestart(r.data.message + ' Reload this page and log in again in about a minute.');
+    else show(r.data.error || 'Restart failed', 'error');
+  });
+
   $('btn-reboot').addEventListener('click', async () => {
     if (!window.confirm('Restart the device now? Applied settings that were not saved are discarded.')) return;
     setBusy(true);
@@ -914,6 +927,9 @@
   function renderOte() {
     const on = !!state.settings.ote_enabled;
     $('ote-off').hidden = on;
+    // On for this start only: a one-shot start while the next start (saved settings, else defaults) has them off
+    const next = state.saved || state.defaults;
+    $('ote-once-on').hidden = !(on && state.oneshot_boot && !next.ote_enabled);
     $('ote-chip').textContent = 'ESP32-P4 ' + state.status.chip_revision;
     if (!oteUploading) {
       $('ote-file').disabled = !on;

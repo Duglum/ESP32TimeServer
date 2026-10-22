@@ -40,7 +40,7 @@
     <button type="button" id="net-confirm">Keep these network settings</button>
   </div>
   <div id="banner-oneshot" class="banner info" hidden>
-    <div>This start uses settings from <em>Apply</em> that are valid for this start only. Use <em>Save Settings</em> to keep them.</div>
+    <div>This start uses one-time settings (from <em>Apply</em> or <em>Restart with updates enabled</em>): the next restart returns to the saved settings. Use <em>Save Settings</em> to keep them.</div>
   </div>
   <div id="banner-unsaved" class="banner info" hidden>
     <div>The settings in use differ from the saved settings. They are lost at the next restart unless you use <em>Save Settings</em>.</div>
@@ -355,7 +355,12 @@
       <h2>Firmware Update</h2>
       <!-- The only explanation of this card: the fields below only show their default and state -->
       <div class="help">
-        <p>A new firmware can be installed over the network (Over The Ethernet, OTE) in two ways. Both send the image over HTTPS (TCP 443) to this device and only work while <em>Accept firmware updates over the network</em> is ticked and applied.</p>
+        <p>A new firmware can be installed over the network (Over The Ethernet, OTE). First the device has to accept updates:</p>
+        <ul>
+          <li><strong>Once:</strong> press <em>Restart with updates enabled</em> under <em>Upload</em>. The device restarts and accepts updates until its next restart (the one after an upload included); after that they are off again. Log in again after about a minute.</li>
+          <li><strong>Permanently:</strong> tick <em>Accept firmware updates over the network</em>, press <em>Save Settings</em> and then <em>Reboot</em>.</li>
+        </ul>
+        <p>Then the image can be sent over HTTPS (TCP 443) in two ways:</p>
         <ol>
           <li><strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload; the OTE password is not used.</li>
           <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;mDNS host name&gt;.local -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script authorises the upload with the <em>OTE password</em>, which it takes from the environment variable <code>OTE_PASSWORD</code> or asks for; no login is needed.</li>
@@ -386,7 +391,14 @@
         </label>
         <progress id="ote-progress" max="100" value="0" hidden></progress>
         <small class="note" id="ote-state"></small>
-        <small class="note bad" id="ote-off" hidden>Updates are off on the device: uploads are not possible.</small>
+        <div class="ote-once" id="ote-off" hidden>
+          <small class="note bad">Updates are off on the device: uploads are not possible.</small>
+          <div class="buttons left">
+            <button type="button" id="ote-once">Restart with updates enabled</button>
+          </div>
+          <small class="note">Only until the next restart: the restart after the upload switches updates off again.</small>
+        </div>
+        <small class="note" id="ote-once-on" hidden>Updates are on until the next restart (enabled once).</small>
         <div class="buttons left">
           <button type="submit" id="ote-upload">Upload and restart</button>
         </div>
