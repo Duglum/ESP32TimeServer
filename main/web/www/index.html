@@ -287,23 +287,6 @@
         <p class="hint">Up to 8 keys (SHA-256, truncated to 160 bit). Enter the same key ID and key on the clients, e.g. <code>1 SHA256 ASCII:&lt;key&gt;</code> in chrony.keys. Generate uses the random generator of the browser. Changed keys take effect at once with Apply; Save Settings keeps them.</p>
       </section>
 
-      <section class="card">
-        <h2>Over The Ethernet updates <span class="badge restart">restart</span></h2>
-        <div class="grid">
-          <label class="switch span2"><input type="checkbox" name="ote_enabled"> Accept firmware updates over the network (upload below under <em>Firmware update</em>, or with tools/ote_upload.py; HTTPS on TCP 443)</label>
-          <label><span class="lt">mDNS host name</span>
-            <input type="text" name="ote_device_name" maxlength="32" spellcheck="false" autocomplete="off">
-            <small class="note">Announced by mDNS as &lt;name&gt;.local, also while OTE updates are off. Letters, digits and '-'.</small>
-            <small class="def" data-for="ote_device_name"></small>
-          </label>
-          <label><span class="lt">OTE password (for tools/ote_upload.py)</span>
-            <input type="password" name="ote_password" maxlength="64" autocomplete="new-password" placeholder="unchanged">
-            <small class="note" id="ote-password-state"></small>
-          </label>
-        </div>
-        <p class="hint">An empty password field keeps the stored password (at least 8 characters are needed while OTE is on). This page uploads with its login; the script sends the OTE password inside the TLS connection, and wrong passwords count for the login lock-out. The firmware image is not signed: anyone who can log in or knows the OTE password can replace the firmware, so use a long random password and keep OTE off when it is not needed.</p>
-      </section>
-
       <div class="action-bar">
         <div class="buttons">
           <button type="button" class="primary" id="btn-apply" title="In effect now, not stored">Apply</button>
@@ -328,14 +311,30 @@
     </section>
 
     <section class="card" id="ote-card">
-      <h2>Firmware update</h2>
+      <h2>Firmware Update</h2>
+      <!-- Fields of the settings form (form="settings-form"): Apply and Save Settings above include them -->
+      <h3 class="sub-heading">Over The Ethernet updates <span class="badge restart">restart</span></h3>
+      <div class="grid">
+        <label class="switch span2"><input type="checkbox" name="ote_enabled" form="settings-form"> Accept firmware updates over the network (upload below, or with tools/ote_upload.py; HTTPS on TCP 443)</label>
+        <label><span class="lt">mDNS host name</span>
+          <input type="text" name="ote_device_name" form="settings-form" maxlength="32" spellcheck="false" autocomplete="off">
+          <small class="note">Announced by mDNS as &lt;name&gt;.local, also while OTE updates are off. Letters, digits and '-'.</small>
+          <small class="def" data-for="ote_device_name"></small>
+        </label>
+        <label><span class="lt">OTE password (for tools/ote_upload.py)</span>
+          <input type="password" name="ote_password" form="settings-form" maxlength="64" autocomplete="new-password" placeholder="unchanged">
+          <small class="note" id="ote-password-state"></small>
+        </label>
+      </div>
+      <p class="hint">These settings take effect with <em>Apply</em> (the device restarts once) and are kept with <em>Save Settings</em>, like the settings above. An empty password field keeps the stored password (at least 8 characters are needed while OTE is on). This page uploads with its login; the script sends the OTE password inside the TLS connection, and wrong passwords count for the login lock-out. The firmware image is not signed: anyone who can log in or knows the OTE password can replace the firmware, so use a long random password and keep OTE off when it is not needed.</p>
+      <h3 class="sub-heading">Upload</h3>
       <form id="ote-form" class="stack">
         <label><span class="lt">Application image (ESP32TimeServer.bin of the build folder)</span>
           <input type="file" id="ote-file" accept=".bin,application/octet-stream" required>
         </label>
         <progress id="ote-progress" max="100" value="0" hidden></progress>
         <small class="note" id="ote-state"></small>
-        <small class="note bad" id="ote-off" hidden>Over The Ethernet updates are off: switch them on above (Apply restarts the device) to upload a firmware image.</small>
+        <small class="note bad" id="ote-off" hidden>Over The Ethernet updates are off: switch them on in this panel and press Apply (the device restarts) to upload a firmware image.</small>
         <div class="buttons left">
           <button type="submit" id="ote-upload">Upload and restart</button>
         </div>

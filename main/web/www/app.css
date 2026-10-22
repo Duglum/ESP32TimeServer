@@ -92,7 +92,8 @@ code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-siz
 h1 { font-size: 1.15rem; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 h2 { font-size: 1.05rem; margin: 0 0 1rem; display: flex; align-items: center; gap: .5rem; }
 h3 { font-size: .95rem; margin: 0 0 .5rem; }
-h3.sub-heading { margin: 1.25rem 0 .25rem; }
+h3.sub-heading { margin: 1.25rem 0 .25rem; display: flex; align-items: center; gap: .5rem; }
+h2 + h3.sub-heading { margin-top: 0; }
 .section-gap { margin-top: 1rem; }
 .hint.first + .grid { margin-top: .75rem; }
 .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }

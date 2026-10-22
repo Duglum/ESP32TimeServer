@@ -742,6 +742,10 @@
 
   form.addEventListener('input', () => { updateDependent(); markDefaults(); });
   form.addEventListener('change', () => { updateDependent(); markDefaults(); });
+  // The OTE settings sit in the Firmware Update card, outside the settings form (form="settings-form"): their events
+  // do not bubble through the form
+  $('ote-card').addEventListener('input', () => { updateDependent(); markDefaults(); });
+  $('ote-card').addEventListener('change', () => { updateDependent(); markDefaults(); });
 
   async function submitSettings(path) {
     let body;
