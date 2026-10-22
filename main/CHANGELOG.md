@@ -384,6 +384,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
 - Secrets (MQTT password, OTE password, admin password) are never sent to the browser and never logged; the page shows "set / not set". An empty field keeps the stored value, a separate check box clears it (MQTT password).
 - Exception (on request, 2026-10-21): the NTP keys are shown in clear text on the page, since they have to be copied to the clients anyway. Without keys of the web settings (e.g. after a fresh install) the table shows the keys compiled in from `ESP32TimeServerSettingsSecrets.h`; changing them there stores them as keys of the web settings. The check box "Use the keys compiled into the firmware" returns to the compiled keys. The keys are only sent to a logged-in session over TLS and are still never logged.
 - Password fields (login, MQTT, OTE, current and new admin password) have an eye button that shows the typed text in clear. It only appears once something was typed in this session (stored secrets never reach the browser), and a field that is emptied or disabled is masked again.
+- GPIO pins (2026-10-22): the pin fields of the GNSS and PPS (TX, RX, PPS, PTP PPS loopback), RGB LED and MQTT (TF card) panels are in a collapsed area *GPIO pins* at the bottom of each panel (`<details>`, opened with the arrow). While it is closed, its summary shows how many visible pins differ from the default and whether a warning inside it (PTP loopback on a chip below v3.0) is shown.
 
 **Page hardening and resources**
 

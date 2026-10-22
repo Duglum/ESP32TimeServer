@@ -417,6 +417,24 @@
       row.input.classList.toggle('is-changed', differs);
       row.input.title = 'Default: ' + (def || '');
     }
+    markPinAreas();
+  }
+
+  // Collapsed GPIO pin areas: the summary shows how many visible pin values differ from the compiled default and
+  // whether a warning inside is shown, so nothing changed stays hidden
+  function markPinAreas() {
+    document.querySelectorAll('details.pins').forEach((area) => {
+      const visible = (el) => !el.closest('[hidden]');
+      const changed = [...area.querySelectorAll('.is-changed')].filter(visible).length;
+      const warning = [...area.querySelectorAll('small.note.bad')].some(visible);
+      const parts = [];
+      if (changed > 0) parts.push(changed === 1 ? '1 pin differs from the default' : changed + ' pins differ from the default');
+      if (warning) parts.push('see the warning');
+      const marker = area.querySelector('.pins-changed');
+      marker.textContent = parts.join(', ');
+      marker.hidden = parts.length === 0;
+      marker.classList.toggle('bad', warning);
+    });
   }
 
   function updateDependent() {
@@ -429,6 +447,7 @@
     const type = f.led_type.value;
     document.querySelectorAll('.led-ky016').forEach((el) => { el.hidden = type !== 'ky016'; });
     document.querySelectorAll('.led-ws2812').forEach((el) => { el.hidden = type !== 'ws2812'; });
+    $('led-pins-none').hidden = type !== 'none';
     $('brightness-out').textContent = f.led_brightness.value + ' %';
     f.mqtt_password.disabled = f.mqtt_password_clear.checked;
     f.pps_lost_serve_min.disabled = !f.pps_lost_serve.checked;
@@ -448,6 +467,7 @@
       $('ote-default-pw-warning').hidden = !(f.ote_enabled.checked && state.ote_password_default && f.ote_password.value === '');
       $('ptp-chip-warning').hidden = state.status.ptp_loopback_supported || f.ptp_loopback_pin.value.trim() === '';
     }
+    markPinAreas();
   }
 
   // xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx (Cisco) or xxxxxxxxxxxx -> lower case with ':'

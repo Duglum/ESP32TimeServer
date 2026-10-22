@@ -146,9 +146,6 @@
             </select>
             <small class="def" data-for="gnss_protocol"></small>
           </label>
-          <label><span class="lt">GNSS TX pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="gnss_tx_pin" min="0" max="54"><small class="def" data-for="gnss_tx_pin"></small></label>
-          <label><span class="lt">GNSS RX pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="gnss_rx_pin" min="0" max="54"><small class="def" data-for="gnss_rx_pin"></small></label>
-          <label><span class="lt">PPS pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="gnss_pps_pin" min="0" max="54"><small class="def" data-for="gnss_pps_pin"></small></label>
           <label><span class="lt">GNSS baud rate <span class="badge restart">restart</span></span>
             <select name="gnss_baud">
               <option>4800</option><option>9600</option><option>19200</option><option>38400</option><option>57600</option>
@@ -156,12 +153,6 @@
             </select>
             <small class="note" id="baud-note" hidden>With the U-Blox UBX protocol the baud rate is found and configured automatically.</small>
             <small class="def" data-for="gnss_baud"></small>
-          </label>
-          <label class="span2"><span class="lt">PTP PPS loopback pin (GPIO, empty = off) <span class="badge restart">restart</span></span>
-            <input type="number" name="ptp_loopback_pin" min="0" max="54">
-            <small class="note">The pin has to be empty: a free GPIO with nothing connected; it is driven as an output. Needs an ESP32-P4 with chip revision v3.0 or higher (this board: <span id="ptp-chip"></span>).</small>
-            <small class="note bad" id="ptp-chip-warning" hidden>This board's chip revision is below v3.0: the loopback does not work here, leave the field empty.</small>
-            <small class="def" data-for="ptp_loopback_pin"></small>
           </label>
         </div>
 
@@ -190,6 +181,22 @@
           </label>
         </div>
         <p class="hint bad">Relying on time that is no longer synchronised to the GNSS is probably not a good idea: its error grows by an amount nobody measures. Use a stratum below 16 and a long answering time only when the clients absolutely need a time source and have no other one.</p>
+        <details class="pins">
+          <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">GNSS TX, RX, PPS, PTP PPS loopback</span></summary>
+          <div class="grid three">
+          <label><span class="lt">GNSS TX pin (GPIO)</span><input type="number" name="gnss_tx_pin" min="0" max="54"><small class="def" data-for="gnss_tx_pin"></small></label>
+          <label><span class="lt">GNSS RX pin (GPIO)</span><input type="number" name="gnss_rx_pin" min="0" max="54"><small class="def" data-for="gnss_rx_pin"></small></label>
+          <label><span class="lt">PPS pin (GPIO)</span><input type="number" name="gnss_pps_pin" min="0" max="54"><small class="def" data-for="gnss_pps_pin"></small></label>
+          </div>
+          <div class="grid section-gap">
+          <label class="span2"><span class="lt">PTP PPS loopback pin (GPIO, empty = off)</span>
+            <input type="number" name="ptp_loopback_pin" min="0" max="54">
+            <small class="note">The pin has to be empty: a free GPIO with nothing connected; it is driven as an output. Needs an ESP32-P4 with chip revision v3.0 or higher (this board: <span id="ptp-chip"></span>).</small>
+            <small class="note bad" id="ptp-chip-warning" hidden>This board's chip revision is below v3.0: the loopback does not work here, leave the field empty.</small>
+            <small class="def" data-for="ptp_loopback_pin"></small>
+          </label>
+          </div>
+        </details>
       </section>
 
       <section class="card">
@@ -222,14 +229,20 @@
             <input type="range" name="led_brightness" min="0" max="100" step="1">
             <small class="def" data-for="led_brightness"></small>
           </label>
-          <label class="led-ky016"><span class="lt">Red pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="led_red_pin" min="0" max="54"><small class="def" data-for="led_red_pin"></small></label>
-          <label class="led-ky016"><span class="lt">Green pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="led_green_pin" min="0" max="54"><small class="def" data-for="led_green_pin"></small></label>
-          <label class="led-ky016"><span class="lt">Blue pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="led_blue_pin" min="0" max="54"><small class="def" data-for="led_blue_pin"></small></label>
-          <label class="led-ws2812"><span class="lt">Data pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="led_ws2812_pin" min="0" max="54"><small class="def" data-for="led_ws2812_pin"></small></label>
         </div>
         <h3 class="sub-heading">Colours</h3>
         <p class="hint first">A preset or any colour as <code>#RRGGBB</code>. Takes effect at once.</p>
         <div class="colour-table" id="led-colours"></div>
+        <details class="pins">
+          <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">KY-016 red, green, blue / WS2812 data</span></summary>
+          <div class="grid three">
+          <label class="led-ky016"><span class="lt">Red pin (GPIO)</span><input type="number" name="led_red_pin" min="0" max="54"><small class="def" data-for="led_red_pin"></small></label>
+          <label class="led-ky016"><span class="lt">Green pin (GPIO)</span><input type="number" name="led_green_pin" min="0" max="54"><small class="def" data-for="led_green_pin"></small></label>
+          <label class="led-ky016"><span class="lt">Blue pin (GPIO)</span><input type="number" name="led_blue_pin" min="0" max="54"><small class="def" data-for="led_blue_pin"></small></label>
+          <label class="led-ws2812"><span class="lt">Data pin (GPIO)</span><input type="number" name="led_ws2812_pin" min="0" max="54"><small class="def" data-for="led_ws2812_pin"></small></label>
+          </div>
+          <p class="hint" id="led-pins-none">No LED module is selected: no pins are used.</p>
+        </details>
       </section>
 
       <section class="card">
@@ -283,17 +296,19 @@
             <small class="def" data-for="mqtt_tf_client_limit"></small>
           </label>
         </div>
-        <h3 class="sub-heading">TF card pins</h3>
-        <p class="callout">Waveshare ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH and ESP32-P4-WIFI-POE-ETH: the TF card slot is wired to these pins. If you use one of these boards, do not change them.</p>
-        <div class="grid three">
+        <details class="pins">
+          <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">TF card CMD, CLK, D0 to D3</span></summary>
+          <p class="callout">Waveshare ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH and ESP32-P4-WIFI-POE-ETH: the TF card slot is wired to these pins. If you use one of these boards, do not change them.</p>
+          <div class="grid three">
           <label><span class="lt">CMD (GPIO)</span><input type="number" name="tf_cmd_pin" min="0" max="54"><small class="def" data-for="tf_cmd_pin"></small></label>
           <label><span class="lt">CLK (GPIO)</span><input type="number" name="tf_clk_pin" min="0" max="54"><small class="def" data-for="tf_clk_pin"></small></label>
           <label><span class="lt">D0 (GPIO)</span><input type="number" name="tf_d0_pin" min="0" max="54"><small class="def" data-for="tf_d0_pin"></small></label>
           <label><span class="lt">D1 (GPIO)</span><input type="number" name="tf_d1_pin" min="0" max="54"><small class="def" data-for="tf_d1_pin"></small></label>
           <label><span class="lt">D2 (GPIO)</span><input type="number" name="tf_d2_pin" min="0" max="54"><small class="def" data-for="tf_d2_pin"></small></label>
           <label><span class="lt">D3 (GPIO)</span><input type="number" name="tf_d3_pin" min="0" max="54"><small class="def" data-for="tf_d3_pin"></small></label>
-        </div>
-        <p class="hint">4-bit SD mode. The pins are always reserved for the card, also while MQTT or QoS 1 / 2 are off.</p>
+          </div>
+          <p class="hint">4-bit SD mode. The pins are always reserved for the card, also while MQTT or QoS 1 / 2 are off.</p>
+        </details>
       </section>
 
       <section class="card">

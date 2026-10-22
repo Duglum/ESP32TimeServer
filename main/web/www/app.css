@@ -261,6 +261,20 @@ input.bad { border-color: var(--danger) !important; }
 .pw-field button.eye:hover, .pw-field button.eye[aria-pressed="true"] { color: var(--text); filter: none; }
 .swatch { width: 2rem; height: 2rem; border-radius: 50%; border: 1px solid var(--border); }
 
+/* GPIO pins at the bottom of a panel, collapsed until the summary row is clicked */
+details.pins { margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: .25rem; }
+details.pins > summary { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem .6rem; padding: .5rem .25rem; margin: 0 -.25rem; border-radius: 8px; cursor: pointer; list-style: none; user-select: none; }
+details.pins > summary::-webkit-details-marker { display: none; }
+details.pins > summary::before { content: ""; width: .5rem; height: .5rem; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); transition: transform .15s ease; margin: 0 .25rem 0 .15rem; flex: none; }
+details.pins[open] > summary::before { transform: rotate(45deg); }
+details.pins > summary:hover { background: var(--bg); }
+details.pins > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pins-title { font-weight: 600; font-size: .95rem; }
+.pins-note { flex-basis: 100%; padding-left: 1.15rem; color: var(--muted); font-size: .8rem; }
+.pins-changed { color: var(--changed); font-size: .8rem; font-weight: 500; }
+.pins-changed.bad { color: var(--danger); }
+details.pins[open] > summary { margin-bottom: .6rem; }
+
 @media (max-width: 680px) {
   .grid, .status-groups { grid-template-columns: 1fr; }
   .addr { white-space: normal; overflow-wrap: anywhere; }
