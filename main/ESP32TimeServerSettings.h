@@ -63,9 +63,9 @@ static constexpr int WS2812DataPin = 4;
 static constexpr int lcdColumns = 20;
 static constexpr int lcdRows = 4;
 static constexpr char lcdTopLineTitle[] = "ESP32 Time Server"; // text on the LCD's top line (max 17 characters; the last 3 columns are reserved for status indicators)
-static constexpr bool display24HourFormat = false;             // set to true for 24-hour format, false for 12-hour format
-static constexpr bool displayHoursWithPaddedZero = false;      // set to true to pad the hour with a leading zero when less than 10, false not to pad
-static constexpr bool displayTimeZone = false;
+static constexpr bool display24HourFormat = true;             // set to true for 24-hour format, false for 12-hour format
+static constexpr bool displayHoursWithPaddedZero = true;      // set to true to pad the hour with a leading zero when less than 10, false not to pad
+static constexpr bool displayTimeZone = true;
 static constexpr int lcdI2CAddressPrimary = 0x27;
 static constexpr int lcdI2CAddressSecondary = 0x3F;
 
