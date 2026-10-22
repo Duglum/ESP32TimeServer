@@ -4126,6 +4126,7 @@ static bool configure_hardware_timestamps()
     return input_path_updated;
 }
 
+#if DEBUG_ENABLED
 static const char *fix_type_to_text(uint8_t fix_type)
 {
     switch (fix_type)
@@ -4144,6 +4145,7 @@ static const char *fix_type_to_text(uint8_t fix_type)
         return "No fix";
     }
 }
+#endif
 
 static bool is_digit_char(char c)
 {
@@ -4788,6 +4790,7 @@ static bool change_gnss_baud_rate(uint32_t from_baud, uint32_t to_baud)
 #endif
 
     bool baud_change_command_reported_success = s_gnss.setSerialRate(to_baud, COM_PORT_UART1, VAL_LAYER_RAM_BBR);
+    (void)baud_change_command_reported_success; // only read by the debug log
     vTaskDelay(pdMS_TO_TICKS(200));
     if (!confirm_saved_gnss_baud_rate(to_baud))
         return false;
@@ -4857,6 +4860,7 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
 #endif
 
                     bool baud_change_command_reported_success = s_gnss.setSerialRate(higher_baud, COM_PORT_UART1, VAL_LAYER_RAM_BBR);
+                    (void)baud_change_command_reported_success; // only read by the debug log
                     vTaskDelay(pdMS_TO_TICKS(200));
 
                     if (confirm_saved_gnss_baud_rate(higher_baud))
@@ -4917,6 +4921,8 @@ static bool configure_gnss_outputs(bool *uart1_output_set_result)
         i2c_output_disabled = s_gnss.setI2COutput(0);
         uart2_output_disabled = s_gnss.setUART2Output(0);
     }
+    (void)i2c_output_disabled; // only read by the debug log
+    (void)uart2_output_disabled;
 
     bool uart1_output_set = s_gnss.setUART1Output(COM_TYPE_UBX | COM_TYPE_NMEA);
 
@@ -8363,7 +8369,6 @@ static void setup_ethernet()
     web_net_dns_start();
     if (!web_net_apply(s_eth_netif, *s_cfg, nullptr))
         ESP_LOGE(TAG, "Some network settings could not be applied");
-    const bool static_ip_applied = !s_cfg->ipv4_dhcp;
 
     // The web admin page is started here (before the wait below), so it is reachable even if the GNSS setup
     // never finishes, e.g. because of wrong GNSS pins
@@ -8372,7 +8377,7 @@ static void setup_ethernet()
 #if DEBUG_ENABLED
     ESP_LOGI(TAG,
              "Waiting for Ethernet %s address%s...",
-             static_ip_applied ? "static" : "DHCP",
+             s_cfg->ipv4_dhcp ? "DHCP" : "static",
              PreferIPvX == 1 ? "" : " and routable IPv6");
 #endif
     wait_for_startup_ethernet_readiness();
