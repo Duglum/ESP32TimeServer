@@ -137,19 +137,19 @@
       </section>
 
       <section class="card">
-        <h2>GNSS and PPS <span class="badge restart">restart</span></h2>
+        <h2>GNSS and PPS</h2>
         <div class="grid">
-          <label class="span2"><span class="lt">Protocol</span>
+          <label class="span2"><span class="lt">Protocol <span class="badge restart">restart</span></span>
             <select name="gnss_protocol">
               <option value="nmea">NMEA Standard Protocol</option>
               <option value="ubx">U-Blox UBX Protocol</option>
             </select>
             <small class="def" data-for="gnss_protocol"></small>
           </label>
-          <label><span class="lt">GNSS TX pin (GPIO)</span><input type="number" name="gnss_tx_pin" min="0" max="54"><small class="def" data-for="gnss_tx_pin"></small></label>
-          <label><span class="lt">GNSS RX pin (GPIO)</span><input type="number" name="gnss_rx_pin" min="0" max="54"><small class="def" data-for="gnss_rx_pin"></small></label>
-          <label><span class="lt">PPS pin (GPIO)</span><input type="number" name="gnss_pps_pin" min="0" max="54"><small class="def" data-for="gnss_pps_pin"></small></label>
-          <label><span class="lt">GNSS baud rate</span>
+          <label><span class="lt">GNSS TX pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="gnss_tx_pin" min="0" max="54"><small class="def" data-for="gnss_tx_pin"></small></label>
+          <label><span class="lt">GNSS RX pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="gnss_rx_pin" min="0" max="54"><small class="def" data-for="gnss_rx_pin"></small></label>
+          <label><span class="lt">PPS pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="gnss_pps_pin" min="0" max="54"><small class="def" data-for="gnss_pps_pin"></small></label>
+          <label><span class="lt">GNSS baud rate <span class="badge restart">restart</span></span>
             <select name="gnss_baud">
               <option>4800</option><option>9600</option><option>19200</option><option>38400</option><option>57600</option>
               <option>115200</option><option>230400</option><option>460800</option><option>921600</option>
@@ -157,13 +157,39 @@
             <small class="note" id="baud-note" hidden>With the U-Blox UBX protocol the baud rate is found and configured automatically.</small>
             <small class="def" data-for="gnss_baud"></small>
           </label>
-          <label class="span2"><span class="lt">PTP PPS loopback pin (GPIO, empty = off)</span>
+          <label class="span2"><span class="lt">PTP PPS loopback pin (GPIO, empty = off) <span class="badge restart">restart</span></span>
             <input type="number" name="ptp_loopback_pin" min="0" max="54">
             <small class="note">The pin has to be empty: a free GPIO with nothing connected; it is driven as an output. Needs an ESP32-P4 with chip revision v3.0 or higher (this board: <span id="ptp-chip"></span>).</small>
             <small class="note bad" id="ptp-chip-warning" hidden>This board's chip revision is below v3.0: the loopback does not work here, leave the field empty.</small>
             <small class="def" data-for="ptp_loopback_pin"></small>
           </label>
         </div>
+
+        <h3 class="sub-heading">When the PPS is lost</h3>
+        <p class="hint first">The PPS counts as lost after 3.5 s without a pulse. The settings below take effect at once with Apply. When the PPS and the GNSS are back, the server returns to stratum 1 by itself.</p>
+        <div class="grid">
+          <label class="span2"><span class="lt">PPS holdover (s, 0 = off)</span>
+            <input type="number" name="pps_holdover" min="0" max="600">
+            <small class="note">0 to 600 s. For this long after the PPS is lost the server keeps answering at stratum 1, coasting on the learned rate of its oscillator; the advertised root dispersion grows by 0.2 ms per second since the last pulse, so the clients see the growing uncertainty. After the holdover the server answers as set below.</small>
+            <small class="def" data-for="pps_holdover"></small>
+          </label>
+          <div class="span2 switch-block">
+            <label class="switch"><input type="checkbox" name="pps_lost_serve"> Keep answering NTP requests after the holdover</label>
+            <small class="note">Off: after the holdover the server does not answer at all, so the clients switch to their other servers at once instead of getting stratum 16 answers.</small>
+            <small class="def" data-for="pps_lost_serve"></small>
+          </div>
+          <label><span class="lt">Keep answering for (min, 0 = no limit)</span>
+            <input type="number" name="pps_lost_serve_min" min="0" max="1440">
+            <small class="note">0 to 1440 min, counted from the PPS loss (the holdover included). Then the server stops answering.</small>
+            <small class="def" data-for="pps_lost_serve_min"></small>
+          </label>
+          <label><span class="lt">Stratum of these answers</span>
+            <input type="number" name="pps_lost_stratum" min="2" max="16">
+            <small class="note">16 = "not synchronised" (leap indicator alarm): the clients stop using the server. 2 to 15: the answers stay "synchronised" at that stratum, coasting with a growing root dispersion for at most one hour after the last pulse, then 16.</small>
+            <small class="def" data-for="pps_lost_stratum"></small>
+          </label>
+        </div>
+        <p class="hint bad">Relying on time that is no longer synchronised to the GNSS is probably not a good idea: its error grows by an amount nobody measures. Use a stratum below 16 and a long answering time only when the clients absolutely need a time source and have no other one.</p>
       </section>
 
       <section class="card">

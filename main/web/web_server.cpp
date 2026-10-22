@@ -387,6 +387,10 @@ namespace
         cJSON_AddNumberToObject(object, "gnss_pps_pin", s.gnss_pps_pin);
         cJSON_AddNumberToObject(object, "gnss_baud", s.gnss_baud);
         cJSON_AddNumberToObject(object, "ptp_loopback_pin", s.ptp_loopback_pin);
+        cJSON_AddNumberToObject(object, "pps_holdover", s.pps_holdover_s);
+        cJSON_AddNumberToObject(object, "pps_lost_stratum", s.pps_lost_stratum);
+        cJSON_AddBoolToObject(object, "pps_lost_serve", s.pps_lost_serve);
+        cJSON_AddNumberToObject(object, "pps_lost_serve_min", s.pps_lost_serve_min);
         cJSON_AddBoolToObject(object, "lcd_enabled", s.lcd_enabled);
         cJSON_AddStringToObject(object, "lcd_title", s.lcd_title);
         cJSON_AddBoolToObject(object, "lcd_24_hour", s.lcd_24_hour);
@@ -497,6 +501,10 @@ namespace
                   json_int(root, "gnss_pps_pin", s.gnss_pps_pin, -1, 54, err, err_size) &&
                   json_int(root, "gnss_baud", s.gnss_baud, 0, 921600, err, err_size) &&
                   json_int(root, "ptp_loopback_pin", s.ptp_loopback_pin, -1, 54, err, err_size) &&
+                  json_int(root, "pps_holdover", s.pps_holdover_s, 0, WEB_PPS_HOLDOVER_MAX_S, err, err_size) &&
+                  json_int(root, "pps_lost_stratum", s.pps_lost_stratum, 2, 16, err, err_size) &&
+                  json_bool(root, "pps_lost_serve", s.pps_lost_serve, err, err_size) &&
+                  json_int(root, "pps_lost_serve_min", s.pps_lost_serve_min, 0, WEB_PPS_LOST_SERVE_MAX_MIN, err, err_size) &&
                   json_bool(root, "lcd_enabled", s.lcd_enabled, err, err_size) &&
                   json_string(root, "lcd_title", s.lcd_title, sizeof(s.lcd_title), err, err_size) &&
                   json_bool(root, "lcd_24_hour", s.lcd_24_hour, err, err_size) &&
@@ -898,7 +906,7 @@ namespace
             char compiled[WEB_OTE_PASSWORD_SIZE] = {};
             snprintf(current, sizeof(current), "%s", sets->running.ote_password);
             snprintf(compiled, sizeof(compiled), "%s", sets->defaults.ote_password);
-            const bool is_default = current[0] != ' ' &&
+            const bool is_default = current[0] != '\0' &&
                                     web_constant_time_equal(reinterpret_cast<const uint8_t *>(current),
                                                             reinterpret_cast<const uint8_t *>(compiled), sizeof(current));
             memset(current, 0, sizeof(current));
@@ -980,6 +988,7 @@ namespace
         cJSON_AddBoolToObject(status, "pps_active", sets->app.pps_active);
         cJSON_AddBoolToObject(status, "gnss_locked", sets->app.gnss_locked);
         cJSON_AddBoolToObject(status, "stratum_one", sets->app.stratum_one);
+        cJSON_AddBoolToObject(status, "pps_holdover", sets->app.pps_holdover);
         cJSON_AddBoolToObject(status, "ublox_receiver", sets->app.ublox_receiver);
         cJSON_AddNumberToObject(status, "gnss_baud_in_use", sets->app.gnss_baud_in_use);
         cJSON_AddStringToObject(status, "gnss_dynamic_model", sets->app.gnss_dynamic_model);

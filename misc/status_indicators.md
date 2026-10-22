@@ -8,6 +8,7 @@
 |                      |                 |                                                                    |
 | ESP32 Time Server    | Green           | The server is operating normally                                   |
 | ESP32 Time Server[3] | Yellow flashing | There are queued MQTT items                                        |
+| ESP32 Time Server[H] | Yellow flashing | PPS holdover: PPS lost, still stratum 1 for the holdover time      |
 | ESP32 Time Server[5] | Yellow          | PPS missing                                                        |
 | ESP32 Time Server[6] | Yellow          | GNSS missing or invalid                                            |
 | ESP32 Time Server[7] | Yellow          | GNSS sync stale                                                    |
@@ -28,8 +29,7 @@
 >Note:
 >In timekeeping terminology, holdover is the state where a time server continues providing time from its internal
 >oscillator after losing its external reference (in this case the GNSS). The device is no longer actively
->synchronized but is "coasting" on its last-known good time.  Holdover mode is not expressly reported on the
->LCD's top line or via the RBB LED as it is implied when the PPS missing, the GNSS missing or invalid, the 
-> GNSS sync is stale, or the GNSS has lost its satellite lock.
+>synchronized but is "coasting" on its last-known good time.  The PPS holdover (stratum 1 for a short time after the PPS is lost, see the GNSS and PPS
+>settings of the web admin page) is shown as [H]; after it the PPS fault [5] is shown.
 
 

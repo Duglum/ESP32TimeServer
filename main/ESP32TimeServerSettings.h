@@ -172,6 +172,27 @@ static constexpr const char *timeZoneSpec = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 // Unless you know what you are doing, the options below should be left as is
 
+// PPS holdover (default of the web admin setting "PPS holdover", whole seconds, 0 to 600; 0 = no holdover).
+// The PPS counts as lost after 3.5 s without a pulse. For this long after that the server keeps answering at stratum 1,
+// coasting on the learned oscillator rate, while the advertised root dispersion grows with the time since the last
+// pulse. After it the server answers at stratum 16 (leap indicator "not synchronised") until the PPS and GNSS are back.
+static constexpr int64_t ntpHoldoverDurationUs = 2LL * 1000000LL; // Holdover duration in microseconds (2 seconds)
+// Conservative uncertainty growth while coasting on the learned oscillator rate.
+static constexpr uint32_t ntpHoldoverDispersionPpm = 200;
+// When the PPS is lost for longer than the holdover (defaults of the web admin settings):
+// - ntpServeAfterHoldover: true = keep answering NTP requests (for ntpServeAfterPpsLostMinutes); false = no answer at
+//   all, so the clients switch to other servers. Answers again when the PPS and GNSS are back.
+// - ntpServeAfterPpsLostMinutes: with ntpServeAfterHoldover, the answers stop this long after the PPS was lost
+//   (counted from the loss, the holdover included; 0 = no limit, at most 1440)
+// - ntpStratumAfterHoldover: stratum of those answers. 16 = "not synchronised" (leap indicator alarm): the clients
+//   stop using the server. 2 to 15: the answers stay "synchronised" at that stratum, coasting on the learned rate with
+//   the root dispersion still growing, for at most one hour after the last pulse (then 16).
+// Relying on time that is no longer synchronised to the GNSS is probably not a good idea: its error grows by an unknown
+// amount. Use a stratum below 16 and a long serving time only when the clients absolutely need a time source.
+static constexpr bool ntpServeAfterHoldover = true;
+static constexpr uint32_t ntpServeAfterPpsLostMinutes = 60;
+static constexpr uint8_t ntpStratumAfterHoldover = 16;
+
 // This project was designed and tested to work with a SparkFun GNSS Receiver Breakout board which uses a u-blox - MAX-M10S module.
 // ( https://www.sparkfun.com/sparkfun-gnss-receiver-breakout-max-m10s-qwiic.html )
 // However, the code has fallback logic for non/cloned/older u-blox gnss modules and has been tested with one such device as well.

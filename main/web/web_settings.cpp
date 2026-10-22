@@ -7,7 +7,9 @@
 #include "web_settings.h"
 
 #include <cctype>
+#include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <new>
@@ -38,8 +40,22 @@ namespace
     constexpr uint32_t BLOB_MAGIC = 0x57534554u; // "WSET"
     // Increase when web_settings_t changes: a saved set of another version is ignored (compiled defaults are used)
     // 2: GNSS protocol and LED colours added; 3: Over The Ethernet update settings added; 4: up to 8 NTP keys;
-    // 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins
-    constexpr uint32_t BLOB_VERSION = 5;
+    // 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins;
+    // 6: PPS holdover in the place of the former OTE port, behaviour after the holdover appended at the end
+    //    (a version 5 set is still read: its fields are a prefix of web_settings_t, the new ones get the defaults)
+    constexpr uint32_t BLOB_VERSION = 6;
+    constexpr uint32_t BLOB_VERSION_5 = 5;
+    // Size of web_settings_t in version 5: everything before the fields appended in version 6, with the tail padding
+    constexpr size_t SETTINGS_SIZE_5 = (offsetof(web_settings_t, pps_lost_stratum) + alignof(web_settings_t) - 1) /
+                                       alignof(web_settings_t) * alignof(web_settings_t);
+    static_assert(SETTINGS_SIZE_5 <= sizeof(web_settings_t), "version 5 settings must be a prefix of web_settings_t");
+
+    // ntpHoldoverDurationUs in whole seconds, within the range of the setting
+    uint16_t default_pps_holdover_s()
+    {
+        const int64_t seconds = (ntpHoldoverDurationUs + 500000LL) / 1000000LL;
+        return static_cast<uint16_t>(seconds < 0 ? 0 : seconds > WEB_PPS_HOLDOVER_MAX_S ? WEB_PPS_HOLDOVER_MAX_S : seconds);
+    }
 
     struct settings_blob_t
     {
@@ -68,28 +84,62 @@ namespace
         return esp_rom_crc32_le(0, reinterpret_cast<const uint8_t *>(&blob), offsetof(settings_blob_t, crc));
     }
 
-    // Reads a settings blob. Returns true if it exists, matches this firmware and passes the CRC.
+    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5) and passes the CRC.
     bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob)
     {
-        size_t length = sizeof(blob);
-        const esp_err_t err = nvs_get_blob(handle, key, &blob, &length);
+        // Stored as header (magic, version, size, flags), settings, CRC of everything before it
+        constexpr size_t HEADER_SIZE = offsetof(settings_blob_t, settings);
+        static_assert(offsetof(settings_blob_t, crc) == HEADER_SIZE + sizeof(web_settings_t), "blob layout");
+        uint8_t *raw = static_cast<uint8_t *>(calloc(1, sizeof(settings_blob_t)));
+        if (raw == nullptr)
+            return false;
+        size_t length = sizeof(settings_blob_t);
+        const esp_err_t err = nvs_get_blob(handle, key, raw, &length);
+        const bool readable = err == ESP_OK && length >= HEADER_SIZE + sizeof(uint32_t);
+        settings_blob_t header{};
+        uint32_t stored_crc = 0;
+        if (readable)
+        {
+            memcpy(&header, raw, HEADER_SIZE);
+            memcpy(&stored_crc, raw + length - sizeof(uint32_t), sizeof(uint32_t));
+        }
+        const bool current = header.version == BLOB_VERSION && header.size == sizeof(web_settings_t);
+        const bool version_5 = header.version == BLOB_VERSION_5 && header.size == SETTINGS_SIZE_5;
+
+        bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
-            return false;
-        if (err != ESP_OK || length != sizeof(blob))
         {
+        }
+        else if (!readable || (length != sizeof(settings_blob_t) && length != HEADER_SIZE + SETTINGS_SIZE_5 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
-            return false;
-        }
-        if (blob.magic != BLOB_MAGIC || blob.version != BLOB_VERSION || blob.size != sizeof(web_settings_t))
-        {
+        else if (header.magic != BLOB_MAGIC || (!current && !version_5) || length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
-            return false;
-        }
-        if (blob.crc != blob_crc(blob))
-        {
+        else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have a CRC error, ignored", key);
-            return false;
+        else
+        {
+            blob = settings_blob_t{};
+            memcpy(&blob, raw, HEADER_SIZE + header.size);
+            if (version_5)
+            {
+                // The holdover field held the former OTE port; the fields of version 6 get the compiled defaults
+                web_settings_t defaults{};
+                web_settings_defaults(defaults);
+                blob.settings.pps_holdover_s = defaults.pps_holdover_s;
+                blob.settings.pps_lost_stratum = defaults.pps_lost_stratum;
+                blob.settings.pps_lost_serve = defaults.pps_lost_serve;
+                blob.settings.pps_lost_serve_min = defaults.pps_lost_serve_min;
+                blob.version = BLOB_VERSION;
+                blob.size = sizeof(web_settings_t);
+                ESP_LOGI(TAG, "Stored web settings '%s' of version 5 read; the PPS holdover settings have their defaults", key);
+            }
+            blob.crc = blob_crc(blob);
+            ok = true;
         }
+        memset(raw, 0, sizeof(settings_blob_t)); // contains secrets
+        free(raw);
+        if (!ok)
+            return false;
         // Text fields are always terminated (the CRC covers them, this only protects against a firmware bug)
         blob.settings.fqdn[WEB_FQDN_SIZE - 1] = '\0';
         return true;
@@ -412,6 +462,12 @@ void web_settings_defaults(web_settings_t &out)
     out.gnss_pps_pin = static_cast<int8_t>(PPSPin);
     out.gnss_baud = baudRateForUbloxNonCompliantGNSSReceiver;
     out.ptp_loopback_pin = static_cast<int8_t>(PTPPPSLoopbackPin);
+    out.pps_holdover_s = default_pps_holdover_s();
+    out.pps_lost_stratum = ntpStratumAfterHoldover;
+    out.pps_lost_serve = ntpServeAfterHoldover;
+    out.pps_lost_serve_min = static_cast<uint16_t>(ntpServeAfterPpsLostMinutes > WEB_PPS_LOST_SERVE_MAX_MIN
+                                                       ? WEB_PPS_LOST_SERVE_MAX_MIN
+                                                       : ntpServeAfterPpsLostMinutes);
 
     out.lcd_enabled = LIQUID_CRYSTAL_DISPLAY_ENABLED != 0;
     copy_text(out.lcd_title, lcdTopLineTitle);
@@ -826,6 +882,12 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         baud_ok = baud_ok || b == s.gnss_baud;
     if (!baud_ok)
         FAIL("GNSS baud rate is not one of the supported values");
+    if (s.pps_holdover_s > WEB_PPS_HOLDOVER_MAX_S)
+        FAIL("PPS holdover: 0 to %u seconds", static_cast<unsigned>(WEB_PPS_HOLDOVER_MAX_S));
+    if (s.pps_lost_stratum < 2 || s.pps_lost_stratum > 16)
+        FAIL("Stratum after the holdover: 2 to 16");
+    if (s.pps_lost_serve_min > WEB_PPS_LOST_SERVE_MAX_MIN)
+        FAIL("Serving time after the PPS loss: 0 (no limit) to %u minutes", static_cast<unsigned>(WEB_PPS_LOST_SERVE_MAX_MIN));
 
     // ---- LCD and time zone ----
     {
@@ -973,6 +1035,8 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
     return strcmp(a.lcd_title, b.lcd_title) == 0 && a.lcd_24_hour == b.lcd_24_hour && a.lcd_pad_hour == b.lcd_pad_hour &&
            a.lcd_show_time_zone == b.lcd_show_time_zone && strcmp(a.time_zone, b.time_zone) == 0 &&
            a.led_brightness_percent == b.led_brightness_percent && memcmp(a.led_rgb, b.led_rgb, sizeof(a.led_rgb)) == 0 &&
+           a.pps_holdover_s == b.pps_holdover_s && a.pps_lost_stratum == b.pps_lost_stratum &&
+           a.pps_lost_serve == b.pps_lost_serve && a.pps_lost_serve_min == b.pps_lost_serve_min &&
            a.ntp_auth_enabled == b.ntp_auth_enabled &&
            a.ntp_key_override == b.ntp_key_override && a.ntp_key_count == b.ntp_key_count &&
            web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_keys), reinterpret_cast<const uint8_t *>(b.ntp_keys), sizeof(a.ntp_keys));

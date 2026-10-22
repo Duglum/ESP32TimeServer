@@ -318,6 +318,10 @@
       gnss_pps_pin: String(s.gnss_pps_pin),
       gnss_baud: String(s.gnss_baud),
       ptp_loopback_pin: s.ptp_loopback_pin < 0 ? '' : String(s.ptp_loopback_pin),
+      pps_holdover: String(s.pps_holdover),
+      pps_lost_serve: s.pps_lost_serve,
+      pps_lost_serve_min: String(s.pps_lost_serve_min),
+      pps_lost_stratum: String(s.pps_lost_stratum),
       lcd_enabled: s.lcd_enabled,
       lcd_title: s.lcd_title,
       lcd_24_hour: s.lcd_24_hour,
@@ -397,6 +401,8 @@
       if (name === 'ptp_loopback_pin' && value === '') text = 'off';
       if (name === 'led_brightness') text += ' %';
       if (name === 'mqtt_report_period') text += ' s';
+      if (name === 'pps_holdover') text = value === '0' ? 'off' : text + ' s';
+      if (name === 'pps_lost_serve_min') text = value === '0' ? 'no limit' : text + ' min';
       if (name === 'mac_address' && !state.defaults.mac_address) text = 'the hardware MAC';
       if (displayNames[name]) text = displayNames[name][value] || text;
       small.textContent = 'Default: ' + text;
@@ -425,6 +431,8 @@
     document.querySelectorAll('.led-ws2812').forEach((el) => { el.hidden = type !== 'ws2812'; });
     $('brightness-out').textContent = f.led_brightness.value + ' %';
     f.mqtt_password.disabled = f.mqtt_password_clear.checked;
+    f.pps_lost_serve_min.disabled = !f.pps_lost_serve.checked;
+    f.pps_lost_stratum.disabled = !f.pps_lost_serve.checked;
     // The client limit only matters with the client list; the report buffer is sized from it (RAM, no PSRAM)
     f.mqtt_tf_client_limit.disabled = !f.mqtt_client_reporting.checked;
     const limit = Number(f.mqtt_tf_client_limit.value);
@@ -479,6 +487,10 @@
       gnss_pps_pin: pin('gnss_pps_pin', 'PPS pin'),
       gnss_baud: Number(f.gnss_baud.value),
       ptp_loopback_pin: pin('ptp_loopback_pin', 'PTP PPS loopback pin', true),
+      pps_holdover: Number(f.pps_holdover.value),
+      pps_lost_serve: f.pps_lost_serve.checked,
+      pps_lost_serve_min: Number(f.pps_lost_serve_min.value),
+      pps_lost_stratum: Number(f.pps_lost_stratum.value),
       lcd_enabled: f.lcd_enabled.checked,
       lcd_title: f.lcd_title.value,
       lcd_24_hour: f.lcd_24_hour.checked,
@@ -551,6 +563,15 @@
       body.ipv6_address = v6.address;
       body.ipv6_prefix = v6.prefix;
     }
+    if (!Number.isInteger(body.pps_holdover) || body.pps_holdover < 0 || body.pps_holdover > 600) {
+      throw new Error('PPS holdover: 0 to 600 s');
+    }
+    if (!Number.isInteger(body.pps_lost_serve_min) || body.pps_lost_serve_min < 0 || body.pps_lost_serve_min > 1440) {
+      throw new Error('Keep answering after the PPS loss: 0 to 1440 min');
+    }
+    if (!Number.isInteger(body.pps_lost_stratum) || body.pps_lost_stratum < 2 || body.pps_lost_stratum > 16) {
+      throw new Error('Stratum after the holdover: 2 to 16');
+    }
     if (!Number.isInteger(body.mqtt_report_period) || body.mqtt_report_period < 30 || body.mqtt_report_period > 86400) {
       throw new Error('MQTT reporting period: 30 to 86400 s');
     }
@@ -619,7 +640,7 @@
   function renderStatus() {
     const st = state.status;
     setHost(state.settings.fqdn);
-    yesNo($('st-time'), st.stratum_one, 'stratum 1, GNSS and PPS locked',
+    yesNo($('st-time'), st.stratum_one, st.pps_holdover ? 'stratum 1, PPS holdover (PPS lost)' : 'stratum 1, GNSS and PPS locked',
       st.time_set ? 'not stratum 1 (PPS ' + (st.pps_active ? 'active' : 'missing') + ', GNSS ' + (st.gnss_locked ? 'locked' : 'not locked') + ')' : 'waiting for the GNSS time');
     $('st-utc').textContent = st.utc || 'not set yet';
     const gnss = [st.ublox_receiver ? 'U-Blox UBX protocol' : 'NMEA standard protocol'];

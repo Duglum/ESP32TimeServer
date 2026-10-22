@@ -27,6 +27,8 @@ static constexpr size_t WEB_LCD_TITLE_SIZE = 18;    // 17 characters + NUL (the 
 static constexpr size_t WEB_MQTT_URI_SIZE = 128;
 static constexpr size_t WEB_MQTT_CREDENTIAL_SIZE = 65;
 static constexpr size_t WEB_MQTT_TOPIC_SIZE = 101;  // 100 characters + NUL (topics <topic>/report and <topic>/status)
+static constexpr uint16_t WEB_PPS_LOST_SERVE_MAX_MIN = 1440; // serving time after the PPS loss: up to 24 h (0 = no limit)
+static constexpr uint16_t WEB_PPS_HOLDOVER_MAX_S = 600;       // PPS holdover: 0 to 10 min (below the 15 min GNSS sync stale limit)
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MIN = 50;   // MQTT_CLIENT_LIMIT (report queue in RAM)
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MAX = 1000; // report buffer about 77 kB (no PSRAM)
 static constexpr size_t WEB_MAC_TEXT_SIZE = 18;     // "xx:xx:xx:xx:xx:xx" + NUL
@@ -134,8 +136,15 @@ struct web_settings_t
     // Over The Ethernet updates (firmware upload over the web admin server, see web_ote.h)
     bool ote_enabled;
     char ote_device_name[WEB_OTE_NAME_SIZE]; // mDNS host name: announced as <name>.local (also while OTE is off)
-    uint16_t ote_port_unused;                // was the ArduinoOTA UDP port; kept so that saved settings (version 5) stay valid
+    // PPS holdover in s after the PPS counts as lost (0 to WEB_PPS_HOLDOVER_MAX_S, takes effect at once). Stored in the
+    // place of the former ArduinoOTA port (same layout as blob version 5, which is read with the compiled default).
+    uint16_t pps_holdover_s;
     char ote_password[WEB_OTE_PASSWORD_SIZE]; // secret: "Authorization: Bearer" of scripted uploads
+
+    // PPS lost for longer than the holdover (takes effect at once; added in version 6, after the fields of version 5)
+    uint8_t pps_lost_stratum; // stratum of the answers: 2 to 15 (while coasting is possible), 16 = not synchronised
+    bool pps_lost_serve;      // false: NTP requests are not answered
+    uint16_t pps_lost_serve_min; // with pps_lost_serve: answers for this long after the PPS was lost (0 = no limit)
 };
 
 // Compiled defaults

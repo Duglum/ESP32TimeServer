@@ -1452,6 +1452,7 @@ struct sync_state_t
     bool pps_active = false;
     bool gnss_timing_valid = false;
     int64_t last_gnss_valid_us = 0;
+    int64_t last_pps_us = 0; // esp_timer time of the last PPS edge (start of the PPS holdover)
     sync_faults_t faults{};
 };
 
@@ -1469,6 +1470,11 @@ static sync_state_t get_sync_state_snapshot();
 static std::atomic<uint32_t> s_ntp_sync_state_sequence{0};
 static std::atomic<int64_t> s_ntp_last_successful_sync_us{0};
 static std::atomic<int64_t> s_ntp_last_gnss_valid_us{0};
+static std::atomic<int64_t> s_ntp_last_pps_us{0};
+static std::atomic<int64_t> s_pps_holdover_us{0};    // PPS holdover of the settings (live), see get_ntp_reply_status()
+static std::atomic<uint8_t> s_pps_lost_stratum{16};  // after the holdover: stratum of the replies (live)
+static std::atomic<bool> s_pps_lost_serve{true};     // after the holdover: answer NTP requests at all (live)
+static std::atomic<int64_t> s_pps_lost_serve_us{0};  // ... for this long after the PPS was lost, 0 = no limit (live)
 static std::atomic<bool> s_ntp_pps_active{false};
 static std::atomic<bool> s_ntp_gnss_timing_valid{false};
 static std::atomic<bool> s_ntp_pps_missing{false};
@@ -1477,6 +1483,7 @@ static std::atomic<bool> s_ntp_sanity_mismatch{false};
 static std::atomic<bool> s_ntp_sync_stale{false};
 static constexpr int64_t Sync_Stale_After_Us = static_cast<int64_t>(periodicGNSSRefreshEveryThisNumberOfMinutes) * 60LL * 1000000LL * 3LL;
 static constexpr int64_t Gnss_Validity_Timeout_Us = 3500000LL;
+static constexpr int64_t Pps_Lost_Coast_Max_Us = 3600LL * 1000000LL; // the model clock keeps the learned rate for one hour
 static constexpr int64_t Sync_Reboot_After_Us = 30LL * 60LL * 1000000LL;
 static constexpr int64_t Max_Sync_Attempt_Us = 10000000LL;
 static constexpr int64_t Gnss_Invalid_Reacquisition_After_Us = 30LL * 1000000LL;
@@ -1559,6 +1566,7 @@ static void publish_ntp_sync_state_locked(const sync_state_t &state)
     std::atomic_thread_fence(std::memory_order_release); // the data stores must not move before the odd sequence
     s_ntp_last_successful_sync_us.store(state.last_successful_sync_us, std::memory_order_relaxed);
     s_ntp_last_gnss_valid_us.store(state.last_gnss_valid_us, std::memory_order_relaxed);
+    s_ntp_last_pps_us.store(state.last_pps_us, std::memory_order_relaxed);
     s_ntp_pps_active.store(state.pps_active, std::memory_order_relaxed);
     s_ntp_gnss_timing_valid.store(state.gnss_timing_valid, std::memory_order_relaxed);
     s_ntp_pps_missing.store(state.faults.pps_missing, std::memory_order_relaxed);
@@ -1584,6 +1592,7 @@ static void sync_state_note_pps_edge(int64_t edge_us)
     if (xSemaphoreTake(s_sync_state_mutex, portMAX_DELAY) == pdTRUE)
     {
         s_sync_state.pps_active = true;
+        s_sync_state.last_pps_us = edge_us;
         refresh_sync_state_locked(&s_sync_state, edge_us);
         publish_ntp_sync_state_locked(s_sync_state);
         xSemaphoreGive(s_sync_state_mutex);
@@ -2475,6 +2484,9 @@ struct ntp_reply_status_t
     bool reference_time_valid = false;
     bool gnss_synchronized = false;
     bool pps_disciplined = false;
+    bool holdover = false;                          // stratum 1 in the PPS holdover
+    uint32_t root_dispersion = NTP_ROOT_DISPERSION; // NTP short format (1/65536 s)
+    bool serve = true;                              // false: the request is not answered (PPS lost, after the holdover)
 };
 
 static ntp_reply_status_t get_ntp_reply_status()
@@ -2487,6 +2499,7 @@ static ntp_reply_status_t get_ntp_reply_status()
 
         int64_t last_successful_sync_us = s_ntp_last_successful_sync_us.load(std::memory_order_relaxed);
         int64_t last_gnss_valid_us = s_ntp_last_gnss_valid_us.load(std::memory_order_relaxed);
+        int64_t last_pps_us = s_ntp_last_pps_us.load(std::memory_order_relaxed);
         bool pps_active = s_ntp_pps_active.load(std::memory_order_relaxed);
         bool gnss_timing_valid = s_ntp_gnss_timing_valid.load(std::memory_order_relaxed);
         sync_faults_t faults{
@@ -2512,6 +2525,49 @@ static ntp_reply_status_t get_ntp_reply_status()
 
         if (stratum_one)
             return {0, 1, "GPS", true, gnss_synchronized, pps_active};
+
+        // PPS lost (no pulse for Gnss_Validity_Timeout_Us) after the time was set
+        const int64_t pps_age_us = now_us - last_pps_us;
+        if (last_pps_us > 0 && !pps_active && pps_age_us >= 0 && s_time_has_been_set.load(std::memory_order_acquire))
+        {
+            // Coasting is possible: the GNSS was valid when the PPS was lost (the server was at stratum 1; the GNSS may
+            // be lost as well, e.g. antenna fault), the model clock (learned rate) and, with hardware time stamps, the
+            // free-running PTP clock are valid. The root dispersion grows by ntpHoldoverDispersionPpm of the time since
+            // the last pulse.
+            const bool can_coast = !s_time_setting_in_progress.load(std::memory_order_acquire) &&
+                                   last_gnss_valid_us > 0 && last_pps_us - last_gnss_valid_us <= Gnss_Validity_Timeout_Us &&
+                                   !faults.sanity_mismatch &&
+                                   s_model_valid.load(std::memory_order_acquire) &&
+                                   s_ntp_reference_valid.load(std::memory_order_acquire) &&
+                                   (!s_ptp_clock_ready.load(std::memory_order_acquire) ||
+                                    s_ptp_comp_valid.load(std::memory_order_acquire));
+            const uint32_t dispersion = NTP_ROOT_DISPERSION + static_cast<uint32_t>(
+                (pps_age_us * static_cast<int64_t>(ntpHoldoverDispersionPpm) * 65536LL + 999999999999LL) / 1000000000000LL);
+
+            // PPS holdover (from release 3.0.5): stratum 1 for the holdover time of the settings after the PPS was lost
+            if (pps_age_us < Gnss_Validity_Timeout_Us + s_pps_holdover_us.load(std::memory_order_relaxed))
+            {
+                if (can_coast && !faults.sync_stale && !sync_stale)
+                    return {0, 1, "GPS", true, false, false, true, dispersion};
+            }
+            else
+            {
+                // After the holdover, as set: no answer (also once the serving time after the PPS loss is over), or
+                // a lower stratum while coasting is still possible (at most Pps_Lost_Coast_Max_Us after the last
+                // pulse), otherwise stratum 16
+                const int64_t serve_us = s_pps_lost_serve_us.load(std::memory_order_relaxed);
+                if (!s_pps_lost_serve.load(std::memory_order_relaxed) ||
+                    (serve_us > 0 && pps_age_us >= Gnss_Validity_Timeout_Us + serve_us))
+                {
+                    ntp_reply_status_t silent{};
+                    silent.serve = false;
+                    return silent;
+                }
+                const uint8_t stratum = s_pps_lost_stratum.load(std::memory_order_relaxed);
+                if (stratum >= 2 && stratum <= 15 && can_coast && pps_age_us < Pps_Lost_Coast_Max_Us)
+                    return {0, stratum, "GPS", true, false, false, false, dispersion};
+            }
+        }
         return {3, 16, "INIT", false, gnss_synchronized, pps_active};
     }
 
@@ -2529,6 +2585,10 @@ static void build_ntp_reply(const uint8_t *request, uint8_t *reply, uint8_t vers
 
     reply[0] = static_cast<uint8_t>((status.leap_indicator << 6) | (version << 3) | 4);
     reply[1] = status.stratum;
+    reply[8] = static_cast<uint8_t>(status.root_dispersion >> 24);
+    reply[9] = static_cast<uint8_t>(status.root_dispersion >> 16);
+    reply[10] = static_cast<uint8_t>(status.root_dispersion >> 8);
+    reply[11] = static_cast<uint8_t>(status.root_dispersion);
     memcpy(reply + 12, status.reference_id, 4);
 
     if (status.reference_time_valid)
@@ -3108,6 +3168,11 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
 #endif
     uint8_t reply[NTP_MAX_PACKET_SIZE] = {};
     const ntp_reply_status_t status = get_ntp_reply_status();
+    if (!status.serve) // PPS lost for longer than the holdover, set to stop serving
+    {
+        release_hardware_ntp_request_buffer(frame);
+        return ESP_OK;
+    }
 #if MQTT_ENABLED
     if (s_mqtt_on)
     {
@@ -3329,6 +3394,11 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
 #endif
     uint8_t reply[NTP_MAX_PACKET_SIZE] = {};
     const ntp_reply_status_t status = get_ntp_reply_status();
+    if (!status.serve) // PPS lost for longer than the holdover, set to stop serving
+    {
+        release_hardware_ntp_request_buffer(frame);
+        return ESP_OK;
+    }
 #if MQTT_ENABLED
     if (s_mqtt_on)
     {
@@ -3769,6 +3839,7 @@ static void ethernet_transport_recovery_task(void *parameter)
     int64_t address_missing_since_us = 0;
     int64_t link_missing_since_us = 0;
     int64_t last_phy_check_us = 0;
+    int64_t last_not_serving_us = 0;
     int64_t persistent_interval_us = ETHERNET_RECOVERY_INTERVAL_US; // grows while the failures below persist
     uint32_t timestamp_recoveries = 0;
     for (;;)
@@ -3778,14 +3849,23 @@ static void ethernet_transport_recovery_task(void *parameter)
         const uint32_t interval_input = input - previous_input;
         previous_input = input;
 
+        // Requests without replies are no stall while the server does not serve on purpose (PPS lost for longer
+        // than the holdover, set to stop serving); the time of the last such second counts as a reply
+        const bool serving = get_ntp_reply_status().serve;
+        if (!serving)
+        {
+            last_not_serving_us = now_us;
+            recovery_verification_us = 0;
+        }
+
         ntp_transport_health_t health = ntp_transport_health_t::idle;
         if (!s_ethernet_connected.load(std::memory_order_acquire))
             health = ntp_transport_health_t::link_down;
         else if (!has_usable_network_address(xEventGroupGetBits(s_net_event_group)))
             health = ntp_transport_health_t::no_ip;
-        else if (s_ntp_external_responses_enabled.load(std::memory_order_acquire) && interval_input > 0)
+        else if (serving && s_ntp_external_responses_enabled.load(std::memory_order_acquire) && interval_input > 0)
         {
-            const int64_t last_reply = s_last_ntp_response_us.load(std::memory_order_relaxed);
+            const int64_t last_reply = std::max(s_last_ntp_response_us.load(std::memory_order_relaxed), last_not_serving_us);
             const int64_t first_input = s_first_ntp_input_us.load(std::memory_order_relaxed);
             if (first_input > 0 && now_us - (last_reply > 0 ? last_reply : first_input) >= NTP_TRANSPORT_STALL_TIMEOUT_US)
                 health = ntp_transport_health_t::stalled;
@@ -9677,6 +9757,8 @@ static void ntp_server_task(void *parameter)
                 }
 
                 ntp_reply_status_t status = get_ntp_reply_status();
+                if (!status.serve && !internal_request) // PPS lost for longer than the holdover, set to stop serving
+                    continue;
 #if MQTT_ENABLED
                 if (s_mqtt_on)
                 {
@@ -10362,6 +10444,8 @@ static int get_required_top_line_message()
 
     if (sync_snapshot.faults.sanity_mismatch)
         return 4;
+    if (get_ntp_reply_status().holdover)
+        return 15; // PPS holdover: still stratum 1 (shown before the PPS fault it implies)
     if (sync_snapshot.faults.pps_missing)
         return 5;
     if (sync_snapshot.faults.gnss_invalid)
@@ -10428,6 +10512,11 @@ static void update_RGB_LED()
             break;
 
         case 3: // There are queued MQTT items
+            state = web_led_state_t::warning;
+            flashing = true;
+            break;
+
+        case 15: // PPS holdover (still stratum 1)
             state = web_led_state_t::warning;
             flashing = true;
             break;
@@ -10613,13 +10702,14 @@ static void update_LED_LCD_Button_task(void *parameter)
                     // when button pushed: "ESP32 Time Server's"
                     memcpy(top_line_message + strlen(title), "'s", 2); // title: at most 17 characters
                 }
-                else if (required_top_line_message >= 11 && required_top_line_message <= 14)
+                else if (required_top_line_message >= 11 && required_top_line_message <= 15)
                 {
                     top_line_message[17] = '[';
                     top_line_message[18] = required_top_line_message == 11   ? 'M'
                                            : required_top_line_message == 12 ? '+'
                                            : required_top_line_message == 13 ? 'I'
-                                                                             : 'T';
+                                           : required_top_line_message == 14 ? 'T'
+                                                                             : 'H';
                     top_line_message[19] = ']';
                 }
 
@@ -10708,6 +10798,10 @@ void app_apply_live_settings(const web_settings_t &settings)
     if (s_live_settings_mutex != nullptr)
         xSemaphoreGive(s_live_settings_mutex);
     s_lcd_title_changed.store(true, std::memory_order_release);
+    s_pps_holdover_us.store(static_cast<int64_t>(settings.pps_holdover_s) * 1000000LL, std::memory_order_relaxed);
+    s_pps_lost_stratum.store(settings.pps_lost_stratum, std::memory_order_relaxed);
+    s_pps_lost_serve.store(settings.pps_lost_serve, std::memory_order_relaxed);
+    s_pps_lost_serve_us.store(static_cast<int64_t>(settings.pps_lost_serve_min) * 60LL * 1000000LL, std::memory_order_relaxed);
     s_lcd_24_hour.store(settings.lcd_24_hour, std::memory_order_relaxed);
     s_lcd_pad_hour.store(settings.lcd_pad_hour, std::memory_order_relaxed);
     s_lcd_show_time_zone.store(settings.lcd_show_time_zone, std::memory_order_relaxed);
@@ -10768,7 +10862,9 @@ void app_get_status(web_app_status_t &status)
     status.time_set = s_time_has_been_set.load(std::memory_order_acquire);
     status.pps_active = s_pps_discipline_active.load(std::memory_order_acquire);
     status.gnss_locked = s_gnss_locked.load(std::memory_order_acquire);
-    status.stratum_one = get_ntp_reply_status().stratum == 1;
+    const ntp_reply_status_t reply_status = get_ntp_reply_status();
+    status.stratum_one = reply_status.stratum == 1;
+    status.pps_holdover = reply_status.holdover;
     status.ublox_receiver = s_gnss_ublox;
     status.gnss_baud_in_use = s_detected_gnss_baud;
     const uint8_t dynamic_model = s_gnss_dynamic_model.load(std::memory_order_relaxed);

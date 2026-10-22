@@ -24,6 +24,7 @@ struct web_app_status_t
     bool pps_active;
     bool gnss_locked;
     bool stratum_one;
+    bool pps_holdover;            // stratum 1 in the PPS holdover (PPS lost)
     bool ublox_receiver;          // UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED: the baud rate is detected automatically
     uint32_t gnss_baud_in_use;
     char gnss_dynamic_model[16];  // U-Blox UBX: dynamic platform model read from the receiver ("" = not known)

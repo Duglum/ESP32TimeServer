@@ -447,7 +447,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
 
 ### 4.24 Ethernet recovery, ESP-IDF Ethernet driver, OTE over HTTPS (2026-10-21)
 
-Taken over from release 3.0.5 of roblatour/ESP32TimeServer (comparison of 2026-10-21), adapted to this fork. Not taken over: the interleaved cache with extra stored time stamps (the cache stays keyed by the client IP, 4.12) and the stratum 1 holdover after a GNSS loss (see 13).
+Taken over from release 3.0.5 of roblatour/ESP32TimeServer (comparison of 2026-10-21), adapted to this fork. Not taken over: the interleaved cache with extra stored time stamps (the cache stays keyed by the client IP, 4.12) and the stratum 1 holdover after a GNSS loss (see 13; taken over on 2026-10-22 with a default of 2 s, see 4.25).
 
 **Ethernet transport recovery** (`ethernet_transport_recovery_task()`, `restart_ethernet_transport()`)
 
@@ -484,6 +484,23 @@ Taken over from release 3.0.5 of roblatour/ESP32TimeServer (comparison of 2026-1
 - OTE needs the web admin server: with `WEB_ADMIN_ENABLED 0` no firmware can be uploaded (a warning is printed when OTE is on).
 
 **mDNS**: started at every boot with the ESP-IDF mdns component (`setup_mdns()`): `<OTE device name>.local` and the service `_https._tcp` on port 443 (with the web admin). Before, only ArduinoOTA started mDNS, and only while OTE was on. The page calls the field *mDNS host name*.
+
+### 4.25 PPS holdover and behaviour after it (2026-10-22)
+
+Holdover from release 3.0.5 of roblatour/ESP32TimeServer (`ntpHoldoverDurationUs`, `ntpHoldoverDispersionPpm`), with a default of 2 s instead of 180 s, plus settings for what happens after it. All four are on the page (GNSS and PPS, *When the PPS is lost*) and take effect at once with Apply (`app_apply_live_settings()`).
+
+- The PPS counts as lost after 3.5 s without a pulse (`Gnss_Validity_Timeout_Us`, unchanged). The holdover is counted from that moment (3.0.5 counts from the last pulse, so its 180 s are 176.5 s here; with the 2 s default the counting from the last pulse would never take effect).
+- **PPS holdover** (`pps_holdover_s`, 0 to 600 s, default `ntpHoldoverDurationUs` = 2 s, 0 = off): stratum 1 continues ("GPS", leap indicator 0) if the GNSS was valid when the PPS was lost (the GNSS may be lost as well, e.g. antenna fault), no time step is running, no sanity mismatch and no stale sync, the model clock is valid and, with hardware time stamps, the PTP compensation as well. The root dispersion grows by `ntpHoldoverDispersionPpm` (200 ppm) of the time since the last pulse; the replies now carry the root dispersion of the status (`build_ntp_reply()`). At most 600 s, so the 15 min sync stale limit cannot end it early.
+- **After the holdover** (defaults in `ESP32TimeServerSettings.h`):
+  - `pps_lost_serve` (`ntpServeAfterHoldover`, default on): off = the requests are not answered at all (raw IPv4 / IPv6 path and sockets; internal requests of the health test still are).
+  - `pps_lost_serve_min` (`ntpServeAfterPpsLostMinutes`, 0 to 1440 min, default 60, 0 = no limit): with answering on, the answers stop this long after the PPS was lost (the holdover included).
+  - `pps_lost_stratum` (`ntpStratumAfterHoldover`, 2 to 16, default 16): 16 = stratum 16, leap indicator 3, "INIT" (as before). 2 to 15: leap indicator 0, "GPS", the growing root dispersion, while the coasting conditions of the holdover hold, at most one hour after the last pulse (`Pps_Lost_Coast_Max_Us`, the limit of the model clock and the PTP mapping); then stratum 16.
+  - The page and the settings file warn that relying on time that is no longer synchronised is probably not a good idea, and to use a stratum below 16 and a long answering time only when the clients absolutely need a time source.
+- Defaults: the old behaviour apart from the 2 s holdover and that the answers stop 60 min after a PPS loss.
+- While the server does not answer on purpose, the Ethernet transport recovery does not count the requests without replies as a stall (and does not verify a recovery by them); the time of the last such second counts as a reply when answering resumes.
+- LCD and LED: `[H]` (code 15), LED colour of the warning state, flashing, during the holdover. The status on the page shows "stratum 1, PPS holdover (PPS lost)".
+- Settings blob version 6: the holdover is stored in the place of the former OTE port, the three other fields are appended. A version 5 set is still read (its fields are a prefix of the new layout); the four fields then get their defaults.
+- Fix from the review: the OTE default password check of the page (`handle_state()`) had a raw NUL byte in a character literal; it is written as `'\0'` now.
 
 ## 5. Security and open ports
 
@@ -765,7 +782,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - The free-running servo and the loopback run on all four boards (loopback on GPIO 23); the board's own error is below what the DiskStation can resolve (about 0.19 µs). The PLL clock source (4.22) is not yet verified on the board.
 - `esp_timer_impl_get_counter_reg()` is an internal function of esp_timer. If a later IDF version renames it, the build fails at the link step; then set `FINE_LOCAL_TIMEBASE 0`.
 - The calibrations assume the board is warm and the PPS locked. A run that does not finish starts again at the next boot.
-- After a PPS loss the server goes to stratum 16 after 3.5 s (no holdover at stratum 1), although the PTP clock now keeps the learned rate (simulated: below 1 µs in 5 minutes with a constant crystal).
+- After a PPS loss the server stays at stratum 1 for the PPS holdover (default 2 s after the PPS counts as lost, 4.25) and then answers as set (default stratum 16, answers stop 60 min after the loss). The PTP clock keeps the learned rate (simulated: below 1 µs in 5 minutes with a constant crystal). Not tested on the board yet.
 - Leap second warnings (LI) from the GNSS are not passed on.
 - If the GNSS receiver stops answering at run time, the recovery can end in `halt_with_display()`; the sync task then waits forever (stratum 16, no reboot).
 - Ethernet recovery, ESP-IDF Ethernet driver, OTE over HTTPS, mDNS (4.24): built, not tested on the board yet. Points to check first: DHCP host name, IPv6 (SLAAC, neighbour discovery with the multicast setting), `<name>.local`, the hardware NTP path and the PTP loopback after the driver change, an upload on the page and with the script, a refused image (wrong build profile), an Ethernet recovery (unplug the cable for more than 35 s once the server is open for business).
@@ -775,7 +792,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - Changing the time zone at run time calls `setenv()` / `tzset()` while other tasks may call `localtime_r()`; newlib guards both, a reading during the switch may use the old zone once.
 - The settings blob has a layout version: after a firmware update that changes `web_settings_t` the saved settings are ignored (compiled defaults) until they are saved again.
 - PreferIPvX, MACAddress and the MQTT reporting details stay compile-time settings. `UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED` is now the default of the GNSS protocol setting: both GNSS paths are compiled in (`setup_gnss_ublox_receiver()`, `setup_gnss_nmea_receiver()`).
-- The settings blob layout version is 5 (2: GNSS protocol and LED colours, 3: OTE settings, 4: up to 8 NTP keys, 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins): settings saved with an older version are ignored once.
+- The settings blob layout version is 6 (2: GNSS protocol and LED colours, 3: OTE settings, 4: up to 8 NTP keys, 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins, 6: PPS holdover and the behaviour after it): settings saved with version 5 are read (the new fields get their defaults), older ones are ignored once.
 
 ## 13. Recommendations that are not in the code
 
@@ -787,7 +804,7 @@ NVS encryption (not enabled, decision of 2026-10-21; it burns an eFuse key block
 4. Use it together with flash encryption and Secure Boot V2 for real protection against an attacker with physical access; otherwise the firmware with the compiled secrets stays readable.
 
 - Per-client rate limiting (like chrony's `ratelimit`) to protect the other clients from a single flooding host.
-- Holdover at stratum 1 after a PPS loss: not wanted (decision of 2026-10-20); the server goes to stratum 16 after 3.5 s as before.
+- Holdover at stratum 1 after a PPS loss: was not wanted (decision of 2026-10-20); since 2026-10-22 it is a setting with a default of 2 s (4.25).
 - OTE: Secure Boot V2 and flash encryption if it is enabled; MQTT over TLS.
 
 ## 14. Files and how to build
