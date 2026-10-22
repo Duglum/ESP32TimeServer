@@ -57,6 +57,13 @@ namespace
         return static_cast<uint16_t>(seconds < 0 ? 0 : seconds > WEB_PPS_HOLDOVER_MAX_S ? WEB_PPS_HOLDOVER_MAX_S : seconds);
     }
 
+    // ntpServeAfterPpsLostMinutes within the range of the setting
+    uint16_t default_pps_lost_serve_min()
+    {
+        return static_cast<uint16_t>(ntpServeAfterPpsLostMinutes > WEB_PPS_LOST_SERVE_MAX_MIN ? WEB_PPS_LOST_SERVE_MAX_MIN
+                                                                                             : ntpServeAfterPpsLostMinutes);
+    }
+
     struct settings_blob_t
     {
         uint32_t magic;
@@ -96,7 +103,16 @@ namespace
         size_t length = sizeof(settings_blob_t);
         const esp_err_t err = nvs_get_blob(handle, key, raw, &length);
         const bool readable = err == ESP_OK && length >= HEADER_SIZE + sizeof(uint32_t);
-        settings_blob_t header{};
+        // Only the header: a settings_blob_t or web_settings_t (about 1 kB each) must not be on the stack, this runs
+        // in app_main (main task stack 3584 bytes)
+        struct
+        {
+            uint32_t magic;
+            uint32_t version;
+            uint32_t size;
+            uint32_t flags;
+        } header{};
+        static_assert(sizeof(header) == HEADER_SIZE, "blob header layout");
         uint32_t stored_crc = 0;
         if (readable)
         {
@@ -118,17 +134,15 @@ namespace
             ESP_LOGW(TAG, "Stored web settings '%s' have a CRC error, ignored", key);
         else
         {
-            blob = settings_blob_t{};
+            memset(&blob, 0, sizeof(blob)); // no settings_blob_t{} temporary on the stack
             memcpy(&blob, raw, HEADER_SIZE + header.size);
             if (version_5)
             {
                 // The holdover field held the former OTE port; the fields of version 6 get the compiled defaults
-                web_settings_t defaults{};
-                web_settings_defaults(defaults);
-                blob.settings.pps_holdover_s = defaults.pps_holdover_s;
-                blob.settings.pps_lost_stratum = defaults.pps_lost_stratum;
-                blob.settings.pps_lost_serve = defaults.pps_lost_serve;
-                blob.settings.pps_lost_serve_min = defaults.pps_lost_serve_min;
+                blob.settings.pps_holdover_s = default_pps_holdover_s();
+                blob.settings.pps_lost_stratum = ntpStratumAfterHoldover;
+                blob.settings.pps_lost_serve = ntpServeAfterHoldover;
+                blob.settings.pps_lost_serve_min = default_pps_lost_serve_min();
                 blob.version = BLOB_VERSION;
                 blob.size = sizeof(web_settings_t);
                 ESP_LOGI(TAG, "Stored web settings '%s' of version 5 read; the PPS holdover settings have their defaults", key);
@@ -465,9 +479,7 @@ void web_settings_defaults(web_settings_t &out)
     out.pps_holdover_s = default_pps_holdover_s();
     out.pps_lost_stratum = ntpStratumAfterHoldover;
     out.pps_lost_serve = ntpServeAfterHoldover;
-    out.pps_lost_serve_min = static_cast<uint16_t>(ntpServeAfterPpsLostMinutes > WEB_PPS_LOST_SERVE_MAX_MIN
-                                                       ? WEB_PPS_LOST_SERVE_MAX_MIN
-                                                       : ntpServeAfterPpsLostMinutes);
+    out.pps_lost_serve_min = default_pps_lost_serve_min();
 
     out.lcd_enabled = LIQUID_CRYSTAL_DISPLAY_ENABLED != 0;
     copy_text(out.lcd_title, lcdTopLineTitle);
