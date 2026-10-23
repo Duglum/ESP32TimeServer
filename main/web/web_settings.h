@@ -30,6 +30,7 @@ static constexpr size_t WEB_MQTT_TOPIC_SIZE = 101;  // 100 characters + NUL (top
 static constexpr uint16_t WEB_PPS_LOST_SERVE_MAX_MIN = 1440; // serving time after the PPS loss: up to 24 h (0 = no limit)
 static constexpr uint16_t WEB_PPS_HOLDOVER_MAX_S = 600;       // PPS holdover: 0 to 10 min (below the 15 min GNSS sync stale limit)
 static constexpr uint16_t WEB_PPS_DISPERSION_MAX_PPM = 10000; // root dispersion growth while coasting: up to 10 ms per second
+static constexpr uint16_t WEB_NTP_RATE_LIMIT_MAX = 10000;     // NTP requests per second and client (0 = no limit)
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MIN = 50;   // MQTT_CLIENT_LIMIT (report queue in RAM)
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MAX = 1000; // report buffer about 77 kB (no PSRAM)
 static constexpr size_t WEB_MAC_TEXT_SIZE = 18;     // "xx:xx:xx:xx:xx:xx" + NUL
@@ -151,6 +152,10 @@ struct web_settings_t
     // of the time since the last pulse = us per second (1 to WEB_PPS_DISPERSION_MAX_PPM, takes effect at once; added
     // in version 7)
     uint16_t pps_dispersion_ppm;
+
+    // NTP requests per second and client IP address (0 = no limit, at most WEB_NTP_RATE_LIMIT_MAX); requests over the
+    // limit are dropped without an answer (takes effect at once; added in version 8)
+    uint16_t ntp_client_rate_limit;
 };
 
 // Compiled defaults

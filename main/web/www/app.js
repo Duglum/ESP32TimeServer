@@ -409,6 +409,7 @@
       dns: (s.dns || []).join('\n'),
       // "" = hardware MAC: the field stays empty and shows the hardware MAC as its (grey) placeholder
       mac_address: s.mac_address || '',
+      ntp_client_rate_limit: String(s.ntp_client_rate_limit),
       gnss_protocol: s.gnss_protocol,
       gnss_tx_pin: String(s.gnss_tx_pin),
       gnss_rx_pin: String(s.gnss_rx_pin),
@@ -503,6 +504,7 @@
       if (name === 'mqtt_report_period') text += ' s';
       if (name === 'pps_holdover') text = value === '0' ? t('off') : text + ' s';
       if (name === 'pps_lost_serve_min') text = value === '0' ? t('no limit') : text + ' min';
+      if (name === 'ntp_client_rate_limit') text = value === '0' ? t('off') : t('{n} per second', { n: value });
       if (name === 'pps_dispersion') text = (lang === 'de' ? text.replace('.', ',') : text) + ' ms/s';
       if (name === 'mac_address' && !state.defaults.mac_address) text = t('the hardware MAC');
       if (displayNames[name] && displayNames[name][value]) text = t(displayNames[name][value]);
@@ -606,6 +608,7 @@
       ipv4_dhcp: f.ipv4_dhcp.checked,
       ipv6_slaac: f.ipv6_slaac.checked,
       ipv6_gateway: f.ipv6_gateway.value.trim(),
+      ntp_client_rate_limit: Number(f.ntp_client_rate_limit.value),
       gnss_protocol: f.gnss_protocol.value,
       gnss_tx_pin: pin('gnss_tx_pin', 'GNSS TX pin'),
       gnss_rx_pin: pin('gnss_rx_pin', 'GNSS RX pin'),
@@ -688,6 +691,10 @@
       if (!v6) throw new Error(t('IPv6 address: address/prefix length expected'));
       body.ipv6_address = v6.address;
       body.ipv6_prefix = v6.prefix;
+    }
+    if (f.ntp_client_rate_limit.value.trim() === '' || !Number.isInteger(body.ntp_client_rate_limit) ||
+        body.ntp_client_rate_limit < 0 || body.ntp_client_rate_limit > 10000) {
+      throw new Error(t('Rate limit per client: 0 to 10000 requests per second'));
     }
     if (!Number.isInteger(body.pps_holdover) || body.pps_holdover < 0 || body.pps_holdover > 600) {
       throw new Error(t('PPS holdover: 0 to 600 s'));
@@ -784,6 +791,11 @@
         ? t(keys === 1 ? 'on, {n} key of the web settings' : 'on, {n} keys of the web settings', { n: keys })
         : t(keys === 1 ? 'on, {n} key compiled in' : 'on, {n} keys compiled in', { n: keys }))
       : (state.settings.ntp_auth_enabled ? t('on, but no usable key') : t('off'));
+    // Requests dropped by the per-client rate limit since the start (also those dropped before it was switched off)
+    const limit = state.settings.ntp_client_rate_limit;
+    $('st-rate-limit').textContent = limit
+      ? t('{limit} per second and client, {n} requests dropped since the start', { limit: limit, n: st.ntp_rate_limited })
+      : t('off, {n} requests dropped since the start', { n: st.ntp_rate_limited });
     $('st-firmware').textContent = st.firmware + ' (' + st.build + ')';
     $('st-chip').textContent = 'ESP32-P4 ' + st.chip_revision;
     $('ptp-chip').textContent = st.chip_revision;

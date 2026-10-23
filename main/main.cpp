@@ -1214,6 +1214,7 @@ static std::atomic<int64_t> s_last_load_shedding_us{0};
 static std::atomic<uint64_t> s_ntp_admission_window{0};
 static std::atomic<uint32_t> s_ntp_input_count{0};
 static std::atomic<bool> s_ntp_shed_during_period{false};
+static std::atomic<uint32_t> s_ntp_rate_limited_requests{0}; // dropped by the per-client rate limit since the start
 static SemaphoreHandle_t s_hardware_ntp_transmit_mutex = nullptr;
 
 enum class ntp_transport_health_t : uint8_t
@@ -3152,8 +3153,15 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
                                frame[ip_offset + 15];
     const uint16_t client_port = static_cast<uint16_t>((frame[udp_offset] << 8) | frame[udp_offset + 1]);
     ntp_client_record_t client_record{};
-    if (!ntp_cache_find_or_create(client_ip, client_port, &client_record))
+    bool rate_limited = false;
+    if (!ntp_cache_find_or_create(client_ip, client_port, &client_record, &rate_limited))
     {
+        release_hardware_ntp_request_buffer(frame);
+        return ESP_OK;
+    }
+    if (rate_limited) // over the per-client rate limit: dropped without an answer
+    {
+        s_ntp_rate_limited_requests.fetch_add(1, std::memory_order_relaxed);
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
     }
@@ -3377,8 +3385,15 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
     memcpy(&client_ip, frame + ip_offset + 8, sizeof(client_ip));
     const uint16_t client_port = static_cast<uint16_t>((frame[udp_offset] << 8) | frame[udp_offset + 1]);
     ntp_client_record_ipv6_t client_record{};
-    if (!ntp_cache_find_or_create_ipv6(&client_ip, client_port, &client_record))
+    bool rate_limited = false;
+    if (!ntp_cache_find_or_create_ipv6(&client_ip, client_port, &client_record, &rate_limited))
     {
+        release_hardware_ntp_request_buffer(frame);
+        return ESP_OK;
+    }
+    if (rate_limited) // over the per-client rate limit: dropped without an answer
+    {
+        s_ntp_rate_limited_requests.fetch_add(1, std::memory_order_relaxed);
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
     }
@@ -9741,6 +9756,38 @@ static void ntp_server_task(void *parameter)
                     continue;
                 }
 
+                const struct sockaddr_in *source_ipv4 = nullptr;
+                const struct in6_addr *client_ipv6 = nullptr;
+                ntp_client_record_t client_ipv4_record{};
+                ntp_client_record_ipv6_t client_ipv6_record{};
+                // Requests of this device to itself are not rate limited (nullptr: no check)
+                bool rate_limited = false;
+                bool *const rate_limit_check = internal_request ? nullptr : &rate_limited;
+                if (source_addr.ss_family == AF_INET)
+                {
+                    source_ipv4 = reinterpret_cast<const struct sockaddr_in *>(&source_addr);
+                    ntp_cache_find_or_create(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port), &client_ipv4_record,
+                                             rate_limit_check);
+                }
+                else if (source_addr.ss_family == AF_INET6)
+                {
+                    client_ipv6 = &reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_addr;
+                    ntp_cache_find_or_create_ipv6(client_ipv6,
+                                                  ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_port),
+                                                  &client_ipv6_record, rate_limit_check);
+                }
+                if (rate_limited) // over the per-client rate limit: dropped without an answer
+                {
+                    s_ntp_rate_limited_requests.fetch_add(1, std::memory_order_relaxed);
+#if MQTT_ENABLED
+                    if (s_mqtt_on)
+                    {
+                        s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
+                    }
+#endif
+                    continue;
+                }
+
 #if MQTT_ENABLED
                 if (s_mqtt_on)
                 {
@@ -9753,22 +9800,6 @@ static void ntp_server_task(void *parameter)
                     mqtt_enqueue_ntp_request(source_addr);
                 }
 #endif
-                const struct sockaddr_in *source_ipv4 = nullptr;
-                const struct in6_addr *client_ipv6 = nullptr;
-                ntp_client_record_t client_ipv4_record{};
-                ntp_client_record_ipv6_t client_ipv6_record{};
-                if (source_addr.ss_family == AF_INET)
-                {
-                    source_ipv4 = reinterpret_cast<const struct sockaddr_in *>(&source_addr);
-                    ntp_cache_find_or_create(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port), &client_ipv4_record);
-                }
-                else if (source_addr.ss_family == AF_INET6)
-                {
-                    client_ipv6 = &reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_addr;
-                    ntp_cache_find_or_create_ipv6(client_ipv6,
-                                                  ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_port),
-                                                  &client_ipv6_record);
-                }
 
                 ntp_reply_status_t status = get_ntp_reply_status();
                 if (!status.serve && !internal_request) // PPS lost for longer than the holdover, set to stop serving
@@ -10802,7 +10833,8 @@ void setup_symmetric_key_authentication()
 
 // ---- Interface to the web admin (web/web_settings.h, web/web_server.h) ----
 
-// Live settings: time zone, LCD text options, LED brightness, NTP authentication
+// Live settings: time zone, LCD text options, LED brightness, NTP authentication, PPS loss behaviour, NTP client
+// rate limit
 void app_apply_live_settings(const web_settings_t &settings)
 {
     if (s_live_settings_mutex != nullptr)
@@ -10817,6 +10849,7 @@ void app_apply_live_settings(const web_settings_t &settings)
     s_pps_lost_serve.store(settings.pps_lost_serve, std::memory_order_relaxed);
     s_pps_lost_serve_us.store(static_cast<int64_t>(settings.pps_lost_serve_min) * 60LL * 1000000LL, std::memory_order_relaxed);
     s_pps_dispersion_ppm.store(settings.pps_dispersion_ppm, std::memory_order_relaxed);
+    ntp_cache_set_rate_limit(settings.ntp_client_rate_limit);
     s_lcd_24_hour.store(settings.lcd_24_hour, std::memory_order_relaxed);
     s_lcd_pad_hour.store(settings.lcd_pad_hour, std::memory_order_relaxed);
     s_lcd_show_time_zone.store(settings.lcd_show_time_zone, std::memory_order_relaxed);
@@ -10893,6 +10926,7 @@ void app_get_status(web_app_status_t &status)
     status.ntp_auth_available = ntp_auth_available();
     status.ntp_auth_compiled_keys = ntp_auth_compiled_key_count();
     status.ntp_auth_keys_in_use = ntp_auth_key_count();
+    status.ntp_rate_limited_requests = s_ntp_rate_limited_requests.load(std::memory_order_relaxed);
     status.free_heap = esp_get_free_heap_size();
 }
 

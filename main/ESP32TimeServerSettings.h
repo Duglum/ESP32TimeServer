@@ -194,6 +194,22 @@ static constexpr bool ntpServeAfterHoldover = true;
 static constexpr uint32_t ntpServeAfterPpsLostMinutes = 60;
 static constexpr uint8_t ntpStratumAfterHoldover = 16;
 
+// Per-client NTP rate limit (default of the web admin setting "Rate limit per client", requests per second and client
+// IP address, 0 to 10000; 0 = no limit). Requests over the limit are dropped without an answer (no Kiss-o'-Death).
+// A client is identified by its source IP address only: chrony uses a new source port for every request and NAT
+// routers rewrite ports, so all clients behind one NAT address share one limit.
+// Why 20:
+// - The worst-case single client is chrony with "minpoll -4 maxpoll -4": one request every 2^-4 s = 62.5 ms, i.e.
+//   16 requests per second. iburst / burst only shorten intervals to 2 s or less (no effect at 62.5 ms) and the
+//   interleaved mode sends no extra requests, so neither raises this rate.
+// - The limit allows a burst of one second worth of requests, which absorbs network jitter and processing delays.
+//   It cannot absorb a lasting rate difference: a limit of exactly 16 would sooner or later drop requests of a 16/s
+//   client whose clock runs slightly fast compared to this server's (e.g. while chrony slews its clock, by up to
+//   83333 ppm by default). The 25 % margin (16 * 1.25 = 20) covers that with room to spare.
+// - Raise it only if many clients share one NAT address. Newer chrony versions also accept minpoll -6 or -7
+//   (64 or 128 requests per second); such clients are limited to this rate.
+static constexpr uint16_t ntpClientRateLimitPerSecond = 20;
+
 // This project was designed and tested to work with a SparkFun GNSS Receiver Breakout board which uses a u-blox - MAX-M10S module.
 // ( https://www.sparkfun.com/sparkfun-gnss-receiver-breakout-max-m10s-qwiic.html )
 // However, the code has fallback logic for non/cloned/older u-blox gnss modules and has been tested with one such device as well.

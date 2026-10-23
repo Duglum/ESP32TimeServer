@@ -5,6 +5,7 @@
 //
 
 #include "ntp_cache.h"
+#include <stdatomic.h>
 #include <string.h>
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -16,13 +17,41 @@
 // 1 = distinguish clients by IP address and source port
 #define NTP_CACHE_MATCH_PORT 0
 
+// Per-client rate limit: a client may send this far ahead of its sustained rate, i.e. a burst of up to one second
+// of requests (the limit per second). It also absorbs processing delays of the NTP tasks (e.g. a flash write), after
+// which queued requests of a conforming client are handled in quick succession.
+#define RATE_LIMIT_BURST_US 1000000
+
 static ntp_client_record_t s_ipv4_records[MAX_TRACKED_CLIENTS_IPV4];
 static ntp_client_record_ipv6_t s_ipv6_records[MAX_TRACKED_CLIENTS_IPV6];
 static SemaphoreHandle_t s_mutex;
+static _Atomic uint32_t s_rate_interval_us; // 1 s / rate limit, 0 = no rate limit
 
 static int64_t current_time_ms(void)
 {
     return esp_timer_get_time() / 1000;
+}
+
+// Must be called with s_mutex held.
+// Generic cell rate algorithm (virtual scheduling): *tat_us is the theoretical arrival time of the next request.
+// Each answered request moves it on by the interval (1 s / limit); a request that arrives more than
+// RATE_LIMIT_BURST_US - interval ahead of it is over the limit and leaves it unchanged. The sustained rate is
+// exactly the limit, with a burst of up to one second worth of requests, and there are no window boundaries at which
+// a conforming client could be counted twice. Costs one clock reading, a compare and an add.
+static bool rate_limit_exceeded(int64_t *tat_us)
+{
+    const uint32_t interval_us = atomic_load_explicit(&s_rate_interval_us, memory_order_relaxed);
+    if (interval_us == 0)
+    {
+        return false;
+    }
+    const int64_t now_us = esp_timer_get_time();
+    if (*tat_us - now_us > (int64_t)RATE_LIMIT_BURST_US - (int64_t)interval_us)
+    {
+        return true;
+    }
+    *tat_us = (*tat_us > now_us ? *tat_us : now_us) + interval_us;
+    return false;
 }
 
 static bool port_matches(uint16_t record_port, uint16_t port)
@@ -114,8 +143,18 @@ void ntp_cache_deinit(void)
     }
 }
 
-bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, ntp_client_record_t *record)
+void ntp_cache_set_rate_limit(uint32_t requests_per_second)
 {
+    atomic_store_explicit(&s_rate_interval_us, requests_per_second == 0 ? 0u : 1000000u / requests_per_second,
+                          memory_order_relaxed);
+}
+
+bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, ntp_client_record_t *record, bool *rate_limited)
+{
+    if (rate_limited != NULL)
+    {
+        *rate_limited = false;
+    }
     if (s_mutex == NULL || record == NULL || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
     {
         return false;
@@ -132,6 +171,10 @@ bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, ntp_client_record_t *r
         s_ipv4_records[selected].last_seen_ms = current_time_ms();
     }
     s_ipv4_records[selected].client_port = port;
+    if (rate_limited != NULL)
+    {
+        *rate_limited = rate_limit_exceeded(&s_ipv4_records[selected].rate_tat_us);
+    }
 
     *record = s_ipv4_records[selected];
     xSemaphoreGive(s_mutex);
@@ -163,8 +206,13 @@ bool ntp_cache_update(uint32_t ip, uint16_t port, uint64_t t2, uint64_t t3)
     return true;
 }
 
-bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint16_t port, ntp_client_record_ipv6_t *record)
+bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint16_t port, ntp_client_record_ipv6_t *record,
+                                   bool *rate_limited)
 {
+    if (rate_limited != NULL)
+    {
+        *rate_limited = false;
+    }
     if (s_mutex == NULL || ip == NULL || record == NULL || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
     {
         return false;
@@ -181,6 +229,10 @@ bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint16_t port, ntp
         s_ipv6_records[selected].last_seen_ms = current_time_ms();
     }
     s_ipv6_records[selected].client_port = port;
+    if (rate_limited != NULL)
+    {
+        *rate_limited = rate_limit_exceeded(&s_ipv6_records[selected].rate_tat_us);
+    }
 
     *record = s_ipv6_records[selected];
     xSemaphoreGive(s_mutex);

@@ -2,7 +2,7 @@
 
 This file combines `Sonnet_CHANGELOG.md` (precision and stability work done earlier) and `Review_2026-10-19_CHANGELOG.md` (review of 2026-10-19 and its follow-ups). Where the later review changed or replaced something from the earlier work, only the current state is described.
 
-State described here: the files in the repository on 2026-10-19 after the review, including the stack sizes set by the user afterwards (section 4.15), and the follow-up of the same evening: fine local timebase and free-running, frequency disciplined PTP clock with optional PPS loopback (sections 4.19 to 4.21, results in 7.6), of 2026-10-20: PTP clock from the 80 MHz PLL, root dispersion 1 (section 4.22), and of 2026-10-21: HTTPS web admin page (section 4.23), Ethernet recovery, ESP-IDF Ethernet driver and OTE over HTTPS (section 4.24).
+State described here: the files in the repository on 2026-10-19 after the review, including the stack sizes set by the user afterwards (section 4.15), and the follow-up of the same evening: fine local timebase and free-running, frequency disciplined PTP clock with optional PPS loopback (sections 4.19 to 4.21, results in 7.6), of 2026-10-20: PTP clock from the 80 MHz PLL, root dispersion 1 (section 4.22), and of 2026-10-21: HTTPS web admin page (section 4.23), Ethernet recovery, ESP-IDF Ethernet driver and OTE over HTTPS (section 4.24), of 2026-10-22 / 23: PPS holdover (section 4.25) and the per-client NTP rate limit (section 4.26).
 
 Contents
 
@@ -53,6 +53,7 @@ Contents
 | 24 | **PTP clock from the 80 MHz PLL** instead of the 40 MHz crystal (2026-10-20) | time stamp steps 13 ns instead of 40 ns |
 | 25 | **Web admin page** (HTTPS, TCP 443, 2026-10-21): network, GNSS / PPS, LCD, time zone, LED, MQTT and NTP authentication settings; Apply / Save Settings (NVS) / Reboot / Factory reset; LCD, LED, MQTT and NTP authentication always compiled in and switched at run time | common settings without rebuilding; per-device TLS key, salted password hash, sessions with CSRF protection, allow-list |
 | 26 | **Ethernet recovery hardening, ESP-IDF Ethernet driver, OTE over HTTPS** (2026-10-21, from release 3.0.5) | recovery under the time mutex with a 45 s watchdog, PHY link read, more triggers; firmware upload on the page or by script over TLS, image checked before it is written |
+| 27 | **Per-client NTP rate limit** (2026-10-23): 20 requests per second and client IP address by default, setting in the Network panel | one client cannot occupy the reply path; requests over the limit are dropped silently, no effect on the time stamps |
 
 No memory leak was found in the review (section 4.13).
 
@@ -510,6 +511,21 @@ Holdover from release 3.0.5 of roblatour/ESP32TimeServer (`ntpHoldoverDurationUs
 - Settings blob version 7: the root dispersion growth is appended (it fits into the tail padding of version 6, so both have the same size; the version number tells them apart). Versions 5 and 6 are still read; the new field then gets its default.
 - Fix from the review: the OTE default password check of the page (`handle_state()`) had a raw NUL byte in a character literal; it is written as `'\0'` now.
 
+### 4.26 Per-client NTP rate limit (2026-10-23)
+
+Requests per second and client, as a web setting (Network panel, *NTP clients*, `ntp_client_rate_limit`, 0 to 10000, 0 = off, default `ntpClientRateLimitPerSecond` = 20). Takes effect at once with Apply (`app_apply_live_settings()` → `ntp_cache_set_rate_limit()`); it is not a network change, so no confirmation.
+
+- **Client:** the source IP address (IPv4, or the full 128-bit IPv6 address; a /64 is usually a whole LAN). The source port cannot be used: chrony uses a new one for every request and NAT routers rewrite ports. All clients behind one NAT address share one limit.
+- **Default 20:** the worst-case single client is chrony with `minpoll -4 maxpoll -4` (16 requests per second; iburst and the interleaved mode do not add requests). A limit of exactly 16 would sooner or later drop requests of such a client whose clock runs slightly fast compared to the server (any lasting rate difference adds up); the 25 % margin covers that, e.g. chrony slewing its clock by up to 83333 ppm. The reasoning is in `ESP32TimeServerSettings.h`. Newer chrony versions accept `minpoll -6` / `-7` (64 / 128 per second); such clients are limited to the setting.
+- **Algorithm:** generic cell rate algorithm (virtual scheduling) with one `int64_t rate_tat_us` per cache record (theoretical arrival time of the next request, `esp_timer` µs): an answered request moves it on by 1 s / limit, a request that arrives more than 1 s - interval ahead of it is over the limit and leaves it unchanged. Sustained rate exactly the limit, bursts of up to one second worth of requests (absorbs jitter and processing stalls of the NTP tasks), no window boundaries. A simulation of the same integer arithmetic (1 h each): a 16/s client with ±5 ms jitter, with a clock 8.3 % fast, or with 300 ms stalls every 10 s gets no drop at a limit of 20; a 100/s flood is held to 20/s.
+- **Placement:** inside `ntp_cache_find_or_create()` / `ntp_cache_find_or_create_ipv6()`, which both NTP paths already call (same lookup, same mutex; the check costs one clock reading, a compare and an add). Hardware path: after the authentication check, before the reply is built; the RX callback is unchanged. Socket path: after the global load shedding, before the MQTT request counters. Requests of the device to itself (startup health test) are not limited.
+- **Over the limit:** dropped without an answer (no Kiss-o'-Death "RATE": a KoD costs the same transmit path as an answer and can be abused with spoofed sources to make a victim back off; chrony's own `ratelimit` drops as well). The interleaved mode is not disturbed: the cache keeps T2 / T3 of the last answered request, which is what the client refers to next.
+- **Timing:** T2 is taken before the check (hardware RX time stamp, or right after `recvfrom()`), T3 after it, so the time stamps are unchanged; the server turnaround grows by well under 1 µs, which the NTP calculation removes. No new lock, no allocation, no change to the PPS / PTP code.
+- **Memory:** 8 bytes per cache record, about 2 kB for the 128 + 128 records.
+- **Status:** the Status panel shows the limit and the number of requests dropped by it since the start (`s_ntp_rate_limited_requests`, `ntp_rate_limited` in `/api/state`). The MQTT report is unchanged; with MQTT the dropped requests count in the requests per second, not as valid requests.
+- Limits: a record that is pushed out of the cache (more than 128 active clients of one family) starts again with a full burst; a flood with many spoofed sources is left to the global load shedding; a host sending with a spoofed source address shares that address's limit.
+- Settings blob version 8: the field is appended (versions 5 to 7 are still read; the field then gets its default).
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -541,7 +557,7 @@ Everything else is handed to lwIP, which applies its own rules (broadcast reques
 ### 5.3 Exposure
 
 - Amplification: none worth mentioning (mode 3 → mode 4, same size; no mode 6/7).
-- Flooding: global load shedding (8500 or 14500 requests per second depending on the chip revision) and the Ethernet recovery task. A single flooding host triggers drops for all clients; a flood with spoofed sources pushes real clients out of the interleaved cache (fallback to basic mode). No per-client rate limiting.
+- Flooding: global load shedding (8500 or 14500 requests per second depending on the chip revision) and the Ethernet recovery task. A single host flooding above the global threshold still triggers drops for all clients; a flood with spoofed sources pushes real clients out of the interleaved cache (fallback to basic mode). Per-client rate limit (4.26, default 20 requests per second per IP address): a single host below the global threshold gets at most its limit answered, the rest is dropped before the reply path.
 - Time spoofing: possible on the path without authentication; NTPv4 symmetric keys are available (SHA-256 truncated to 160 bit, constant time comparison). Unauthenticated requests are still answered when authentication is enabled (by design).
 - OTE (if enabled, 4.24): upload over TLS with the login of the page or the OTE password (throttled); the image is checked for project and chip revision and verified, but not signed: whoever can log in or knows the OTE password can replace the firmware. Use a long random password, keep OTE off when it is not needed, consider Secure Boot V2 and flash encryption.
 - MQTT (if enabled): `mqtt://` sends the credentials in clear text; prefer `mqtts://` (the broker certificate is checked against the ESP-IDF CA bundle).
@@ -701,6 +717,8 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `labelDeadlineUs`, `ubxPollDelayMs` | `acquire_sync_candidate` | 950 ms, 300 ms | label data window after the PPS edge |
 | `NTP_CACHE_MATCH_PORT` | `ntp_cache.c` | 0 | 1 = also compare the client source port |
 | `CACHE_TIMEOUT_MS_IPV4/IPV6` | `ntp_cache.h` | 1800000 | lifetime of a cache entry |
+| `ntpClientRateLimitPerSecond` | `ESP32TimeServerSettings.h` | 20 | default of the per-client rate limit (4.26), 0 = off |
+| `RATE_LIMIT_BURST_US` | `ntp_cache.c` | 1000000 | burst of the per-client rate limit: one second worth of requests |
 | `CONFIG_COMPILER_OPTIMIZATION_PERF` | `sdkconfig.defaults`, `sdkconfig` | y | -O2 |
 | `WEB_ADMIN_ENABLED` | `ESP32TimeServerSettings.h` | 1 | 0 = no web admin page (TCP 443 closed) and compiled settings only (4.23) |
 | `WebAdminPassword` | `ESP32TimeServerSettingsSecrets.h` | "password" | password of the web admin page until one is set on the page; again after a factory reset |
@@ -800,7 +818,8 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - Changing the time zone at run time calls `setenv()` / `tzset()` while other tasks may call `localtime_r()`; newlib guards both, a reading during the switch may use the old zone once.
 - The settings blob has a layout version: after a firmware update that changes `web_settings_t` the saved settings are ignored (compiled defaults) until they are saved again.
 - PreferIPvX, MACAddress and the MQTT reporting details stay compile-time settings. `UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED` is now the default of the GNSS protocol setting: both GNSS paths are compiled in (`setup_gnss_ublox_receiver()`, `setup_gnss_nmea_receiver()`).
-- The settings blob layout version is 7 (2: GNSS protocol and LED colours, 3: OTE settings, 4: up to 8 NTP keys, 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins, 6: PPS holdover and the behaviour after it, 7: root dispersion growth): settings saved with version 5 or 6 are read (the new fields get their defaults), older ones are ignored once.
+- The settings blob layout version is 8 (2: GNSS protocol and LED colours, 3: OTE settings, 4: up to 8 NTP keys, 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins, 6: PPS holdover and the behaviour after it, 7: root dispersion growth, 8: NTP client rate limit): settings saved with version 5, 6 or 7 are read (the new fields get their defaults), older ones are ignored once.
+- Per-client rate limit (4.26): built and simulated, not tested on the board yet. Points to check first: a chrony client with `minpoll -4 maxpoll -4` over hours (status counter stays 0), a flood from one host (e.g. `ntpdate`/`sntp` in a loop) is held to the limit while other clients keep their replies, Apply of 0 and of a new value without a restart.
 
 ## 13. Recommendations that are not in the code
 

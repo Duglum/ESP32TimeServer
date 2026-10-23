@@ -43,10 +43,12 @@ namespace
     // 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins;
     // 6: PPS holdover in the place of the former OTE port, behaviour after the holdover appended at the end
     //    (a version 5 set is still read: its fields are a prefix of web_settings_t, the new ones get the defaults);
-    // 7: root dispersion growth while coasting appended at the end (versions 5 and 6 are still read the same way)
-    constexpr uint32_t BLOB_VERSION = 7;
+    // 7: root dispersion growth while coasting appended at the end (versions 5 and 6 are still read the same way);
+    // 8: NTP client rate limit appended at the end (versions 5 to 7 are still read the same way)
+    constexpr uint32_t BLOB_VERSION = 8;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
+    constexpr uint32_t BLOB_VERSION_7 = 7;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -55,9 +57,12 @@ namespace
     }
     constexpr size_t SETTINGS_SIZE_5 = settings_size_before(offsetof(web_settings_t, pps_lost_stratum));
     constexpr size_t SETTINGS_SIZE_6 = settings_size_before(offsetof(web_settings_t, pps_dispersion_ppm));
-    // Version 7 fits into the tail padding of version 6 (same size): the version number tells them apart, and a
-    // version 6 set always gets the default for the field instead of its padding bytes
-    static_assert(SETTINGS_SIZE_5 <= SETTINGS_SIZE_6 && SETTINGS_SIZE_6 <= sizeof(web_settings_t),
+    constexpr size_t SETTINGS_SIZE_7 = settings_size_before(offsetof(web_settings_t, ntp_client_rate_limit));
+    // Version 7 fits into the tail padding of version 6 (same size), and version 8 may fit into that of version 7:
+    // the version number tells them apart, and an older set always gets the defaults for the newer fields instead of
+    // its padding bytes
+    static_assert(SETTINGS_SIZE_5 <= SETTINGS_SIZE_6 && SETTINGS_SIZE_6 <= SETTINGS_SIZE_7 &&
+                      SETTINGS_SIZE_7 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
     // ntpHoldoverDurationUs in whole seconds, within the range of the setting
@@ -73,6 +78,12 @@ namespace
         return static_cast<uint16_t>(ntpHoldoverDispersionPpm < 1 ? 1
                                      : ntpHoldoverDispersionPpm > WEB_PPS_DISPERSION_MAX_PPM ? WEB_PPS_DISPERSION_MAX_PPM
                                                                                              : ntpHoldoverDispersionPpm);
+    }
+
+    // ntpClientRateLimitPerSecond within the range of the setting
+    uint16_t default_ntp_client_rate_limit()
+    {
+        return ntpClientRateLimitPerSecond > WEB_NTP_RATE_LIMIT_MAX ? WEB_NTP_RATE_LIMIT_MAX : ntpClientRateLimitPerSecond;
     }
 
     // ntpServeAfterPpsLostMinutes within the range of the setting
@@ -109,7 +120,7 @@ namespace
         return esp_rom_crc32_le(0, reinterpret_cast<const uint8_t *>(&blob), offsetof(settings_blob_t, crc));
     }
 
-    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 or 6) and passes the CRC.
+    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5, 6 or 7) and passes the CRC.
     bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob)
     {
         // Stored as header (magic, version, size, flags), settings, CRC of everything before it
@@ -140,15 +151,17 @@ namespace
         const bool current = header.version == BLOB_VERSION && header.size == sizeof(web_settings_t);
         const bool version_5 = header.version == BLOB_VERSION_5 && header.size == SETTINGS_SIZE_5;
         const bool version_6 = header.version == BLOB_VERSION_6 && header.size == SETTINGS_SIZE_6;
+        const bool version_7 = header.version == BLOB_VERSION_7 && header.size == SETTINGS_SIZE_7;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
         {
         }
         else if (!readable || (length != sizeof(settings_blob_t) && length != HEADER_SIZE + SETTINGS_SIZE_5 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_6 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_6 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_7 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
-        else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6) ||
+        else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -170,10 +183,17 @@ namespace
             {
                 // Appended in version 7
                 blob.settings.pps_dispersion_ppm = default_pps_dispersion_ppm();
-                blob.version = BLOB_VERSION;
-                blob.size = sizeof(web_settings_t);
                 if (version_6)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 6 read; the root dispersion growth has its default", key);
+            }
+            if (version_5 || version_6 || version_7)
+            {
+                // Appended in version 8
+                blob.settings.ntp_client_rate_limit = default_ntp_client_rate_limit();
+                blob.version = BLOB_VERSION;
+                blob.size = sizeof(web_settings_t);
+                ESP_LOGI(TAG, "Stored web settings '%s' of version %lu read; the NTP client rate limit has its default", key,
+                         static_cast<unsigned long>(header.version));
             }
             blob.crc = blob_crc(blob);
             ok = true;
@@ -493,6 +513,7 @@ void web_settings_defaults(web_settings_t &out)
     // MACAddress: "" = hardware MAC; an invalid value was ignored before as well (hardware MAC)
     if (MACAddress[0] != '\0' && !web_normalise_mac(MACAddress, out.mac_address))
         ESP_LOGW(TAG, "MACAddress \"%s\" in ESP32TimeServerSettings.h is not valid, the hardware MAC is used", MACAddress);
+    out.ntp_client_rate_limit = default_ntp_client_rate_limit();
 
 #ifdef UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
     out.gnss_ublox = UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED != 0;
@@ -870,6 +891,10 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
             FAIL("MAC address: 00:00:00:00:00:00 cannot be used");
     }
 
+    // ---- NTP clients ----
+    if (s.ntp_client_rate_limit > WEB_NTP_RATE_LIMIT_MAX)
+        FAIL("Rate limit per client: 0 (no limit) to %u requests per second", static_cast<unsigned>(WEB_NTP_RATE_LIMIT_MAX));
+
     // ---- GPIOs ----
     struct pin_use_t
     {
@@ -1080,7 +1105,7 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
            a.led_brightness_percent == b.led_brightness_percent && memcmp(a.led_rgb, b.led_rgb, sizeof(a.led_rgb)) == 0 &&
            a.pps_holdover_s == b.pps_holdover_s && a.pps_lost_stratum == b.pps_lost_stratum &&
            a.pps_lost_serve == b.pps_lost_serve && a.pps_lost_serve_min == b.pps_lost_serve_min &&
-           a.pps_dispersion_ppm == b.pps_dispersion_ppm &&
+           a.pps_dispersion_ppm == b.pps_dispersion_ppm && a.ntp_client_rate_limit == b.ntp_client_rate_limit &&
            a.ntp_auth_enabled == b.ntp_auth_enabled &&
            a.ntp_key_override == b.ntp_key_override && a.ntp_key_count == b.ntp_key_count &&
            web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_keys), reinterpret_cast<const uint8_t *>(b.ntp_keys), sizeof(a.ntp_keys));

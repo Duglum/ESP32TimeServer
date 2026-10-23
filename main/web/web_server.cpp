@@ -383,6 +383,7 @@ namespace
             if (s.dns[i][0] != '\0')
                 cJSON_AddItemToArray(dns, cJSON_CreateString(s.dns[i]));
         cJSON_AddStringToObject(object, "mac_address", s.mac_address);
+        cJSON_AddNumberToObject(object, "ntp_client_rate_limit", s.ntp_client_rate_limit);
         cJSON_AddStringToObject(object, "gnss_protocol", s.gnss_ublox ? "ubx" : "nmea");
         cJSON_AddNumberToObject(object, "gnss_tx_pin", s.gnss_tx_pin);
         cJSON_AddNumberToObject(object, "gnss_rx_pin", s.gnss_rx_pin);
@@ -499,6 +500,7 @@ namespace
                   json_string(root, "ipv6_address", s.ipv6_address, sizeof(s.ipv6_address), err, err_size) &&
                   json_int(root, "ipv6_prefix", s.ipv6_prefix, 0, 128, err, err_size) &&
                   json_string(root, "ipv6_gateway", s.ipv6_gateway, sizeof(s.ipv6_gateway), err, err_size) &&
+                  json_int(root, "ntp_client_rate_limit", s.ntp_client_rate_limit, 0, WEB_NTP_RATE_LIMIT_MAX, err, err_size) &&
                   json_int(root, "gnss_tx_pin", s.gnss_tx_pin, -1, 54, err, err_size) &&
                   json_int(root, "gnss_rx_pin", s.gnss_rx_pin, -1, 54, err, err_size) &&
                   json_int(root, "gnss_pps_pin", s.gnss_pps_pin, -1, 54, err, err_size) &&
@@ -1009,6 +1011,7 @@ namespace
         cJSON_AddBoolToObject(status, "ntp_auth_available", sets->app.ntp_auth_available);
         cJSON_AddNumberToObject(status, "ntp_auth_compiled_keys", sets->app.ntp_auth_compiled_keys);
         cJSON_AddNumberToObject(status, "ntp_auth_keys_in_use", sets->app.ntp_auth_keys_in_use);
+        cJSON_AddNumberToObject(status, "ntp_rate_limited", sets->app.ntp_rate_limited_requests);
         cJSON_AddNumberToObject(status, "free_heap", sets->app.free_heap);
         delete sets;
         return send_json(req, "200 OK", root);

@@ -58,6 +58,9 @@
     'DNS received (DHCPv4)': 'DNS empfangen (DHCPv4)',
     'DNS received (IPv6 RA)': 'DNS empfangen (IPv6 RA)',
     'Your address': 'Ihre Adresse',
+    'NTP rate limit': 'NTP-Rate-Limit',
+    '{limit} per second and client, {n} requests dropped since the start': '{limit} pro Sekunde und Client, {n} Anfragen seit dem Start verworfen',
+    'off, {n} requests dropped since the start': 'aus, {n} Anfragen seit dem Start verworfen',
     'stratum 1, PPS holdover (PPS lost)': 'Stratum 1, PPS-Holdover (PPS verloren)',
     'stratum 1, GNSS and PPS locked': 'Stratum 1, GNSS und PPS synchronisiert',
     'not stratum 1 (PPS {pps}, GNSS {gnss})': 'nicht Stratum 1 (PPS {pps}, GNSS {gnss})',
@@ -135,6 +138,12 @@
     'the hardware MAC': 'die Hardware-MAC',
     'Network changes take effect at once (the MAC address after a restart) and have to be confirmed within 120 s, otherwise the previous settings come back. Save them after the confirmation.':
       'Netzwerkänderungen wirken sofort (die MAC-Adresse nach einem Neustart) und müssen innerhalb von 120 s bestätigt werden, sonst werden die vorherigen Einstellungen wiederhergestellt. Speichern Sie sie nach der Bestätigung.',
+    'NTP clients': 'NTP-Clients',
+    'Rate limit per client (requests per second, 0 = off)': 'Rate-Limit pro Client (Anfragen pro Sekunde, 0 = aus)',
+    '0 to 10000. A client is identified by its IP address; its requests beyond this rate are dropped without an answer. Takes effect at once with Apply (no confirmation needed). Default covers a polling rate of up to -4 (16 packets/s) per client plus reserve. Raise it only if a very large number of clients is expected behind a single NAT address: they all count as one client.':
+      '0 bis 10000. Ein Client wird an seiner IP-Adresse erkannt; seine Anfragen über dieser Rate werden ohne Antwort verworfen. Wirkt sofort mit Übernehmen (keine Bestätigung nötig). Der Standardwert deckt pro Client eine Abfragerate bis -4 (16 Pakete/s) plus Reserve ab. Erhöhen Sie ihn nur, wenn sehr viele Clients hinter einer einzigen NAT-Adresse erwartet werden: Sie zählen alle als ein Client.',
+    '{n} per second': '{n} pro Sekunde',
+    'Rate limit per client: 0 to 10000 requests per second': 'Rate-Limit pro Client: 0 bis 10000 Anfragen pro Sekunde',
 
     // ---- GNSS and PPS ----
     'GNSS and PPS': 'GNSS und PPS',
@@ -556,6 +565,7 @@
     ['NTP key %u: key ID 1 to 65535 and 32 letters or digits expected', 'NTP-Schlüssel {1}: Key-ID 1 bis 65535 und 32 Buchstaben oder Ziffern erwartet'],
     ['NTP key ID %lu is used twice', 'NTP-Key-ID {1} ist doppelt vergeben'],
     ['NTP keys: at most %u', 'NTP-Schlüssel: höchstens {1}'],
+    ['Rate limit per client: 0 (no limit) to %u requests per second', 'Rate-Limit pro Client: 0 (unbegrenzt) bis {1} Anfragen pro Sekunde'],
     ['PPS holdover: 0 to %u seconds', 'PPS-Holdover: 0 bis {1} Sekunden'],
     ['Serving time after the PPS loss: 0 (no limit) to %u minutes', 'Antwortzeit nach dem PPS-Ausfall: 0 (unbegrenzt) bis {1} Minuten'],
     ['Stratum after the holdover: 2 to 16', 'Stratum nach dem Holdover: 2 bis 16'],
