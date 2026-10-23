@@ -130,8 +130,8 @@
       'Hardware-MAC dieses Boards: <span id="mac-hardware" class="mono"></span>',
     'Allowed Formats (any case): <code>02:1a:2b:3c:4d:5e</code>, <code>02-1A-2B-3C-4D-5E</code>, <code>021a.2b3c.4d5e</code>, <code>021A2B3C4D5E</code>':
       'Erlaubte Formate (Groß- oder Kleinschreibung): <code>02:1a:2b:3c:4d:5e</code>, <code>02-1A-2B-3C-4D-5E</code>, <code>021a.2b3c.4d5e</code>, <code>021A2B3C4D5E</code>',
-    'The hardware MAC (or an empty field) keeps the MAC of the chip. Another unicast address replaces it after the restart (the lowest bit of the first byte must be 0; locally administered addresses have the second bit set, e.g. 02:…). DHCP and SLAAC may then give the device other addresses: open the page by its name or new address and confirm within 120 s, otherwise the device restarts with the previous settings.':
-      'Die Hardware-MAC (oder ein leeres Feld) behält die MAC des Chips. Eine andere Unicast-Adresse ersetzt sie nach dem Neustart (das niedrigste Bit des ersten Bytes muss 0 sein; lokal verwaltete Adressen haben das zweite Bit gesetzt, z. B. 02:…). DHCP und SLAAC können dem Gerät dann andere Adressen geben: Öffnen Sie die Seite über ihren Namen oder die neue Adresse und bestätigen Sie innerhalb von 120 s, sonst startet das Gerät mit den vorherigen Einstellungen neu.',
+    'MAC address changes: The lowest bit of the first byte must be 0; locally administered addresses have the second bit set, e.g. 02:…':
+      'Änderungen der MAC-Adresse: Das niedrigste Bit des ersten Bytes muss 0 sein; lokal verwaltete Adressen haben das zweite Bit gesetzt, z. B. 02:…',
     'the hardware MAC': 'die Hardware-MAC',
     'Network changes take effect at once (the MAC address after a restart) and have to be confirmed within 120 s, otherwise the previous settings come back. Save them after the confirmation.':
       'Netzwerkänderungen wirken sofort (die MAC-Adresse nach einem Neustart) und müssen innerhalb von 120 s bestätigt werden, sonst werden die vorherigen Einstellungen wiederhergestellt. Speichern Sie sie nach der Bestätigung.',

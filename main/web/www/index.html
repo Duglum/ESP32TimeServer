@@ -132,11 +132,12 @@
             <input type="text" name="mac_address" maxlength="17" spellcheck="false" autocomplete="off">
             <small class="note">Hardware MAC of this board: <span id="mac-hardware" class="mono"></span></small>
             <small class="note">Allowed Formats (any case): <code>02:1a:2b:3c:4d:5e</code>, <code>02-1A-2B-3C-4D-5E</code>, <code>021a.2b3c.4d5e</code>, <code>021A2B3C4D5E</code></small>
-            <small class="note">The hardware MAC (or an empty field) keeps the MAC of the chip. Another unicast address replaces it after the restart (the lowest bit of the first byte must be 0; locally administered addresses have the second bit set, e.g. 02:…). DHCP and SLAAC may then give the device other addresses: open the page by its name or new address and confirm within 120 s, otherwise the device restarts with the previous settings.</small>
-            <small class="def" data-for="mac_address"></small>
+            <!-- Not shown (the grey placeholder is the default); it only drives the "differs from the default" border -->
+            <small class="def" data-for="mac_address" hidden></small>
           </label>
         </div>
         <p class="hint">Network changes take effect at once (the MAC address after a restart) and have to be confirmed within 120 s, otherwise the previous settings come back. Save them after the confirmation.</p>
+        <p class="hint">MAC address changes: The lowest bit of the first byte must be 0; locally administered addresses have the second bit set, e.g. 02:…</p>
       </section>
 
       <section class="card">
