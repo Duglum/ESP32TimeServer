@@ -41,6 +41,8 @@ extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 extern const char app_js_start[] asm("_binary_app_js_start");
 extern const char app_js_end[] asm("_binary_app_js_end");
+extern const char i18n_js_start[] asm("_binary_i18n_js_start");
+extern const char i18n_js_end[] asm("_binary_i18n_js_end");
 extern const char app_css_start[] asm("_binary_app_css_start");
 extern const char app_css_end[] asm("_binary_app_css_end");
 extern const char favicon_ico_start[] asm("_binary_favicon_ico_start");
@@ -794,6 +796,8 @@ namespace
     esp_err_t handle_index(httpd_req_t *req) { return send_static(req, "text/html; charset=utf-8", index_html_start, index_html_end); }
     esp_err_t handle_js(httpd_req_t *req) { return send_static(req, "text/javascript; charset=utf-8", app_js_start, app_js_end); }
     esp_err_t handle_css(httpd_req_t *req) { return send_static(req, "text/css; charset=utf-8", app_css_start, app_css_end); }
+    // German texts of the page (English is the source text in index.html and app.js)
+    esp_err_t handle_i18n(httpd_req_t *req) { return send_static(req, "text/javascript; charset=utf-8", i18n_js_start, i18n_js_end); }
 
     // Binary file (EMBED_FILES, no NUL appended), may be cached by the browser for a day
     esp_err_t handle_favicon(httpd_req_t *req)
@@ -1412,6 +1416,7 @@ namespace
             {"/", HTTP_GET, handle_index},
             {"/app.js", HTTP_GET, handle_js},
             {"/app.css", HTTP_GET, handle_css},
+            {"/i18n.js", HTTP_GET, handle_i18n},
             {"/favicon.ico", HTTP_GET, handle_favicon},
             {"/api/login", HTTP_POST, handle_login},
             {"/api/logout", HTTP_POST, handle_logout},
@@ -1485,7 +1490,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 20; // 17 routes in use
+        config.max_uri_handlers = 20; // 18 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

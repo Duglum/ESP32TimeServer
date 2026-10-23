@@ -11,6 +11,101 @@
   let pendingDeadline = 0;
   let refreshTimer = 0;
   let countdownTimer = 0;
+  let formDirty = false; // the settings form was edited since it was filled
+
+  // ---- Language: English unless German was chosen with the button (cookie "lang"; German texts in i18n.js) ----
+  const i18n = window.I18N || { lang: 'en', de: {}, server: [] };
+  const lang = i18n.lang === 'de' ? 'de' : 'en';
+  const missing = new Set(); // German: English texts without a translation (window.I18N.missing, for checks)
+  i18n.missing = missing;
+  const squash = (text) => String(text).replace(/\s+/g, ' ').trim();
+  const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+  function lookup(text) {
+    if (lang !== 'de') return null;
+    const key = squash(text);
+    if (own(i18n.de, key)) return i18n.de[key];
+    if (/[A-Za-z]{2}/.test(key)) missing.add(key);
+    return null;
+  }
+  // Text in the selected language; {name} is replaced by values.name (values are inserted as they are)
+  function t(text, values) {
+    const de = lookup(text);
+    let out = de === null ? text : de;
+    if (values) out = out.replace(/\{(\w+)\}/g, (all, name) => (own(values, name) ? String(values[name]) : all));
+    return out;
+  }
+  // Messages of the device: fixed texts, or printf formats of the firmware whose values are kept ({1}, {2} in German)
+  const serverFormats = (i18n.server || []).map(([english, german]) => {
+    const parts = english.split(/%[-+ 0-9.]*(?:ll|l|z|h)?[sdufxX]/);
+    const pattern = parts.map((p) => p.replace(/%%/g, '%').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('(.+?)');
+    return [new RegExp('^' + pattern + '$'), german];
+  });
+  function ts(text) {
+    if (lang !== 'de' || !text) return text;
+    const key = squash(text);
+    if (own(i18n.de, key)) return i18n.de[key];
+    for (const [pattern, german] of serverFormats) {
+      const m = pattern.exec(key);
+      if (m) return german.replace(/\{(\d)\}/g, (all, i) => m[Number(i)] || '');
+    }
+    missing.add(key);
+    return text;
+  }
+
+  // Static texts of the page. An element with text of its own and no form controls inside is translated as a whole,
+  // its inline markup included (the German HTML comes from i18n.js, never from the server); loose text next to form
+  // controls one text node at a time; title, placeholder and aria-label attributes
+  const CONTAINERS = 'input,select,textarea,button,progress,ul,ol';
+  // German text for source, or null when there is none or it is the same (the source then keeps its white space)
+  const german = (source) => {
+    const de = lookup(source);
+    return de === null || de === squash(source) ? null : de;
+  };
+  function translateElement(el) {
+    if (el.matches('script,style')) return;
+    for (const name of ['title', 'placeholder', 'aria-label']) {
+      if (!el.hasAttribute(name)) continue;
+      const de = german(el.getAttribute(name));
+      if (de !== null) el.setAttribute(name, de);
+    }
+    const ownText = [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.nodeValue.trim() !== '');
+    if (ownText && !el.querySelector(CONTAINERS)) {
+      const html = el.children.length > 0;
+      const de = german(html ? el.innerHTML : el.textContent);
+      if (de !== null) {
+        if (html) el.innerHTML = de;
+        else el.textContent = de;
+      }
+      return;
+    }
+    for (const node of [...el.childNodes]) {
+      if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim() !== '') {
+        const de = german(node.nodeValue);
+        if (de !== null) {
+          const m = /^(\s*)[\s\S]*?(\s*)$/.exec(node.nodeValue);
+          node.nodeValue = m[1] + de + m[2];
+        }
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        translateElement(node);
+      }
+    }
+  }
+  if (lang === 'de') translateElement(document.body);
+  document.documentElement.classList.remove('i18n-pending');
+
+  // Language button: shows the language in use (flag); switching stores the choice in a cookie and reloads the page
+  $('lang-flag').className = 'flag flag-' + (lang === 'de' ? 'de' : 'gb');
+  {
+    const label = t('Language: English (click for German)');
+    $('lang-toggle').title = label;
+    $('lang-toggle').setAttribute('aria-label', label);
+  }
+  $('lang-toggle').addEventListener('click', () => {
+    if (formDirty && !window.confirm(t('Switching the language reloads the page: changes that were not applied are lost. Continue?'))) return;
+    const next = lang === 'de' ? 'en' : 'de';
+    document.cookie = 'lang=' + next + '; Path=/; Max-Age=31536000; SameSite=Strict' + (location.protocol === 'https:' ? '; Secure' : '');
+    location.reload();
+  });
 
   // ---- Theme: the system setting unless one was chosen with the button (stored in this browser) ----
   const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -30,7 +125,7 @@
     // The button shows the mode in use: U+1F319 (crescent moon) = dark, U+2600 (sun) = light
     const toggle = $('theme-toggle');
     toggle.textContent = theme === 'dark' ? '\u{1F319}' : '☀️';
-    const label = theme === 'dark' ? 'Dark mode (click for light mode)' : 'Light mode (click for dark mode)';
+    const label = theme === 'dark' ? t('Dark mode (click for light mode)') : t('Light mode (click for dark mode)');
     toggle.setAttribute('aria-label', label);
     toggle.title = label;
   }
@@ -73,7 +168,7 @@
     try {
       response = await fetch(path, options);
     } catch (e) {
-      return { status: 0, data: { error: 'The device does not answer (restarting or a different address?)' } };
+      return { status: 0, data: { error: t('The device does not answer (restarting or a different address?)') } };
     }
     let data = {};
     try { data = await response.json(); } catch (e) { data = {}; }
@@ -121,22 +216,22 @@
     for (const [key, name, meaning] of ledStates) {
       const label = document.createElement('div');
       label.className = 'state';
-      label.textContent = name;
+      label.textContent = t(name);
       const small = document.createElement('small');
-      small.textContent = meaning;
+      small.textContent = t(meaning);
       label.appendChild(small);
 
       const select = document.createElement('select');
-      select.setAttribute('aria-label', name + ' colour');
+      select.setAttribute('aria-label', t('{name} colour', { name: t(name) }));
       for (const [hex, presetName] of presets) {
         const o = document.createElement('option');
         o.value = hex;
-        o.textContent = presetName;
+        o.textContent = t(presetName);
         select.appendChild(o);
       }
       const custom = document.createElement('option');
       custom.value = 'custom';
-      custom.textContent = 'Custom';
+      custom.textContent = t('Custom');
       select.appendChild(custom);
 
       const input = document.createElement('input');
@@ -144,7 +239,7 @@
       input.maxLength = 7;
       input.placeholder = '#RRGGBB';
       input.spellcheck = false;
-      input.setAttribute('aria-label', name + ' colour as #RRGGBB');
+      input.setAttribute('aria-label', t('{name} colour as #RRGGBB', { name: t(name) }));
 
       const swatch = document.createElement('span');
       swatch.className = 'swatch';
@@ -188,7 +283,7 @@
     entry.button.hidden = empty || entry.input.disabled;
     const shown = entry.input.type === 'text';
     entry.button.setAttribute('aria-pressed', shown ? 'true' : 'false');
-    entry.button.title = shown ? 'Hide the text' : 'Show the text';
+    entry.button.title = shown ? t('Hide the text') : t('Show the text');
   }
   function syncPasswordEyes() {
     passwordEyes.forEach(syncPasswordEye);
@@ -201,7 +296,7 @@
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'eye';
-    button.setAttribute('aria-label', 'Show or hide the text');
+    button.setAttribute('aria-label', t('Show or hide the text'));
     wrap.appendChild(button);
     const entry = { input: input, button: button };
     button.addEventListener('click', () => {
@@ -251,21 +346,21 @@
     idInput.min = '1';
     idInput.max = '65535';
     idInput.value = String(id);
-    idInput.setAttribute('aria-label', 'Key ID');
+    idInput.setAttribute('aria-label', t('Key ID'));
     const keyInput = document.createElement('input');
     keyInput.type = 'text';
     keyInput.maxLength = 32;
     keyInput.spellcheck = false;
     keyInput.autocomplete = 'off';
     keyInput.value = key;
-    keyInput.setAttribute('aria-label', 'Key');
+    keyInput.setAttribute('aria-label', t('Key'));
     const generate = document.createElement('button');
     generate.type = 'button';
-    generate.textContent = 'Generate';
-    generate.title = 'New random key (32 letters or digits)';
+    generate.textContent = t('Generate');
+    generate.title = t('New random key (32 letters or digits)');
     const remove = document.createElement('button');
     remove.type = 'button';
-    remove.textContent = 'Remove';
+    remove.textContent = t('Remove');
     const row = { id: idInput, key: keyInput, elements: [idInput, keyInput, generate, remove] };
     generate.addEventListener('click', () => { keyInput.value = randomKey(); keysChanged(); });
     remove.addEventListener('click', () => {
@@ -287,8 +382,8 @@
     for (const k of keys || []) addKeyRow(k.id, k.key);
     ntpKeysChanged = false;
     $('ntp-key-state').textContent = compiled
-      ? 'No keys are set on this page: these are the keys compiled into the firmware. Changing them here stores them as keys of the web settings.'
-      : 'Keys set on this page are in use.';
+      ? t('No keys are set on this page: these are the keys compiled into the firmware. Changing them here stores them as keys of the web settings.')
+      : t('Keys set on this page are in use.');
     $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
   }
 
@@ -380,10 +475,11 @@
     f.ntp_key_clear.checked = false;
     setNtpKeys(s.ntp_key_override ? s.ntp_keys : state.ntp_compiled_keys, !s.ntp_key_override);
     f.ote_password.value = '';
-    $('ote-password-state').textContent = s.ote_password_set ? 'A password is set.' : 'No password is set.';
-    $('mqtt-password-state').textContent = s.mqtt_password_set ? 'A password is set.' : 'No password is set.';
+    $('ote-password-state').textContent = s.ote_password_set ? t('A password is set.') : t('No password is set.');
+    $('mqtt-password-state').textContent = s.mqtt_password_set ? t('A password is set.') : t('No password is set.');
     updateDependent();
     markDefaults();
+    formDirty = false;
   }
 
   function currentValue(name) {
@@ -397,17 +493,17 @@
     document.querySelectorAll('small.def').forEach((small) => {
       const name = small.getAttribute('data-for');
       const value = defaults[name];
-      let text = value === '' || value === undefined ? '(empty)' : String(value);
-      if (typeof value === 'boolean') text = value ? 'on' : 'off';
-      if (name === 'dns') text = value ? value.replace(/\n/g, ', ') : '(empty: received servers)';
-      if (name === 'ptp_loopback_pin' && value === '') text = 'off';
+      let text = value === '' || value === undefined ? t('(empty)') : String(value);
+      if (typeof value === 'boolean') text = value ? t('on') : t('off');
+      if (name === 'dns') text = value ? value.replace(/\n/g, ', ') : t('(empty: received servers)');
+      if (name === 'ptp_loopback_pin' && value === '') text = t('off');
       if (name === 'led_brightness') text += ' %';
       if (name === 'mqtt_report_period') text += ' s';
-      if (name === 'pps_holdover') text = value === '0' ? 'off' : text + ' s';
-      if (name === 'pps_lost_serve_min') text = value === '0' ? 'no limit' : text + ' min';
-      if (name === 'mac_address' && !state.defaults.mac_address) text = 'the hardware MAC';
-      if (displayNames[name]) text = displayNames[name][value] || text;
-      small.textContent = 'Default: ' + text;
+      if (name === 'pps_holdover') text = value === '0' ? t('off') : text + ' s';
+      if (name === 'pps_lost_serve_min') text = value === '0' ? t('no limit') : text + ' min';
+      if (name === 'mac_address' && !state.defaults.mac_address) text = t('the hardware MAC');
+      if (displayNames[name] && displayNames[name][value]) text = t(displayNames[name][value]);
+      small.textContent = t('Default: {value}', { value: text });
       const differs = String(currentValue(name)).replace(/\r/g, '') !== String(value);
       small.classList.toggle('differs', differs);
       f[name].classList.toggle('is-changed', differs);
@@ -417,7 +513,7 @@
       const def = state.defaults.led_colors ? state.defaults.led_colors[key] : null;
       const differs = def !== null && normaliseHex(row.input.value) !== def;
       row.input.classList.toggle('is-changed', differs);
-      row.input.title = 'Default: ' + (def || '');
+      row.input.title = t('Default: {value}', { value: def || '' });
     }
     markPinAreas();
   }
@@ -430,8 +526,8 @@
       const changed = [...area.querySelectorAll('.is-changed')].filter(visible).length;
       const warning = [...area.querySelectorAll('small.note.bad')].some(visible);
       const parts = [];
-      if (changed > 0) parts.push(changed === 1 ? '1 pin differs from the default' : changed + ' pins differ from the default');
-      if (warning) parts.push('see the warning');
+      if (changed > 0) parts.push(changed === 1 ? t('1 pin differs from the default') : t('{n} pins differ from the default', { n: changed }));
+      if (warning) parts.push(t('see the warning'));
       const marker = area.querySelector('.pins-changed');
       marker.textContent = parts.join(', ');
       marker.hidden = parts.length === 0;
@@ -457,9 +553,10 @@
     // The client limit only matters with the client list; the report buffer is sized from it (RAM, no PSRAM)
     f.mqtt_tf_client_limit.disabled = !f.mqtt_client_reporting.checked;
     const limit = Number(f.mqtt_tf_client_limit.value);
+    const kilobytes = ((1166 + 76 * limit) / 1024).toFixed(1);
     $('mqtt-buffer-note').textContent = f.mqtt_client_reporting.checked && Number.isInteger(limit) && limit >= 50 && limit <= 1000
-      ? 'Report buffer: ' + ((1166 + 76 * limit) / 1024).toFixed(1) + ' kB of RAM (1166 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.'
-      : (f.mqtt_client_reporting.checked ? '50 to 1000.' : 'Only used with client activity reporting.');
+      ? t('Report buffer: {kb} kB of RAM (1166 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.', { kb: lang === 'de' ? kilobytes.replace('.', ',') : kilobytes })
+      : (f.mqtt_client_reporting.checked ? t('50 to 1000.') : t('Only used with client activity reporting.'));
     const compiledOnly = f.ntp_key_clear.checked;
     document.querySelectorAll('#ntp-keys input, #ntp-keys button').forEach((el) => { el.disabled = compiledOnly; });
     $('ntp-key-add').disabled = compiledOnly || ntpKeyRows.length >= 8;
@@ -493,7 +590,7 @@
     const text = f[name].value.trim();
     if (text === '' && allowEmpty) return -1;
     const value = Number(text);
-    if (text === '' || !Number.isInteger(value)) throw new Error(label + ': GPIO number expected');
+    if (text === '' || !Number.isInteger(value)) throw new Error(t('{label}: GPIO number expected', { label: t(label) }));
     return value;
   }
 
@@ -558,19 +655,19 @@
       ntpKeyRows.forEach((row, i) => {
         const id = Number(row.id.value);
         const key = row.key.value.trim();
-        if (!Number.isInteger(id) || id < 1 || id > 65535) throw new Error('NTP key ' + (i + 1) + ': key ID 1 to 65535');
-        if (!/^[0-9A-Za-z]{32}$/.test(key)) throw new Error('NTP key ' + (i + 1) + ': exactly 32 letters or digits');
+        if (!Number.isInteger(id) || id < 1 || id > 65535) throw new Error(t('NTP key {n}: key ID 1 to 65535', { n: i + 1 }));
+        if (!/^[0-9A-Za-z]{32}$/.test(key)) throw new Error(t('NTP key {n}: exactly 32 letters or digits', { n: i + 1 }));
         body.ntp_keys.push({ id: id, key: key });
       });
     }
     for (const [key, name] of ledStates) {
       const hex = normaliseHex(colourRows[key].input.value);
-      if (!hex) throw new Error('LED colour "' + name + '": #RRGGBB expected');
+      if (!hex) throw new Error(t('LED colour "{name}": #RRGGBB expected', { name: t(name) }));
       body.led_colors[key] = hex;
     }
     if (!body.ipv4_dhcp) {
       const v4 = splitCidr(f.ipv4_cidr.value.trim(), NaN);
-      if (!v4) throw new Error('IPv4 address: a.b.c.d/prefix length expected');
+      if (!v4) throw new Error(t('IPv4 address: a.b.c.d/prefix length expected'));
       body.ipv4_address = v4.address;
       body.ipv4_prefix = v4.prefix;
       body.ipv4_gateway = f.ipv4_gateway.value.trim();
@@ -581,32 +678,32 @@
       body.ipv6_prefix = 64;
     } else {
       const v6 = splitCidr(v6text, 64);
-      if (!v6) throw new Error('IPv6 address: address/prefix length expected');
+      if (!v6) throw new Error(t('IPv6 address: address/prefix length expected'));
       body.ipv6_address = v6.address;
       body.ipv6_prefix = v6.prefix;
     }
     if (!Number.isInteger(body.pps_holdover) || body.pps_holdover < 0 || body.pps_holdover > 600) {
-      throw new Error('PPS holdover: 0 to 600 s');
+      throw new Error(t('PPS holdover: 0 to 600 s'));
     }
     if (!Number.isInteger(body.pps_lost_serve_min) || body.pps_lost_serve_min < 0 || body.pps_lost_serve_min > 1440) {
-      throw new Error('Keep answering after the PPS loss: 0 to 1440 min');
+      throw new Error(t('Keep answering after the PPS loss: 0 to 1440 min'));
     }
     if (!Number.isInteger(body.pps_lost_stratum) || body.pps_lost_stratum < 2 || body.pps_lost_stratum > 16) {
-      throw new Error('Stratum after the holdover: 2 to 16');
+      throw new Error(t('Stratum after the holdover: 2 to 16'));
     }
     if (!Number.isInteger(body.mqtt_report_period) || body.mqtt_report_period < 30 || body.mqtt_report_period > 86400) {
-      throw new Error('MQTT reporting period: 30 to 86400 s');
+      throw new Error(t('MQTT reporting period: 30 to 86400 s'));
     }
     if (!Number.isInteger(body.mqtt_tf_client_limit) || body.mqtt_tf_client_limit < 50 || body.mqtt_tf_client_limit > 1000) {
-      throw new Error('MQTT client limit with the TF card: 50 to 1000');
+      throw new Error(t('MQTT client limit with the TF card: 50 to 1000'));
     }
     // MAC: lower case with ':'; the hardware MAC is sent as "" (= hardware MAC)
     const mac = normaliseMac(f.mac_address.value);
-    if (mac === null) throw new Error('MAC address: xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx or xxxxxxxxxxxx (hexadecimal) expected');
-    if (mac !== '' && (parseInt(mac.slice(0, 2), 16) & 1) !== 0) throw new Error('MAC address: a unicast address is required (the lowest bit of the first byte must be 0)');
+    if (mac === null) throw new Error(t('MAC address: xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx or xxxxxxxxxxxx (hexadecimal) expected'));
+    if (mac !== '' && (parseInt(mac.slice(0, 2), 16) & 1) !== 0) throw new Error(t('MAC address: a unicast address is required (the lowest bit of the first byte must be 0)'));
     body.mac_address = mac === state.status.mac_hardware ? '' : mac;
     body.dns = f.dns.value.split(/\r?\n/).map((s) => s.trim()).filter((s) => s !== '');
-    if (body.dns.length > 3) throw new Error('At most 3 DNS servers');
+    if (body.dns.length > 3) throw new Error(t('At most 3 DNS servers'));
     return body;
   }
 
@@ -662,36 +759,44 @@
   function renderStatus() {
     const st = state.status;
     setHost(state.settings.fqdn);
-    yesNo($('st-time'), st.stratum_one, st.pps_holdover ? 'stratum 1, PPS holdover (PPS lost)' : 'stratum 1, GNSS and PPS locked',
-      st.time_set ? 'not stratum 1 (PPS ' + (st.pps_active ? 'active' : 'missing') + ', GNSS ' + (st.gnss_locked ? 'locked' : 'not locked') + ')' : 'waiting for the GNSS time');
-    $('st-utc').textContent = st.utc || 'not set yet';
-    const gnss = [st.ublox_receiver ? 'U-Blox UBX protocol' : 'NMEA standard protocol'];
-    if (st.gnss_baud_in_use) gnss.push(st.gnss_baud_in_use + ' baud');
-    if (st.ublox_receiver) gnss.push(st.gnss_dynamic_model ? st.gnss_dynamic_model + ' mode' : 'dynamic model not known');
+    yesNo($('st-time'), st.stratum_one, st.pps_holdover ? t('stratum 1, PPS holdover (PPS lost)') : t('stratum 1, GNSS and PPS locked'),
+      st.time_set
+        ? t('not stratum 1 (PPS {pps}, GNSS {gnss})', { pps: st.pps_active ? t('active') : t('missing'), gnss: st.gnss_locked ? t('locked') : t('not locked') })
+        : t('waiting for the GNSS time'));
+    $('st-utc').textContent = st.utc || t('not set yet');
+    const gnss = [st.ublox_receiver ? t('U-Blox UBX protocol') : t('NMEA standard protocol')];
+    if (st.gnss_baud_in_use) gnss.push(t('{baud} baud', { baud: st.gnss_baud_in_use }));
+    if (st.ublox_receiver) gnss.push(st.gnss_dynamic_model ? t('{model} mode', { model: st.gnss_dynamic_model }) : t('dynamic model not known'));
     fillList('st-gnss', gnss, '', false);
+    const keys = st.ntp_auth_keys_in_use;
     $('st-auth').textContent = st.ntp_auth_available
-      ? 'on, ' + st.ntp_auth_keys_in_use + (st.ntp_auth_keys_in_use === 1 ? ' key' : ' keys') + (state.settings.ntp_key_override ? ' of the web settings' : ' compiled in')
-      : (state.settings.ntp_auth_enabled ? 'on, but no usable key' : 'off');
+      ? (state.settings.ntp_key_override
+        ? t(keys === 1 ? 'on, {n} key of the web settings' : 'on, {n} keys of the web settings', { n: keys })
+        : t(keys === 1 ? 'on, {n} key compiled in' : 'on, {n} keys compiled in', { n: keys }))
+      : (state.settings.ntp_auth_enabled ? t('on, but no usable key') : t('off'));
     $('st-firmware').textContent = st.firmware + ' (' + st.build + ')';
     $('st-chip').textContent = 'ESP32-P4 ' + st.chip_revision;
     $('ptp-chip').textContent = st.chip_revision;
     $('st-uptime').textContent = duration(st.uptime_s);
     $('st-heap').textContent = Math.round(st.free_heap / 1024) + ' kB';
+    const mqttState = st.mqtt_connected ? t('connected') : t('not connected');
     $('st-mqtt').textContent = state.settings.mqtt_enabled
-      ? (st.mqtt_connected ? 'connected' : 'not connected') + (st.mqtt_tf_queue ? ', reports queued on the TF card' : '')
-      : 'off';
-    $('st-mac').textContent = st.mac_address + (st.mac_address === st.mac_hardware ? ' (hardware MAC)' : ' (set, hardware MAC ' + st.mac_hardware + ')');
+      ? (st.mqtt_tf_queue ? t('{state}, reports queued on the TF card', { state: mqttState }) : mqttState)
+      : t('off');
+    $('st-mac').textContent = st.mac_address === st.mac_hardware
+      ? t('{mac} (hardware MAC)', { mac: st.mac_address })
+      : t('{mac} (set, hardware MAC {hardware})', { mac: st.mac_address, hardware: st.mac_hardware });
     $('mac-hardware').textContent = st.mac_hardware;
     $('mac-in-use').textContent = st.mac_address;
     $('st-fingerprint').textContent = state.fingerprint;
     // Same form as the IPv6 lines: address in the first line, gateway and source in the second
     fillList('st-ipv4', st.ipv4_address
-      ? [st.ipv4_address + '/' + st.ipv4_prefix + ' (via ' + (st.ipv4_gateway || '-') + ', ' + (st.ipv4_dhcp_running ? 'DHCP' : 'static') + ')']
-      : [], st.ipv4_dhcp_running ? 'waiting for DHCP' : 'none', true);
-    fillList('st-ipv6', st.ipv6, 'none', true);
-    fillList('st-dns', st.dns, 'none', true);
-    fillList('st-dns-v4', st.dns_received_v4, 'none', true);
-    fillList('st-dns-v6', st.dns_received_v6, 'none', true);
+      ? [st.ipv4_address + '/' + st.ipv4_prefix + ' (' + t('via {gateway}, {source}', { gateway: st.ipv4_gateway || '-', source: st.ipv4_dhcp_running ? 'DHCP' : t('static') }) + ')']
+      : [], st.ipv4_dhcp_running ? t('waiting for DHCP') : t('none'), true);
+    fillList('st-ipv6', st.ipv6, t('none'), true);
+    fillList('st-dns', st.dns, t('none'), true);
+    fillList('st-dns-v4', st.dns_received_v4, t('none'), true);
+    fillList('st-dns-v6', st.dns_received_v6, t('none'), true);
     $('st-client').textContent = addressText(st.client);
 
     $('banner-default-pw').hidden = !state.default_password;
@@ -773,24 +878,24 @@
       show('', '');
       if (await loadState(true)) startRefresh();
     } else if (r.status === 429) {
-      show('Too many failed logins. Try again in ' + r.data.retry_after + ' s.', 'error');
+      show(t('Too many failed logins. Try again in {s} s.', { s: r.data.retry_after }), 'error');
     } else {
-      show(r.data.error || 'Login failed', 'error');
+      show(ts(r.data.error) || t('Login failed'), 'error');
     }
   });
 
   $('logout').addEventListener('click', async () => {
     await api('/api/logout', {});
-    show('Logged out.', 'ok');
+    show(t('Logged out.'), 'ok');
     showLogin();
   });
 
-  form.addEventListener('input', () => { updateDependent(); markDefaults(); });
-  form.addEventListener('change', () => { updateDependent(); markDefaults(); });
+  form.addEventListener('input', () => { formDirty = true; updateDependent(); markDefaults(); });
+  form.addEventListener('change', () => { formDirty = true; updateDependent(); markDefaults(); });
   // The OTE settings sit in the Firmware Update card, outside the settings form (form="settings-form"): their events
   // do not bubble through the form
-  $('ote-card').addEventListener('input', () => { updateDependent(); markDefaults(); });
-  $('ote-card').addEventListener('change', () => { updateDependent(); markDefaults(); });
+  $('ote-card').addEventListener('input', () => { formDirty = true; updateDependent(); markDefaults(); });
+  $('ote-card').addEventListener('change', () => { formDirty = true; updateDependent(); markDefaults(); });
 
   async function submitSettings(path) {
     let body;
@@ -804,20 +909,20 @@
     const r = await api(path, body);
     setBusy(false);
     if (r.status !== 200) {
-      show(r.data.error || 'Request failed (' + r.status + ')', 'error');
+      show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
       return;
     }
     if (path === '/api/apply' && r.data.restart) {
-      stopAfterRestart('Applied. The device restarts once with these settings' +
-        (r.data.network_changed ? '; confirm the network settings within 120 s after the start' : '') +
-        '. Reload this page in about a minute.');
+      stopAfterRestart(r.data.network_changed
+        ? t('Applied. The device restarts once with these settings; confirm the network settings within 120 s after the start. Reload this page in about a minute.')
+        : t('Applied. The device restarts once with these settings. Reload this page in about a minute.'));
       return;
     }
     if (path === '/api/apply') {
-      show(r.data.network_changed ? 'Applied. Confirm the network settings within 120 s.' : 'Applied (not saved).', 'ok');
+      show(r.data.network_changed ? t('Applied. Confirm the network settings within 120 s.') : t('Applied (not saved).'), 'ok');
       if (r.data.network_pending) renderPending(r.data.network_pending);
     } else {
-      show(r.data.message || 'Saved.', 'ok');
+      show(ts(r.data.message) || t('Saved.'), 'ok');
     }
     await loadState(true);
   }
@@ -826,34 +931,34 @@
   $('btn-save').addEventListener('click', () => submitSettings('/api/save'));
 
   $('ote-once').addEventListener('click', async () => {
-    let question = 'Restart the device now with firmware updates enabled until its next restart?';
+    let question = t('Restart the device now with firmware updates enabled until its next restart?');
     if (state.ote_password_default) {
-      question += '\n\nThe OTE password is still the default from ESP32TimeServerSettingsSecrets.h, which is published with the source code: tools/ote_upload.py accepts it until the next restart.';
+      question += '\n\n' + t('The OTE password is still the default from ESP32TimeServerSettingsSecrets.h, which is published with the source code: tools/ote_upload.py accepts it until the next restart.');
     }
     if (!window.confirm(question)) return;
     setBusy(true);
     const r = await api('/api/ote/once', {});
     setBusy(false);
-    if (r.status === 200) stopAfterRestart(r.data.message + ' Reload this page and log in again in about a minute.');
-    else show(r.data.error || 'Restart failed', 'error');
+    if (r.status === 200) stopAfterRestart(t('{message} Reload this page and log in again in about a minute.', { message: ts(r.data.message) }));
+    else show(ts(r.data.error) || t('Restart failed'), 'error');
   });
 
   $('btn-reboot').addEventListener('click', async () => {
-    if (!window.confirm('Restart the device now? Applied settings that were not saved are discarded.')) return;
+    if (!window.confirm(t('Restart the device now? Applied settings that were not saved are discarded.'))) return;
     setBusy(true);
     const r = await api('/api/reboot', {});
     setBusy(false);
-    if (r.status === 200) stopAfterRestart(r.data.message + ' Reload this page in about a minute.');
-    else show(r.data.error || 'Restart failed', 'error');
+    if (r.status === 200) stopAfterRestart(t('{message} Reload this page in about a minute.', { message: ts(r.data.message) }));
+    else show(ts(r.data.error) || t('Restart failed'), 'error');
   });
 
   $('net-confirm').addEventListener('click', async () => {
     const r = await api('/api/network/confirm', {});
     if (r.status === 200) {
-      show(r.data.message, 'ok');
+      show(ts(r.data.message), 'ok');
       await loadState(false);
     } else {
-      show(r.data.error || 'Confirmation failed', 'error');
+      show(ts(r.data.error) || t('Confirmation failed'), 'error');
     }
   });
 
@@ -869,7 +974,7 @@
   });
   $('factory-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!window.confirm('Erase all saved settings, the password and the allow-list, and restart?')) return;
+    if (!window.confirm(t('Erase all saved settings, the password and the allow-list, and restart?'))) return;
     setBusy(true);
     const r = await api('/api/factory-reset', { password: $('factory-password').value });
     setBusy(false);
@@ -877,9 +982,9 @@
     syncPasswordEyes();
     if (r.status === 200) {
       $('factory-card').hidden = true;
-      stopAfterRestart(r.data.message + ' Log in with the compiled password after the restart.');
+      stopAfterRestart(t('{message} Log in with the compiled password after the restart.', { message: ts(r.data.message) }));
     } else {
-      show(r.data.error || 'Factory reset failed', 'error');
+      show(ts(r.data.error) || t('Factory reset failed'), 'error');
     }
   });
 
@@ -888,11 +993,11 @@
     const current = $('pw-current').value;
     const next = $('pw-new').value;
     if (next !== $('pw-repeat').value) {
-      show('The two new passwords differ.', 'error');
+      show(t('The two new passwords differ.'), 'error');
       return;
     }
     if (next.length < 12 || next.length > 128) {
-      show('The new password needs 12 to 128 characters.', 'error');
+      show(t('The new password needs 12 to 128 characters.'), 'error');
       return;
     }
     setBusy(true);
@@ -903,10 +1008,10 @@
     $('pw-repeat').value = '';
     syncPasswordEyes();
     if (r.status === 200) {
-      show(r.data.message, 'ok');
+      show(ts(r.data.message), 'ok');
       await loadState(false);
     } else {
-      show(r.data.error || 'Password change failed', 'error');
+      show(ts(r.data.error) || t('Password change failed'), 'error');
     }
   });
 
@@ -916,7 +1021,7 @@
     setBusy(true);
     const r = await api('/api/allow-list', { entries: entries });
     setBusy(false);
-    show(r.status === 200 ? r.data.message : (r.data.error || 'Allow-list could not be stored'), r.status === 200 ? 'ok' : 'error');
+    show(r.status === 200 ? ts(r.data.message) : (ts(r.data.error) || t('Allow-list could not be stored')), r.status === 200 ? 'ok' : 'error');
     if (r.status === 200) await loadState(false);
   });
 
@@ -951,16 +1056,17 @@
     e.preventDefault();
     const file = $('ote-file').files[0];
     if (!file) {
-      show('Choose the firmware image (.bin) first.', 'error');
+      show(t('Choose the firmware image (.bin) first.'), 'error');
       return;
     }
     const image = await imageVersion(file);
     if (!image) {
-      show('This is not an application image: use ESP32TimeServer.bin of the build folder (not the merged flash image).', 'error');
+      show(t('This is not an application image: use ESP32TimeServer.bin of the build folder (not the merged flash image).'), 'error');
       return;
     }
-    if (!window.confirm('Upload ' + image.project + ' ' + image.version + ' (' + file.name + ', ' + Math.round(file.size / 1024) +
-      ' kB) and restart the device with it? Running: ' + state.status.firmware + '.')) return;
+    if (!window.confirm(t('Upload {project} {version} ({file}, {kb} kB) and restart the device with it? Running: {running}.', {
+      project: image.project, version: image.version, file: file.name, kb: Math.round(file.size / 1024), running: state.status.firmware
+    }))) return;
 
     oteUploading = true;
     clearInterval(refreshTimer); // the server answers nothing else during the upload
@@ -969,16 +1075,16 @@
     const progress = $('ote-progress');
     progress.value = 0;
     progress.hidden = false;
-    $('ote-state').textContent = 'Uploading …';
+    $('ote-state').textContent = t('Uploading …');
 
     const finish = (status, data) => {
       oteUploading = false;
       setBusy(false);
       if (status === 200) {
         progress.value = 100;
-        $('ote-state').textContent = data.message || '';
+        $('ote-state').textContent = ts(data.message) || '';
         $('ote-file').value = '';
-        stopAfterRestart((data.message || 'Firmware accepted.') + ' Reload this page in about a minute.');
+        stopAfterRestart(t('{message} Reload this page in about a minute.', { message: ts(data.message) || t('Firmware accepted.') }));
         return;
       }
       progress.hidden = true;
@@ -987,7 +1093,7 @@
         showLogin();
         return;
       }
-      show(data.error || 'Upload failed (' + status + ')', 'error');
+      show(ts(data.error) || t('Upload failed ({status})', { status: status }), 'error');
       startRefresh();
     };
     const xhr = new XMLHttpRequest();
@@ -997,7 +1103,7 @@
     xhr.upload.onprogress = (ev) => {
       if (!ev.lengthComputable) return;
       progress.value = Math.round((ev.loaded * 100) / ev.total);
-      $('ote-state').textContent = ev.loaded < ev.total ? 'Uploading … ' + progress.value + ' %' : 'Checking and writing the image …';
+      $('ote-state').textContent = ev.loaded < ev.total ? t('Uploading … {p} %', { p: progress.value }) : t('Checking and writing the image …');
     };
     xhr.onload = () => {
       let data = {};
@@ -1006,7 +1112,7 @@
     };
     // The device closes the connection when it refuses the image before the whole file is sent (wrong project
     // or chip revision): the browser then only sees an interrupted upload
-    xhr.onerror = () => finish(0, { error: 'The upload was interrupted. The device may have refused the image (the reason is on the LCD and the serial console), or it does not answer.' });
+    xhr.onerror = () => finish(0, { error: t('The upload was interrupted. The device may have refused the image (the reason is on the LCD and the serial console), or it does not answer.') });
     xhr.send(file);
   });
 

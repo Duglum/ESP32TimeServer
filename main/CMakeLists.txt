@@ -49,6 +49,7 @@ idf_component_register(
     EMBED_TXTFILES
         "web/www/index.html"
         "web/www/app.js"
+        "web/www/i18n.js"
         "web/www/app.css"
     # Favicon: self-drawn alarm clock (U+23F0), 16 to 64 px PNG images in an ICO container
     EMBED_FILES

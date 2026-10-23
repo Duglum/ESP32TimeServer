@@ -194,6 +194,13 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
 button.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
 button.ghost { background: transparent; }
 button.theme-toggle { font-size: 1.15rem; line-height: 1; padding: .45rem .6rem; min-width: 2.4rem; }
+/* Language button: globe emoji and the flag of the language in use, both at the emoji size of the theme button */
+button.lang-toggle { font-size: 1.15rem; line-height: 1; padding: .45rem .6rem; min-width: 2.4rem; display: inline-flex; align-items: center; gap: .35rem; }
+.flag { display: inline-block; width: 1.3em; height: .9em; border-radius: .14em; background: center / cover no-repeat; box-shadow: 0 0 0 1px rgba(0, 0, 0, .18); }
+.flag-de { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 5 3'%3E%3Cpath fill='%23000' d='M0 0h5v1H0z'/%3E%3Cpath fill='%23DD0000' d='M0 1h5v1H0z'/%3E%3Cpath fill='%23FFCE00' d='M0 2h5v1H0z'/%3E%3C/svg%3E"); }
+.flag-gb { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 60 30'%3E%3CclipPath id='c'%3E%3Cpath d='M30 15h30v15zv15H0zH0V0zV0h30z'/%3E%3C/clipPath%3E%3Cpath fill='%23012169' d='M0 0h60v30H0z'/%3E%3Cpath stroke='%23fff' stroke-width='6' d='M0 0l60 30M60 0L0 30'/%3E%3Cpath stroke='%23C8102E' stroke-width='4' clip-path='url(%23c)' d='M0 0l60 30M60 0L0 30'/%3E%3Cpath stroke='%23fff' stroke-width='10' d='M30 0v30M0 15h60'/%3E%3Cpath stroke='%23C8102E' stroke-width='6' d='M30 0v30M0 15h60'/%3E%3C/svg%3E"); }
+/* German: the page stays invisible until app.js has translated it (i18n.js removes the class after 3 s anyway) */
+html.i18n-pending body { visibility: hidden; }
 
 .buttons { display: flex; gap: .6rem; flex-wrap: wrap; justify-content: center; }
 .buttons.left { justify-content: flex-start; }
@@ -293,6 +300,11 @@ details.pins[open] > summary { margin-bottom: .6rem; }
   .key-table { grid-template-columns: 5rem minmax(0, 1fr); }
   .key-table .key-head:nth-child(n+3) { display: none; }
   .topbar { padding: .6rem .9rem; }
+}
+/* Phones: the flag alone stands for the language, so the host name keeps its room */
+@media (max-width: 480px) {
+  button.lang-toggle .globe { display: none; }
+  .actions { gap: .35rem; }
 }
 
 .footer { text-align: center; color: var(--muted); font-size: .78rem; padding: 1rem; }

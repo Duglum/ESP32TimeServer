@@ -8,6 +8,8 @@
 <title>ESP32 Time Server</title>
 <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48 64x64">
 <link rel="stylesheet" href="/app.css">
+<!-- Not deferred: it reads the language cookie before the page is shown (no flash of English text) -->
+<script src="/i18n.js"></script>
 <script src="/app.js" defer></script>
 </head>
 <body>
@@ -20,6 +22,7 @@
     </div>
   </div>
   <div class="actions">
+    <button type="button" class="ghost lang-toggle" id="lang-toggle"><span class="globe" aria-hidden="true">&#x1F310;</span><span class="flag" id="lang-flag" aria-hidden="true"></span></button>
     <button type="button" class="ghost theme-toggle" id="theme-toggle"></button>
     <button type="button" class="ghost" id="logout" hidden>Log out</button>
   </div>
