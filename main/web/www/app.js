@@ -419,6 +419,8 @@
       pps_lost_serve: s.pps_lost_serve,
       pps_lost_serve_min: String(s.pps_lost_serve_min),
       pps_lost_stratum: String(s.pps_lost_stratum),
+      // ppm (us per second) as ms per second
+      pps_dispersion: String(s.pps_dispersion_ppm / 1000),
       lcd_enabled: s.lcd_enabled,
       lcd_title: s.lcd_title,
       lcd_24_hour: s.lcd_24_hour,
@@ -501,10 +503,14 @@
       if (name === 'mqtt_report_period') text += ' s';
       if (name === 'pps_holdover') text = value === '0' ? t('off') : text + ' s';
       if (name === 'pps_lost_serve_min') text = value === '0' ? t('no limit') : text + ' min';
+      if (name === 'pps_dispersion') text = (lang === 'de' ? text.replace('.', ',') : text) + ' ms/s';
       if (name === 'mac_address' && !state.defaults.mac_address) text = t('the hardware MAC');
       if (displayNames[name] && displayNames[name][value]) text = t(displayNames[name][value]);
       small.textContent = t('Default: {value}', { value: text });
-      const differs = String(currentValue(name)).replace(/\r/g, '') !== String(value);
+      // Decimal fields compare as numbers (0.10 = 0.1)
+      const differs = name === 'pps_dispersion'
+        ? Number(currentValue(name)) !== Number(value)
+        : String(currentValue(name)).replace(/\r/g, '') !== String(value);
       small.classList.toggle('differs', differs);
       f[name].classList.toggle('is-changed', differs);
     });
@@ -610,6 +616,7 @@
       pps_lost_serve: f.pps_lost_serve.checked,
       pps_lost_serve_min: Number(f.pps_lost_serve_min.value),
       pps_lost_stratum: Number(f.pps_lost_stratum.value),
+      pps_dispersion_ppm: Math.round(Number(f.pps_dispersion.value) * 1000),
       lcd_enabled: f.lcd_enabled.checked,
       lcd_title: f.lcd_title.value,
       lcd_24_hour: f.lcd_24_hour.checked,
@@ -690,6 +697,9 @@
     }
     if (!Number.isInteger(body.pps_lost_stratum) || body.pps_lost_stratum < 2 || body.pps_lost_stratum > 16) {
       throw new Error(t('Stratum after the holdover: 2 to 16'));
+    }
+    if (f.pps_dispersion.value.trim() === '' || !(body.pps_dispersion_ppm >= 1 && body.pps_dispersion_ppm <= 10000)) {
+      throw new Error(t('Root dispersion growth: 0.001 to 10 ms per second'));
     }
     if (!Number.isInteger(body.mqtt_report_period) || body.mqtt_report_period < 30 || body.mqtt_report_period > 86400) {
       throw new Error(t('MQTT reporting period: 30 to 86400 s'));

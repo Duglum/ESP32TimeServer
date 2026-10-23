@@ -148,8 +148,12 @@
     'The PPS counts as lost after 3.5 s without a pulse. The settings below take effect at once with Apply. When the PPS and the GNSS are back, the server returns to stratum 1 by itself.':
       'Der PPS gilt nach 3,5 s ohne Impuls als ausgefallen. Die folgenden Einstellungen wirken sofort mit Übernehmen. Sobald PPS und GNSS wieder da sind, kehrt der Server von selbst zu Stratum 1 zurück.',
     'PPS holdover (s, 0 = off)': 'PPS-Holdover (s, 0 = aus)',
-    '0 to 600 s. For this long after the PPS is lost the server keeps answering at stratum 1, coasting on the learned rate of its oscillator; the advertised root dispersion grows by 0.2 ms per second since the last pulse, so the clients see the growing uncertainty. After the holdover the server answers as set below.':
-      '0 bis 600 s. So lange nach dem PPS-Ausfall antwortet der Server weiter mit Stratum 1 und läuft mit der gelernten Rate seines Oszillators weiter; die angegebene Root Dispersion wächst um 0,2 ms pro Sekunde seit dem letzten Impuls, sodass die Clients die wachsende Unsicherheit sehen. Nach dem Holdover antwortet der Server wie unten eingestellt.',
+    '0 to 600 s. For this long after the PPS is lost the server keeps answering at stratum 1, coasting on the learned rate of its oscillator; the advertised root dispersion grows with the time since the last pulse (see below), so the clients see the growing uncertainty. After the holdover the server answers as set below.':
+      '0 bis 600 s. So lange nach dem PPS-Ausfall antwortet der Server weiter mit Stratum 1 und läuft mit der gelernten Rate seines Oszillators weiter; die angegebene Root Dispersion wächst mit der Zeit seit dem letzten Impuls (siehe unten), sodass die Clients die wachsende Unsicherheit sehen. Nach dem Holdover antwortet der Server wie unten eingestellt.',
+    'Root dispersion growth (ms per second)': 'Zunahme der Root Dispersion (ms pro Sekunde)',
+    '0.001 to 10 ms per second since the last pulse (0.1 ms per second = 100 ppm), up to at most 1 s. The advertised uncertainty grows this fast while the server coasts after the PPS loss: in the holdover and with a stratum of 2 to 15 below.':
+      '0,001 bis 10 ms pro Sekunde seit dem letzten Impuls (0,1 ms pro Sekunde = 100 ppm), höchstens bis 1 s. So schnell wächst die angegebene Unsicherheit, während der Server nach dem PPS-Ausfall frei weiterläuft: im Holdover und mit einem Stratum von 2 bis 15 unten.',
+    'Root dispersion growth: 0.001 to 10 ms per second': 'Zunahme der Root Dispersion: 0,001 bis 10 ms pro Sekunde',
     'Keep answering NTP requests after the holdover': 'NTP-Anfragen nach dem Holdover weiter beantworten',
     'Off: after the holdover the server does not answer at all, so the clients switch to their other servers at once instead of getting stratum 16 answers.':
       'Aus: Nach dem Holdover antwortet der Server gar nicht mehr, sodass die Clients sofort zu ihren anderen Servern wechseln, statt Antworten mit Stratum 16 zu erhalten.',
@@ -555,6 +559,7 @@
     ['PPS holdover: 0 to %u seconds', 'PPS-Holdover: 0 bis {1} Sekunden'],
     ['Serving time after the PPS loss: 0 (no limit) to %u minutes', 'Antwortzeit nach dem PPS-Ausfall: 0 (unbegrenzt) bis {1} Minuten'],
     ['Stratum after the holdover: 2 to 16', 'Stratum nach dem Holdover: 2 bis 16'],
+    ['Root dispersion growth: 1 to %u ppm (0.001 to 10 ms per second)', 'Zunahme der Root Dispersion: 1 bis {1} ppm (0,001 bis 10 ms pro Sekunde)'],
     ['MQTT reporting period: 30 to 86400 s', 'MQTT-Berichtsintervall: 30 bis 86400 s']
   ];
 

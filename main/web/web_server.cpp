@@ -393,6 +393,7 @@ namespace
         cJSON_AddNumberToObject(object, "pps_lost_stratum", s.pps_lost_stratum);
         cJSON_AddBoolToObject(object, "pps_lost_serve", s.pps_lost_serve);
         cJSON_AddNumberToObject(object, "pps_lost_serve_min", s.pps_lost_serve_min);
+        cJSON_AddNumberToObject(object, "pps_dispersion_ppm", s.pps_dispersion_ppm);
         cJSON_AddBoolToObject(object, "lcd_enabled", s.lcd_enabled);
         cJSON_AddStringToObject(object, "lcd_title", s.lcd_title);
         cJSON_AddBoolToObject(object, "lcd_24_hour", s.lcd_24_hour);
@@ -507,6 +508,7 @@ namespace
                   json_int(root, "pps_lost_stratum", s.pps_lost_stratum, 2, 16, err, err_size) &&
                   json_bool(root, "pps_lost_serve", s.pps_lost_serve, err, err_size) &&
                   json_int(root, "pps_lost_serve_min", s.pps_lost_serve_min, 0, WEB_PPS_LOST_SERVE_MAX_MIN, err, err_size) &&
+                  json_int(root, "pps_dispersion_ppm", s.pps_dispersion_ppm, 1, WEB_PPS_DISPERSION_MAX_PPM, err, err_size) &&
                   json_bool(root, "lcd_enabled", s.lcd_enabled, err, err_size) &&
                   json_string(root, "lcd_title", s.lcd_title, sizeof(s.lcd_title), err, err_size) &&
                   json_bool(root, "lcd_24_hour", s.lcd_24_hour, err, err_size) &&

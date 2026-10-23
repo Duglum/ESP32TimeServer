@@ -165,8 +165,13 @@
         <div class="grid">
           <label class="span2"><span class="lt">PPS holdover (s, 0 = off)</span>
             <input type="number" name="pps_holdover" min="0" max="600">
-            <small class="note">0 to 600 s. For this long after the PPS is lost the server keeps answering at stratum 1, coasting on the learned rate of its oscillator; the advertised root dispersion grows by 0.2 ms per second since the last pulse, so the clients see the growing uncertainty. After the holdover the server answers as set below.</small>
+            <small class="note">0 to 600 s. For this long after the PPS is lost the server keeps answering at stratum 1, coasting on the learned rate of its oscillator; the advertised root dispersion grows with the time since the last pulse (see below), so the clients see the growing uncertainty. After the holdover the server answers as set below.</small>
             <small class="def" data-for="pps_holdover"></small>
+          </label>
+          <label class="span2"><span class="lt">Root dispersion growth (ms per second)</span>
+            <input type="number" name="pps_dispersion" min="0.001" max="10" step="0.001">
+            <small class="note">0.001 to 10 ms per second since the last pulse (0.1 ms per second = 100 ppm), up to at most 1 s. The advertised uncertainty grows this fast while the server coasts after the PPS loss: in the holdover and with a stratum of 2 to 15 below.</small>
+            <small class="def" data-for="pps_dispersion"></small>
           </label>
           <div class="span2 switch-block">
             <label class="switch"><input type="checkbox" name="pps_lost_serve"> Keep answering NTP requests after the holdover</label>

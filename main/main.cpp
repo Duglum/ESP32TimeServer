@@ -1475,6 +1475,7 @@ static std::atomic<int64_t> s_pps_holdover_us{0};    // PPS holdover of the sett
 static std::atomic<uint8_t> s_pps_lost_stratum{16};  // after the holdover: stratum of the replies (live)
 static std::atomic<bool> s_pps_lost_serve{true};     // after the holdover: answer NTP requests at all (live)
 static std::atomic<int64_t> s_pps_lost_serve_us{0};  // ... for this long after the PPS was lost, 0 = no limit (live)
+static std::atomic<uint32_t> s_pps_dispersion_ppm{ntpHoldoverDispersionPpm}; // root dispersion growth while coasting (live)
 static std::atomic<bool> s_ntp_pps_active{false};
 static std::atomic<bool> s_ntp_gnss_timing_valid{false};
 static std::atomic<bool> s_ntp_pps_missing{false};
@@ -1484,6 +1485,8 @@ static std::atomic<bool> s_ntp_sync_stale{false};
 static constexpr int64_t Sync_Stale_After_Us = static_cast<int64_t>(periodicGNSSRefreshEveryThisNumberOfMinutes) * 60LL * 1000000LL * 3LL;
 static constexpr int64_t Gnss_Validity_Timeout_Us = 3500000LL;
 static constexpr int64_t Pps_Lost_Coast_Max_Us = 3600LL * 1000000LL; // the model clock keeps the learned rate for one hour
+// Upper limit of the advertised root dispersion while coasting: 1 s (NTP short format 16.16)
+static constexpr int64_t Ntp_Root_Dispersion_Max_S1616 = 65536;
 static constexpr int64_t Sync_Reboot_After_Us = 30LL * 60LL * 1000000LL;
 static constexpr int64_t Max_Sync_Attempt_Us = 10000000LL;
 static constexpr int64_t Gnss_Invalid_Reacquisition_After_Us = 30LL * 1000000LL;
@@ -2532,8 +2535,11 @@ static ntp_reply_status_t get_ntp_reply_status()
         {
             // Coasting is possible: the GNSS was valid when the PPS was lost (the server was at stratum 1; the GNSS may
             // be lost as well, e.g. antenna fault), the model clock (learned rate) and, with hardware time stamps, the
-            // free-running PTP clock are valid. The root dispersion grows by ntpHoldoverDispersionPpm of the time since
-            // the last pulse.
+            // free-running PTP clock are valid. The root dispersion grows by the ppm of the settings (default
+            // ntpHoldoverDispersionPpm) of the time since the last pulse, up to Ntp_Root_Dispersion_Max_S1616 (1 s).
+            // The age is capped at the longest coasting time (one hour): the product stays far below the int64 limit
+            // however long the PPS is lost and whatever the serving time after it (3600e6 us * 10000 ppm * 65536 =
+            // 2.4e18 < 9.2e18). The stratum 16 replies keep NTP_ROOT_DISPERSION.
             const bool can_coast = !s_time_setting_in_progress.load(std::memory_order_acquire) &&
                                    last_gnss_valid_us > 0 && last_pps_us - last_gnss_valid_us <= Gnss_Validity_Timeout_Us &&
                                    !faults.sanity_mismatch &&
@@ -2541,8 +2547,11 @@ static ntp_reply_status_t get_ntp_reply_status()
                                    s_ntp_reference_valid.load(std::memory_order_acquire) &&
                                    (!s_ptp_clock_ready.load(std::memory_order_acquire) ||
                                     s_ptp_comp_valid.load(std::memory_order_acquire));
-            const uint32_t dispersion = NTP_ROOT_DISPERSION + static_cast<uint32_t>(
-                (pps_age_us * static_cast<int64_t>(ntpHoldoverDispersionPpm) * 65536LL + 999999999999LL) / 1000000000000LL);
+            const int64_t coast_age_us = pps_age_us < Pps_Lost_Coast_Max_Us ? pps_age_us : Pps_Lost_Coast_Max_Us;
+            const int64_t growth = (coast_age_us * static_cast<int64_t>(s_pps_dispersion_ppm.load(std::memory_order_relaxed)) * 65536LL +
+                                    999999999999LL) / 1000000000000LL;
+            const int64_t uncapped = static_cast<int64_t>(NTP_ROOT_DISPERSION) + growth;
+            const uint32_t dispersion = static_cast<uint32_t>(uncapped < Ntp_Root_Dispersion_Max_S1616 ? uncapped : Ntp_Root_Dispersion_Max_S1616);
 
             // PPS holdover (from release 3.0.5): stratum 1 for the holdover time of the settings after the PPS was lost
             if (pps_age_us < Gnss_Validity_Timeout_Us + s_pps_holdover_us.load(std::memory_order_relaxed))
@@ -10807,6 +10816,7 @@ void app_apply_live_settings(const web_settings_t &settings)
     s_pps_lost_stratum.store(settings.pps_lost_stratum, std::memory_order_relaxed);
     s_pps_lost_serve.store(settings.pps_lost_serve, std::memory_order_relaxed);
     s_pps_lost_serve_us.store(static_cast<int64_t>(settings.pps_lost_serve_min) * 60LL * 1000000LL, std::memory_order_relaxed);
+    s_pps_dispersion_ppm.store(settings.pps_dispersion_ppm, std::memory_order_relaxed);
     s_lcd_24_hour.store(settings.lcd_24_hour, std::memory_order_relaxed);
     s_lcd_pad_hour.store(settings.lcd_pad_hour, std::memory_order_relaxed);
     s_lcd_show_time_zone.store(settings.lcd_show_time_zone, std::memory_order_relaxed);

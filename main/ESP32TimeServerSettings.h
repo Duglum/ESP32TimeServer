@@ -177,7 +177,8 @@ static constexpr const char *timeZoneSpec = "CET-1CEST,M3.5.0,M10.5.0/3";
 // coasting on the learned oscillator rate, while the advertised root dispersion grows with the time since the last
 // pulse. After it the server answers at stratum 16 (leap indicator "not synchronised") until the PPS and GNSS are back.
 static constexpr int64_t ntpHoldoverDurationUs = 2LL * 1000000LL; // Holdover duration in microseconds (2 seconds)
-// Conservative uncertainty growth while coasting on the learned oscillator rate.
+// Conservative uncertainty growth while coasting on the learned oscillator rate (default of the web admin setting
+// "Root dispersion growth", 1 to 10000 ppm; 100 ppm = 0.1 ms per second since the last pulse).
 static constexpr uint32_t ntpHoldoverDispersionPpm = 100;
 // When the PPS is lost for longer than the holdover (defaults of the web admin settings):
 // - ntpServeAfterHoldover: true = keep answering NTP requests (for ntpServeAfterPpsLostMinutes); false = no answer at
