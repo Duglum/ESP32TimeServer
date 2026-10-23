@@ -651,10 +651,11 @@ static std::atomic<bool> s_ptp_clock_ready{false};
 // Actual tick rate of the MCPWM capture timer (queried in setup_pps_input()).
 static uint32_t s_pps_capture_hz = PPS_CAPTURE_RESOLUTION_HZ;
 // Default for the interrupt latency between the PPS edge and the capture callback. It is the central value of the latency
-// (mean of the lowest 75 % of the samples). The first measurement on the development board gave 2.5 us as minimum and as median.
+// (mean of the lowest 75 % of the samples). The first measurement on the development board gave 2.5 us as minimum and as median,
+// the stored value of the -O2 build is 2.50 us as well.
 // With PPS_ISR_LATENCY_AUTO the latency is measured once per chip / configuration, stored in NVS and used from there;
 // the default applies until then.
-static constexpr double PPS_ISR_LATENCY_DEFAULT_US = 2.6;
+static constexpr double PPS_ISR_LATENCY_DEFAULT_US = 2.5;
 // Value in use in nanoseconds (lock-free atomic so it can be changed at run time)
 static std::atomic<int32_t> s_pps_isr_latency_ns{static_cast<int32_t>(PPS_ISR_LATENCY_DEFAULT_US * 1000.0 + 0.5)};
 
@@ -3305,8 +3306,10 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     }
     if (result == ESP_OK)
     {
-        ntp_cache_update(client_ip, client_port, receive_time,
-                         hardware_transmit_time != 0 ? hardware_transmit_time : own_transmit_time);
+        // Without a hardware TX time stamp (e.g. the frame waited behind others in the TX queue) the stored T2 is 0, so
+        // the next request is answered in basic mode: an interleaved reply would carry the software T3, which misses
+        // the queueing delay of this frame
+        ntp_cache_update(client_ip, client_port, hardware_transmit_time != 0 ? receive_time : 0, hardware_transmit_time);
         update_tx_delay_estimate(false, authenticated_request, raw_transmit_time, hardware_transmit_time);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
@@ -3516,8 +3519,8 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
     }
     if (result == ESP_OK)
     {
-        ntp_cache_update_ipv6(&client_ip, client_port, receive_time,
-                              hardware_transmit_time != 0 ? hardware_transmit_time : own_transmit_time);
+        // Without a hardware TX time stamp the next request is answered in basic mode (see the IPv4 path)
+        ntp_cache_update_ipv6(&client_ip, client_port, hardware_transmit_time != 0 ? receive_time : 0, hardware_transmit_time);
         update_tx_delay_estimate(true, authenticated_request, raw_transmit_time, hardware_transmit_time);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
@@ -4316,9 +4319,22 @@ static bool is_nmea_checksum_valid(const char *sentence)
     if (checksum_marker == nullptr || checksum_marker[1] == '\0' || checksum_marker[2] == '\0' || checksum_marker[3] != '\0')
         return false;
 
-    unsigned int expected_checksum = 0;
-    if (sscanf(checksum_marker + 1, "%2X", &expected_checksum) != 1)
+    // Two hexadecimal digits (no sscanf: this also runs in the GNSS time sync task, which has a small stack)
+    const auto hex_value = [](char c) -> int
+    {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        return -1;
+    };
+    const int high = hex_value(checksum_marker[1]);
+    const int low = hex_value(checksum_marker[2]);
+    if (high < 0 || low < 0)
         return false;
+    const unsigned int expected_checksum = static_cast<unsigned int>(high * 16 + low);
 
     uint8_t actual_checksum = 0;
     for (const char *cursor = sentence + 1; cursor < checksum_marker; ++cursor)
@@ -4501,10 +4517,14 @@ static bool wait_for_nmea_rmc_time(nmea_rmc_time_t *time_data, uint32_t timeout_
             if (ch == '\r' || ch == '\n')
             {
                 sentence[index] = '\0';
-                if (!s_gnss_ublox)
-                    process_nmea_gsv_sentence(sentence);
-                if (parse_nmea_rmc_sentence(sentence, time_data))
-                    return true;
+                // Sentences with a wrong or missing checksum are dropped: a corrupted RMC could carry a wrong time
+                if (is_nmea_checksum_valid(sentence))
+                {
+                    if (!s_gnss_ublox)
+                        process_nmea_gsv_sentence(sentence);
+                    if (parse_nmea_rmc_sentence(sentence, time_data))
+                        return true;
+                }
 
                 collecting = false;
                 index = 0;
@@ -4936,15 +4956,11 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
     return false;
 }
 
+// u-blox receivers only (UBX commands, see setup_gnss)
 static bool configure_gnss_outputs(bool *uart1_output_set_result)
 {
-    bool i2c_output_disabled = true;
-    bool uart2_output_disabled = true;
-    if (s_gnss_ublox)
-    {
-        i2c_output_disabled = s_gnss.setI2COutput(0);
-        uart2_output_disabled = s_gnss.setUART2Output(0);
-    }
+    const bool i2c_output_disabled = s_gnss.setI2COutput(0);
+    const bool uart2_output_disabled = s_gnss.setUART2Output(0);
     (void)i2c_output_disabled; // only read by the debug log
     (void)uart2_output_disabled;
 
@@ -6151,6 +6167,27 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
     s_ptp_comp_valid.store(true, std::memory_order_release);
 }
 
+// Raw PTP time for a single reading that is not part of a median. The driver reads the seconds and the sub-seconds
+// register one after the other, so a reading that falls on the second rollover can be off by about 1 s. Two
+// readings must be in order and close together; otherwise the pair is read again.
+static bool ptp_read_raw_ns_consistent(int64_t &raw_ns)
+{
+    static constexpr int64_t maxReadGapNs = 100000;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        int64_t first_ns = 0;
+        int64_t second_ns = 0;
+        if (!ptp_read_raw_ns(first_ns) || !ptp_read_raw_ns(second_ns))
+            return false;
+        if (second_ns >= first_ns && second_ns - first_ns < maxReadGapNs)
+        {
+            raw_ns = second_ns;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Called by the PPS task when the PPS is lost: stop the offset correction and keep the PTP clock on the estimated
 // rate (holdover). The mapping continues from the current offset.
 static void ptp_servo_holdover()
@@ -6160,7 +6197,8 @@ static void ptp_servo_holdover()
         return;
     int64_t raw_ns = 0;
     int64_t offset_ns = 0;
-    if (!ptp_read_raw_ns(raw_ns) || !ptp_map_offset_at(raw_ns, offset_ns))
+    // The reference point of the mapping published below holds for the whole holdover
+    if (!ptp_read_raw_ns_consistent(raw_ns) || !ptp_map_offset_at(raw_ns, offset_ns))
         return;
     const int32_t old_command = st.cmd_ppb;
     ptp_apply_command(static_cast<int32_t>(std::clamp(llround(-st.free_ppb), static_cast<long long>(-ptp_max_command_ppb),
@@ -6811,33 +6849,20 @@ static void setup_gnss_ublox_receiver()
     (void)startup_target_baud;
 }
 
-// Receiver with the NMEA standard protocol only: fixed baud rate of the settings, NMEA processing
+// Receiver with the NMEA standard protocol only: fixed baud rate of the settings, NMEA processing.
+// Nothing is sent to the receiver: UBX commands (u-blox library) could be misread by other chip sets.
 static void setup_gnss_nmea_receiver()
 {
-    const uint32_t highest_candidate_baud = s_cfg->gnss_baud;
-    s_gnss_target_baud = highest_candidate_baud;
-    s_detected_gnss_baud = highest_candidate_baud;
+    const uint32_t baud = s_cfg->gnss_baud;
+    s_gnss_target_baud = baud;
+    s_detected_gnss_baud = baud;
     s_gnss_is_max_m10s = false;
     s_gnss_required_assume_success = false;
     s_use_nmea_fallback = true;
-    uint32_t baud = highest_candidate_baud;
-    static constexpr uint16_t gnssBeginMaxWaitMs = 2500;
-    bool assume_success = false;
 
     s_gnss_serial.end();
     s_gnss_serial.begin(baud, SERIAL_8N1, s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
     vTaskDelay(pdMS_TO_TICKS(150));
-
-    bool begin_result = s_gnss.begin(s_gnss_serial, gnssBeginMaxWaitMs, assume_success);
-#if DEBUG_ENABLED
-    ESP_LOGI(TAG,
-             "GNSS begin at %lu baud with assume_success=%s -> %s",
-             static_cast<unsigned long>(baud),
-             assume_success ? "true" : "false",
-             begin_result ? "success" : "failed");
-#else
-    (void)begin_result;
-#endif
 
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "GNSS module profile: generic/fallback (NMEA)");
@@ -6916,13 +6941,16 @@ static void setup_gnss()
     else
         setup_gnss_nmea_receiver();
 
+    // Port configuration (UBX commands) only for u-blox receivers; an NMEA receiver keeps its own output settings
     bool uart1_output_set = false;
-    configure_gnss_outputs(&uart1_output_set);
-
+    if (s_gnss_ublox)
+    {
+        configure_gnss_outputs(&uart1_output_set);
 #if DEBUG_ENABLED
-    if (!uart1_output_set)
-        ESP_LOGW(TAG, "GNSS UART1 output configuration failed. Continuing with the module's current output settings.");
+        if (!uart1_output_set)
+            ESP_LOGW(TAG, "GNSS UART1 output configuration failed. Continuing with the module's current output settings.");
 #endif
+    }
 
     s_use_nmea_fallback = s_gnss_ublox ? (s_gnss_required_assume_success || !uart1_output_set) : true;
 
@@ -8070,7 +8098,9 @@ static void setup_mqtt()
         config.session.last_will.msg = "offline";
         config.session.last_will.qos = s_mqtt_qos;
         config.session.last_will.retain = 1;
-        config.task.priority = 23;
+        // Below every timing task (PPS 14, GNSS 15, hardware NTP 17, lwIP 18, NTP socket server 20): an MQTT (TLS) connect
+        // must not delay the NTP replies. 5 = esp-mqtt default (was 23)
+        config.task.priority = 5;
         s_mqtt_client = esp_mqtt_client_init(&config);
         if (s_mqtt_client == nullptr)
         {
@@ -8510,9 +8540,12 @@ void write_settings_messages_to_the_console()
     ESP_LOGI(TAG, "");
 }
 
+static bool s_nvs_ready = false; // nvs_flash_init() succeeded (see app_main: initArduino() is skipped otherwise)
+
 void setup_NVS_storage(void)
 {
-    if (!initialize_nvs_storage())
+    s_nvs_ready = initialize_nvs_storage();
+    if (!s_nvs_ready)
     {
         ESP_LOGE(TAG, "NVS initialization failed. GNSS module settings persistence is unavailable.");
     }
@@ -11074,7 +11107,14 @@ extern "C" void app_main()
 
     setup_pps_input(); // (keep this at the very beginning of the setup sequence)
 
-    initArduino();
+    // initArduino() erases the whole NVS partition when nvs_flash_init() fails with "no free pages" or "new version"
+    // (esp32-hal-misc.c): the web admin password, the TLS key and the settings would be lost and the page would fall
+    // back to the compiled password. initialize_nvs_storage() deliberately does not erase, so initArduino() is skipped
+    // then. On the ESP32-P4 it does nothing else this firmware needs (log level, empty init() / initVariant()).
+    if (s_nvs_ready)
+        initArduino();
+    else
+        ESP_LOGW(TAG, "initArduino() skipped: it would erase the NVS partition");
 
     write_opening_messages_to_the_console();
 

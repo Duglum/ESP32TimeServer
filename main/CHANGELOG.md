@@ -55,6 +55,7 @@ Contents
 | 26 | **Ethernet recovery hardening, ESP-IDF Ethernet driver, OTE over HTTPS** (2026-10-21, from release 3.0.5) | recovery under the time mutex with a 45 s watchdog, PHY link read, more triggers; firmware upload on the page or by script over TLS, image checked before it is written |
 | 27 | **Per-client NTP rate limit** (2026-10-23): 20 requests per second and client IP address by default, setting in the Network panel | one client cannot occupy the reply path; requests over the limit are dropped silently, no effect on the time stamps |
 | 28 | **Scripted firmware uploads with the web admin password** (2026-10-23): the settings OTE password and mDNS host name are gone; `tools/ote_upload.py` finds the device by its A / AAAA records (unicast DNS) | one password for the page and the script (the same compiled `WebAdminPassword` on many devices allows bulk updates); no multicast name resolution in the script |
+| 29 | **Quick wins of the review of 2026-10-23** (`REVIEW_2026-10-23.md`): RMC checksum, no software T3 in interleaved replies, MQTT task priority 5, no NVS erase by `initArduino()`, no UBX commands to NMEA receivers, rollover-safe PTP reading in the holdover, interrupt latency default 2.5 µs | no wrong labels from corrupted sentences, no queue-delayed T3 in interleaved replies, MQTT cannot delay NTP replies, password and TLS key survive NVS errors |
 
 No memory leak was found in the review (section 4.13).
 
@@ -162,7 +163,7 @@ Time scales: the model clock is aligned to the PPS edge every second and compens
 - `PPS_ISR_LATENCY_AUTO 1`: at the first start for a configuration a task measures the latency 30 s after the boot: 160 software triggered capture events (`mcpwm_capture_channel_trigger_soft_catch`), 500 ms apart, on the other core than the PPS interrupt. Per event the latency is the local time reading in the callback minus the middle of two local time readings around the trigger (fine timebase, 4.19). Attempts with a gap above 5 µs between those readings are dropped, at least 32 valid attempts are needed.
 - New in the review: test triggers are only issued between 50 ms and 950 ms after the last real PPS edge (the callback stores the low 32 bits of its time). Before, a real edge that arrived while a test was armed was taken as the test event (wrong sample) and was lost for the PPS task.
 - Result = mean of the lowest 75 % of the samples ("central value"), accepted within 0.5 to 20 µs. It is applied immediately and stored in NVS with a fingerprint: IDF version, CPU frequency, MCPWM ISR setting (`CONFIG_MCPWM_ISR_IRAM_SAFE` or its IDF 6.1 name `CONFIG_MCPWM_ISR_CACHE_SAFE`), **compiler optimization level**, chip model, revision and cores, `PPS_ISR_LATENCY_CODE_VERSION`. With a matching fingerprint the stored value is read at every start and no measurement runs.
-- `PPS_ISR_LATENCY_CODE_VERSION` is 4 (3 with `FINE_LOCAL_TIMEBASE 0`): the value stored with version 3 was measured in whole microseconds, so it is measured again once (about 2 minutes after the first start). Default until a value is measured: 2.6 µs.
+- `PPS_ISR_LATENCY_CODE_VERSION` is 4 (3 with `FINE_LOCAL_TIMEBASE 0`): the value stored with version 3 was measured in whole microseconds, so it is measured again once (about 2 minutes after the first start). Default until a value is measured: 2.5 µs (2.6 µs until 4.28).
 - Resolution 62.5 ns (was ±0.5 µs with esp_timer). Measurement on the development board with esp_timer: minimum 2.50 µs, median 2.50 µs, mean 2.82 µs, p90 3.50 µs.
 - The test events are not passed on as PPS pulses.
 
@@ -539,6 +540,19 @@ No separate OTE password and no mDNS host name setting any more. The script and 
 - **`tools/ote_upload.py`:** `-i` takes an IP address or a fully qualified DNS name. The name is resolved with `getaddrinfo()` (A and AAAA records, `-4` / `-6` for one family) and the addresses are tried in the order of the resolver, each with a unicast TCP connection (10 s connect timeout). `.local` names and single-label names are refused, since the operating system would resolve them with mDNS, LLMNR or NetBIOS (multicast / broadcast). The password comes from the environment variable `WEB_ADMIN_PASSWORD` (`--password-env`) or is asked for. The `Host` header and the TLS server name carry the name given with `-i`.
 - **Migration:** a device with the previous firmware is updated once with the previous script (`OTE_PASSWORD`, OTE password) or on the page; after that only the web admin password works.
 
+### 4.28 Quick wins of the review of 2026-10-23
+
+Priorities 1 to 6 of the action list in `REVIEW_2026-10-23.md` (finding IDs in brackets), plus the interrupt latency default asked for in its open questions. No change to the PPS interrupt, the servo or the time stamps of the replies.
+
+- **RMC checksum (Z-02):** `wait_for_nmea_rmc_time()` uses a sentence only if its checksum is right (`is_nmea_checksum_valid()`, before only used for GSV). A corrupted or cut RMC could carry a wrong time or date. The checksum digits are read without `sscanf()` (the GNSS time sync task has a small stack).
+- **Interleaved replies without software T3 (Z-07):** the EMAC driver gives up waiting for the TX time stamp after 50 polls, e.g. when the reply waited behind other frames in the TX queue (`esp_eth_mac_esp_dma.c`, `PTP_TX_TIMESTAMP_TO`). The software T3 stored until now missed that queueing delay and was sent in the next interleaved reply. Now the cache stores T2 = 0 in that case, so the next request of that client is answered in basic mode (chrony accepts that) and the interleaved mode resumes with the following one. The same applies while the hardware TX time stamps are switched off after errors.
+- **MQTT task priority 5 (Z-16):** the esp-mqtt client task ran at priority 23, above all timing tasks (PPS 14, GNSS 15, hardware NTP 17, lwIP 18, NTP socket server 20); a TLS connect could delay the NTP replies. Now 5, the esp-mqtt default.
+- **No NVS erase by `initArduino()` (S-01):** `initArduino()` erases the whole NVS partition when `nvs_flash_init()` fails with "no free pages" or "new version" (`esp32-hal-misc.c`), although `initialize_nvs_storage()` deliberately does not erase. Password hash, TLS key, settings and calibrations would be lost and the page would fall back to the compiled password. `initArduino()` is now called only after a successful NVS start (console warning otherwise). On the ESP32-P4 it does nothing else this firmware needs: it sets the default log level and calls the empty `init()` / `initVariant()`.
+- **No UBX commands to NMEA receivers (G-01):** with the NMEA protocol the u-blox library is no longer started (`s_gnss.begin()`) and the port configuration (`setUART1Output()` etc., UBX CFG-VALSET) is sent only to u-blox receivers. Other chip sets could misread the UBX frames.
+- **Rollover-safe PTP reading in the holdover (Z-08):** the driver reads the seconds and the sub-seconds register one after the other; a reading on the second rollover can be off by about 1 s. The reference point that `ptp_servo_holdover()` publishes for the whole holdover is now taken from two readings that must be in order and less than 100 µs apart (`ptp_read_raw_ns_consistent()`, up to three attempts). The software offset measurement keeps its single bracketed readings (median, already robust).
+- **Interrupt latency default 2.5 µs** (was 2.6): the first measurement and the stored value of the -O2 build are 2.50 µs. It is only used until the automatic measurement has run.
+- Verified: build with the IDF 6.1 warning flags (-O2, no warning in `main/`) and a compile check with `CALCULATE_STACK_SIZES_ENABLED 1` (debug code). Not yet tested on the board; the stack of the PPS task (two more `int64_t` in the holdover path) should be checked once with `CALCULATE_STACK_SIZES_ENABLED 1`.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -713,7 +727,7 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `PTP_PPS_LOOPBACK_DELAY_NS` | PTP servo | 0 | delay of the loopback path minus the GNSS PPS input path |
 | `NTP_ROOT_DISPERSION` | `main.cpp`, top | 1 | advertised root dispersion, 1/65536 s per unit |
 | `PTP_CLOCK_FROM_PLL` | after `PTP_FREE_RUNNING` | 1 | 1 = PTP clock from PLL_F80M (13 ns steps), 0 = 40 MHz crystal (40 ns steps) |
-| `PPS_ISR_LATENCY_DEFAULT_US` | compensation block | 2.6 | used until a value is measured |
+| `PPS_ISR_LATENCY_DEFAULT_US` | compensation block | 2.5 | used until a value is measured |
 | `PTP_LATENCY_AUTO` | compensation block | 1 (forced to 0 with `PTP_FREE_RUNNING 1`) | calibrate and store the PTP write latency; 0 = always the default |
 | `PTP_LATENCY_FORCE_RECALIBRATION` | compensation block | 0 | 1 = calibrate again at the next start |
 | `PTP_WRITE_LATENCY_DEFAULT_NS` | compensation block | 3850 | used until a value is stored or calibrated |
@@ -771,7 +785,7 @@ Always printed (brief):
 - Loopback problems: `PTP PPS loopback: PPS output on GPIO n failed ...`, `... capture channel on GPIO n failed ...`, `... GPIO n cannot be used ...`, `PTP PPS loopback on GPIO n: no usable pulses (...); is the pin free and unconnected?`
 - `PTP_FREE_RUNNING 0` only: `PTP write latency: N ns read from NVS (calibration skipped)` / `no stored value for this configuration, using the default 3850 ns until the calibration has finished ...`
 - `PTP write latency calibration: PPS locked, warm-up started (10 min)`, `warm-up done, measuring (about 30 to 40 min)`, `finished: N ns (default was D ns), stored in NVS`
-- Failures: calibration not stable, result outside the range, NVS errors, out of memory, task could not be started, `Hardware TX time stamping disabled after repeated errors`.
+- Failures: calibration not stable, result outside the range, NVS errors, out of memory, task could not be started, `Hardware TX time stamping disabled after repeated errors`, `initArduino() skipped: it would erase the NVS partition` (after an NVS start error, 4.28).
 
 - Web admin (always): `Settings: compiled defaults` / `saved settings (NVS)` / `one-shot settings of the web admin (valid for this boot only)`, warnings for saved settings that are ignored, `Web admin certificate SHA-256 fingerprint: ...`, `Web admin: https://<fqdn>/ (TCP 443, IPv4 and IPv6)`, `Web admin: the default password is in use - change it on the settings page`, `Web admin: failed login from <address>`, `too many failed logins, all logins blocked for N s`, `password changed`, `allow-list changed`, `settings applied`, `settings saved to NVS`, `network settings confirmed`, `Network settings were not confirmed within 120 s: ...`, `factory reset ...`, the TLS key and certificate creation at the first start. Secrets are never logged.
 - The feature lines at the start (`LED support`, `LCD support`, `Symmetric-key authentication support`, `MQTT support`, `Host name`) now show the state of the boot settings.
