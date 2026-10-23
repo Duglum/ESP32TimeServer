@@ -8,12 +8,12 @@
 // Web admin page (https://<address>/, TCP 443, see WEB_ADMIN_ENABLED below): the network settings, the GNSS protocol
 // (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED), the GNSS and PPS pins, the GNSS baud rate, the PTP PPS loopback pin, the
 // LCD, time zone, RGB LED (including the LED_* colours), MQTT, NTP authentication and Over The Ethernet update
-// settings below (OTE password in ESP32TimeServerSettingsSecrets.h) can also be
+// settings below can also be
 // changed on the page. Settings saved there (NVS) take precedence over the values in this file; the values here
 // are the defaults and are used again after a factory reset. The features LCD, RGB LED, MQTT, NTP
 // authentication and OTE updates are always compiled in: their *_ENABLED values below only decide whether they are on
 // by default.
-// DeviceName is the default host name (FQDN) of the page and the default mDNS host name (<name>.local).
+// DeviceName is the default host name (FQDN) of the page; its first label is the DHCP and mDNS host name.
 //
 
 #pragma once
@@ -79,7 +79,8 @@ static constexpr int upTimeRestartPin = 3;
 // (optional) Over The Ethernet updates support
 // The firmware image is uploaded over the web admin server (HTTPS, TCP 443, needs WEB_ADMIN_ENABLED 1): on the page
 // (System, Firmware update) or with tools/ote_upload.py, see misc/UsefullPowerShellCommands.md.
-// Please also see ESP32TimeServerSettingsSecretes.h for the configuration of the OTE password (used by the script).
+// The script authenticates with the web admin password (WebAdminPassword in ESP32TimeServerSettingsSecrets.h, or
+// the one set on the page).
 #define OTE_UPDATES_ENABLED 0 // 0 = Disabled; 1 = Enabled
 static constexpr char DeviceName[] = "ESP32TimeServer";
 

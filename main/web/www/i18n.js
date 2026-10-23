@@ -343,24 +343,20 @@
     '<strong>Permanently:</strong> tick <em>Accept firmware updates over the network</em>, press <em>Save Settings</em> and then <em>Reboot</em>.':
       '<strong>Dauerhaft:</strong> Haken bei <em>Firmware-Updates über das Netzwerk annehmen</em> setzen, <em>Einstellungen speichern</em> und dann <em>Neu starten</em> drücken.',
     'Then the image can be sent over HTTPS (TCP 443) in two ways:': 'Dann kann das Image auf zwei Wegen über HTTPS (TCP 443) gesendet werden:',
-    '<strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload; the OTE password is not used.':
-      '<strong>Mit dieser Seite:</strong> Wählen Sie das Image unter <em>Upload</em> und drücken Sie <em>Hochladen und neu starten</em>. Ihre Anmeldung an dieser Seite berechtigt den Upload; das OTE-Passwort wird nicht verwendet.',
-    '<strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;mDNS host name&gt;.local -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script authorises the upload with the <em>OTE password</em>, which it takes from the environment variable <code>OTE_PASSWORD</code> or asks for; no login is needed.':
-      '<strong>Mit dem Skript auf einem PC:</strong> <code>python tools/ote_upload.py -i &lt;mDNS host name&gt;.local -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (der Fingerprint steht unter <em>Status</em>). Das Skript berechtigt den Upload mit dem <em>OTE-Passwort</em>, das es aus der Umgebungsvariable <code>OTE_PASSWORD</code> nimmt oder abfragt; eine Anmeldung ist nicht nötig.',
+    '<strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload.':
+      '<strong>Mit dieser Seite:</strong> Wählen Sie das Image unter <em>Upload</em> und drücken Sie <em>Hochladen und neu starten</em>. Ihre Anmeldung an dieser Seite berechtigt den Upload.',
+    '<strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the factory default password is in use, the device refuses the script.':
+      '<strong>Mit dem Skript auf einem PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (der Fingerprint steht unter <em>Status</em>). Das Skript löst den Namen über DNS auf (A- und AAAA-Records, kein mDNS) und berechtigt den Upload mit dem Web-Admin-Passwort, das es aus der Umgebungsvariable <code>WEB_ADMIN_PASSWORD</code> nimmt oder abfragt; eine Anmeldung ist nicht nötig. Solange das Werkspasswort verwendet wird, lehnt das Gerät das Skript ab.',
     '<strong>Which file:</strong> <code>ESP32TimeServer.bin</code> from the build folder, built with the profile for this board\'s chip revision (<span id="ote-chip"></span>), not the merged flash image. The device refuses images of another project or chip revision.':
       '<strong>Welche Datei:</strong> <code>ESP32TimeServer.bin</code> aus dem Build-Ordner, gebaut mit dem Profil für die Chip-Revision dieses Boards (<span id="ote-chip"></span>), nicht das zusammengeführte Flash-Image. Das Gerät lehnt Images eines anderen Projekts oder einer anderen Chip-Revision ab.',
     '<strong>What happens:</strong> the device writes the image into its spare firmware slot, checks the complete image and only then selects it for the next start; until then the running firmware stays untouched. It restarts 5 s after the upload: reload this page after about a minute. During the upload (at most 5 min) this page pauses its other requests.':
       '<strong>Was passiert:</strong> Das Gerät schreibt das Image in seinen freien Firmware-Slot, prüft das vollständige Image und wählt es erst dann für den nächsten Start aus; bis dahin bleibt die laufende Firmware unberührt. Es startet 5 s nach dem Upload neu: Laden Sie diese Seite nach etwa einer Minute neu. Während des Uploads (höchstens 5 min) pausiert diese Seite ihre anderen Anfragen.',
-    '<strong>Settings:</strong> <em>mDNS host name</em>: the device announces itself as &lt;name&gt;.local, also while updates are off (letters, digits and \'-\'). <em>OTE password</em>: at least 8 characters while updates are on; an empty field keeps the stored password. Changes take effect with <em>Apply</em>, which restarts the device once (a new OTE password only counts from then on), and are kept with <em>Save Settings</em>.':
-      '<strong>Einstellungen:</strong> <em>mDNS-Hostname</em>: Das Gerät meldet sich als &lt;name&gt;.local, auch wenn Updates aus sind (Buchstaben, Ziffern und \'-\'). <em>OTE-Passwort</em>: mindestens 8 Zeichen, solange Updates an sind; ein leeres Feld behält das gespeicherte Passwort. Änderungen wirken mit <em>Übernehmen</em>, das das Gerät einmal neu startet (ein neues OTE-Passwort gilt erst ab dann), und bleiben mit <em>Einstellungen speichern</em> erhalten.',
-    '<strong>Security:</strong> the image is not signed, so anyone who can log in to this page or knows the OTE password can install any firmware. Use long random passwords and switch updates off when you do not need them. Wrong OTE passwords count towards the login lock-out, and the allow-list under <em>Security</em> applies to both ways.':
-      '<strong>Sicherheit:</strong> Das Image ist nicht signiert, daher kann jeder, der sich an dieser Seite anmelden kann oder das OTE-Passwort kennt, eine beliebige Firmware installieren. Verwenden Sie lange zufällige Passwörter und schalten Sie Updates aus, wenn Sie sie nicht brauchen. Falsche OTE-Passwörter zählen für die Anmeldesperre, und die Allow-List unter <em>Sicherheit</em> gilt für beide Wege.',
+    '<strong>Setting:</strong> <em>Accept firmware updates over the network</em> takes effect with <em>Apply</em>, which restarts the device once, and is kept with <em>Save Settings</em>.':
+      '<strong>Einstellung:</strong> <em>Firmware-Updates über das Netzwerk annehmen</em> wirkt mit <em>Übernehmen</em>, das das Gerät einmal neu startet, und bleibt mit <em>Einstellungen speichern</em> erhalten.',
+    '<strong>Security:</strong> the image is not signed, so anyone who knows the web admin password can install any firmware, with this page or with the script. Use a long random password and switch updates off when you do not need them. Wrong passwords of the script count towards the login lock-out, and the allow-list under <em>Security</em> applies to both ways.':
+      '<strong>Sicherheit:</strong> Das Image ist nicht signiert, daher kann jeder, der das Web-Admin-Passwort kennt, eine beliebige Firmware installieren, mit dieser Seite oder mit dem Skript. Verwenden Sie ein langes zufälliges Passwort und schalten Sie Updates aus, wenn Sie sie nicht brauchen. Falsche Passwörter des Skripts zählen für die Anmeldesperre, und die Allow-List unter <em>Sicherheit</em> gilt für beide Wege.',
     'Settings <span class="badge restart">restart</span>': 'Einstellungen <span class="badge restart">Neustart</span>',
     'Accept firmware updates over the network': 'Firmware-Updates über das Netzwerk annehmen',
-    'The OTE password is still the default from ESP32TimeServerSettingsSecrets.h, which is published with the source code. Enter a new OTE password below before you apply.':
-      'Das OTE-Passwort ist noch der Standard aus ESP32TimeServerSettingsSecrets.h, der mit dem Quellcode veröffentlicht ist. Geben Sie unten ein neues OTE-Passwort ein, bevor Sie übernehmen.',
-    'mDNS host name': 'mDNS-Hostname',
-    'OTE password': 'OTE-Passwort',
     'Upload': 'Upload',
     'Firmware image (.bin)': 'Firmware-Image (.bin)',
     'Updates are off on the device: uploads are not possible.': 'Updates sind auf dem Gerät aus: Uploads sind nicht möglich.',
@@ -371,8 +367,6 @@
     'Upload and restart': 'Hochladen und neu starten',
     'Restart the device now with firmware updates enabled until its next restart?':
       'Das Gerät jetzt neu starten, mit aktivierten Firmware-Updates bis zu seinem nächsten Neustart?',
-    'The OTE password is still the default from ESP32TimeServerSettingsSecrets.h, which is published with the source code: tools/ote_upload.py accepts it until the next restart.':
-      'Das OTE-Passwort ist noch der Standard aus ESP32TimeServerSettingsSecrets.h, der mit dem Quellcode veröffentlicht ist: tools/ote_upload.py akzeptiert es bis zum nächsten Neustart.',
     'Choose the firmware image (.bin) first.': 'Wählen Sie zuerst das Firmware-Image (.bin).',
     'This is not an application image: use ESP32TimeServer.bin of the build folder (not the merged flash image).':
       'Dies ist kein Application-Image: Verwenden Sie ESP32TimeServer.bin aus dem Build-Ordner (nicht das zusammengeführte Flash-Image).',
@@ -438,7 +432,6 @@
     'Not logged in': 'Nicht angemeldet',
     'Wrong password': 'Falsches Passwort',
     'Wrong current password': 'Falsches aktuelles Passwort',
-    'Wrong OTE password': 'Falsches OTE-Passwort',
     'Too many failed logins, please wait': 'Zu viele fehlgeschlagene Anmeldungen, bitte warten',
     'Too many failed password checks, please wait': 'Zu viele fehlgeschlagene Passwortprüfungen, bitte warten',
     'Invalid JSON': 'Ungültiges JSON',
@@ -529,10 +522,6 @@
     'MQTT topic: 1 to 100 printable ASCII characters without spaces, \'+\' and \'#\'': 'MQTT-Topic: 1 bis 100 druckbare ASCII-Zeichen ohne Leerzeichen, \'+\' und \'#\'',
     'MQTT user name: at most 64 printable ASCII characters': 'MQTT-Benutzername: höchstens 64 druckbare ASCII-Zeichen',
     'NTP authentication needs at least one key': 'NTP-Authentifizierung braucht mindestens einen Schlüssel',
-    'OTE device name: 1 to 32 letters, digits or \'-\' (not at the start or end)': 'OTE-Gerätename: 1 bis 32 Buchstaben, Ziffern oder \'-\' (nicht am Anfang oder Ende)',
-    'OTE device name: only letters, digits and \'-\'': 'OTE-Gerätename: nur Buchstaben, Ziffern und \'-\'',
-    'OTE password: at least 8 characters when OTE updates are on': 'OTE-Passwort: mindestens 8 Zeichen, wenn OTE-Updates an sind',
-    'OTE password: at most 64 printable ASCII characters without spaces': 'OTE-Passwort: höchstens 64 druckbare ASCII-Zeichen ohne Leerzeichen',
     'TF card pins: one of the GPIOs cannot be used': 'TF-Karten-Pins: Einer der GPIOs kann nicht verwendet werden',
     'Time zone is not a valid POSIX TZ string': 'Die Zeitzone ist kein gültiger POSIX-TZ-String'
   };

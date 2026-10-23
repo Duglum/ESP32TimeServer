@@ -9024,15 +9024,15 @@ void setup_for_ote_updates()
 #endif
 }
 
-// mDNS: announces <OTE device name>.local and the web admin page (_https._tcp, TCP 443), also while the OTE
-// updates are off
+// mDNS: announces <host name>.local (first label of the FQDN, as the DHCP host name) and the web admin page
+// (_https._tcp, TCP 443). tools/ote_upload.py does not use it (unicast DNS, A / AAAA records).
 void setup_mdns()
 {
     esp_err_t result = mdns_init();
     if (result == ESP_OK)
-        result = mdns_hostname_set(s_cfg->ote_device_name);
+        result = mdns_hostname_set(s_hostname);
     if (result == ESP_OK)
-        result = mdns_instance_name_set(s_cfg->ote_device_name);
+        result = mdns_instance_name_set(s_hostname);
 #if WEB_ADMIN_ENABLED
     if (result == ESP_OK)
         result = mdns_service_add(nullptr, "_https", "_tcp", 443, nullptr, 0);
@@ -9043,7 +9043,7 @@ void setup_mdns()
         return;
     }
 #if DEBUG_ENABLED
-    ESP_LOGI(TAG, "mDNS: %s.local", s_cfg->ote_device_name);
+    ESP_LOGI(TAG, "mDNS: %s.local", s_hostname);
 #endif
 }
 

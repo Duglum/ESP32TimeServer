@@ -13,7 +13,10 @@ to:
 In the examples below:
 
 - The device name, `ESP32TimeServer`, is set as `DeviceName` in
-  `ESP32TimeServerSettings.h`.
+  `ESP32TimeServerSettings.h` (default FQDN of the device; its first label is
+  also the DHCP and mDNS host name).
+- `timeserver1.example.net` is the DNS name (A and / or AAAA record) of the
+  ESP32-P4 running the ESP32 time server software.
 - `x.x.x.x` is the IP address of the ESP32-P4 running the ESP32 time server
   software.
 
@@ -33,13 +36,20 @@ another project or for another chip revision before it writes anything.
 
 The script checks the self-signed certificate of the device by its SHA-256
 fingerprint (shown on the web admin page under *Status* and on the serial console
-at every start) and sends the OTE password (`OTEPassword` in
-`ESP32TimeServerSettingsSecrets.h`, or the one set on the web admin page) inside
-the TLS connection. It reads the password from the environment variable
-`OTE_PASSWORD`, otherwise it asks for it.
+at every start) and sends the web admin password (`WebAdminPassword` in
+`ESP32TimeServerSettingsSecrets.h`, or the one set on the web admin page) with
+HTTP Basic authentication inside the TLS connection. It reads the password from
+the environment variable `WEB_ADMIN_PASSWORD`, otherwise it asks for it. The
+device refuses the script while its web admin password is the factory default
+(`password`).
+
+The device is given as an IP address or as a fully qualified DNS name; the
+script looks the name up in the DNS (A and AAAA records, `-4` / `-6` for one
+address family) and connects by unicast. `.local` (mDNS) and single-label names
+are refused.
 
 ```cmd
-python tools\ote_upload.py -i ESP32TimeServer.local -f build\ESP32TimeServer.bin --fingerprint AB:CD:...:EF
+python tools\ote_upload.py -i timeserver1.example.net -f build\ESP32TimeServer.bin --fingerprint AB:CD:...:EF
 ```
 
 or
@@ -51,6 +61,25 @@ python tools\ote_upload.py -i x.x.x.x -f build\ESP32TimeServer.bin --fingerprint
 Without `--fingerprint` the script stops and prints the fingerprint the device
 presented; `--insecure` skips the check (trusted LAN only). The device restarts 5
 seconds after it accepted the image.
+
+Several devices with the same web admin password (PowerShell 7; every device has
+its own certificate, so each needs its own fingerprint):
+
+```powershell
+$env:WEB_ADMIN_PASSWORD = Read-Host -MaskInput "Web admin password"
+$devices = @{
+    "timeserver1.example.net" = "AB:CD:...:EF"
+    "timeserver2.example.net" = "12:34:...:56"
+}
+foreach ($device in $devices.GetEnumerator()) {
+    python tools\ote_upload.py -i $device.Key -f build\ESP32TimeServer.bin --fingerprint $device.Value
+}
+Remove-Item Env:WEB_ADMIN_PASSWORD
+```
+
+A device that still runs the firmware with the separate OTE password is
+updated once with the script of that firmware (environment variable
+`OTE_PASSWORD`) or on the web admin page.
 
 A device that still runs a firmware with ArduinoOTA (UDP 3232) is updated once
 with `tools\espota.py` (or by USB); after that the upload above is used:

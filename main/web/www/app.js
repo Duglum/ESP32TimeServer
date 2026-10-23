@@ -453,8 +453,7 @@
       tf_d2_pin: String(s.tf_d2_pin),
       tf_d3_pin: String(s.tf_d3_pin),
       ntp_auth_enabled: s.ntp_auth_enabled,
-      ote_enabled: s.ote_enabled,
-      ote_device_name: s.ote_device_name
+      ote_enabled: s.ote_enabled
     };
   }
 
@@ -477,8 +476,6 @@
     f.mqtt_password_clear.checked = false;
     f.ntp_key_clear.checked = false;
     setNtpKeys(s.ntp_key_override ? s.ntp_keys : state.ntp_compiled_keys, !s.ntp_key_override);
-    f.ote_password.value = '';
-    $('ote-password-state').textContent = s.ote_password_set ? t('A password is set.') : t('No password is set.');
     $('mqtt-password-state').textContent = s.mqtt_password_set ? t('A password is set.') : t('No password is set.');
     updateDependent();
     markDefaults();
@@ -570,8 +567,6 @@
     $('ntp-key-add').disabled = compiledOnly || ntpKeyRows.length >= 8;
     syncPasswordEyes();
     if (state) {
-      // Updates switched on while the OTE password is still the published compiled default (and no new one is typed)
-      $('ote-default-pw-warning').hidden = !(f.ote_enabled.checked && state.ote_password_default && f.ote_password.value === '');
       $('ptp-chip-warning').hidden = state.status.ptp_loopback_supported || f.ptp_loopback_pin.value.trim() === '';
     }
     markPinAreas();
@@ -655,9 +650,7 @@
       tf_d3_pin: pin('tf_d3_pin', 'TF card D3 pin'),
       ntp_auth_enabled: f.ntp_auth_enabled.checked,
       ntp_key_clear: f.ntp_key_clear.checked,
-      ote_enabled: f.ote_enabled.checked,
-      ote_device_name: f.ote_device_name.value.trim(),
-      ote_password: f.ote_password.value
+      ote_enabled: f.ote_enabled.checked
     };
     // NTP keys: only sent when they were changed (otherwise the compiled keys stay in use if they are)
     if (!body.ntp_key_clear && ntpKeysChanged) {
@@ -953,11 +946,7 @@
   $('btn-save').addEventListener('click', () => submitSettings('/api/save'));
 
   $('ote-once').addEventListener('click', async () => {
-    let question = t('Restart the device now with firmware updates enabled until its next restart?');
-    if (state.ote_password_default) {
-      question += '\n\n' + t('The OTE password is still the default from ESP32TimeServerSettingsSecrets.h, which is published with the source code: tools/ote_upload.py accepts it until the next restart.');
-    }
-    if (!window.confirm(question)) return;
+    if (!window.confirm(t('Restart the device now with firmware updates enabled until its next restart?'))) return;
     setBusy(true);
     const r = await api('/api/ote/once', {});
     setBusy(false);

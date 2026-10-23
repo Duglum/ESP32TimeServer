@@ -44,7 +44,9 @@ namespace
     // 6: PPS holdover in the place of the former OTE port, behaviour after the holdover appended at the end
     //    (a version 5 set is still read: its fields are a prefix of web_settings_t, the new ones get the defaults);
     // 7: root dispersion growth while coasting appended at the end (versions 5 and 6 are still read the same way);
-    // 8: NTP client rate limit appended at the end (versions 5 to 7 are still read the same way)
+    // 8: NTP client rate limit appended at the end (versions 5 to 7 are still read the same way).
+    // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
+    // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
     constexpr uint32_t BLOB_VERSION = 8;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
@@ -120,9 +122,20 @@ namespace
         return esp_rom_crc32_le(0, reinterpret_cast<const uint8_t *>(&blob), offsetof(settings_blob_t, crc));
     }
 
-    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5, 6 or 7) and passes the CRC.
-    bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob)
+    bool any_byte_set(const char *bytes, size_t length)
     {
+        for (size_t i = 0; i < length; ++i)
+            if (bytes[i] != '\0')
+                return true;
+        return false;
+    }
+
+    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5, 6 or 7) and passes the CRC.
+    // *had_ote_fields (optional): the stored set still held the former OTE device name or password (zeroed in blob)
+    bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob, bool *had_ote_fields = nullptr)
+    {
+        if (had_ote_fields != nullptr)
+            *had_ote_fields = false;
         // Stored as header (magic, version, size, flags), settings, CRC of everything before it
         constexpr size_t HEADER_SIZE = offsetof(settings_blob_t, settings);
         static_assert(offsetof(settings_blob_t, crc) == HEADER_SIZE + sizeof(web_settings_t), "blob layout");
@@ -195,6 +208,13 @@ namespace
                 ESP_LOGI(TAG, "Stored web settings '%s' of version %lu read; the NTP client rate limit has its default", key,
                          static_cast<unsigned long>(header.version));
             }
+            // Former OTE device name and OTE password: no longer used
+            const bool had_ote = any_byte_set(blob.settings.ote_name_unused, sizeof(blob.settings.ote_name_unused)) ||
+                                 any_byte_set(blob.settings.ote_password_unused, sizeof(blob.settings.ote_password_unused));
+            memset(blob.settings.ote_name_unused, 0, sizeof(blob.settings.ote_name_unused));
+            memset(blob.settings.ote_password_unused, 0, sizeof(blob.settings.ote_password_unused));
+            if (had_ote_fields != nullptr)
+                *had_ote_fields = had_ote;
             blob.crc = blob_crc(blob);
             ok = true;
         }
@@ -583,8 +603,6 @@ void web_settings_defaults(web_settings_t &out)
     out.tf_d3_pin = static_cast<int8_t>(TFCardData3Pin);
 
     out.ote_enabled = OTE_UPDATES_ENABLED != 0;
-    copy_text(out.ote_device_name, DeviceName);
-    copy_text(out.ote_password, OTEPassword);
 
     out.ntp_auth_enabled = SYMMETRIC_KEY_AUTHENTICATION_ENABLED != 0;
     out.ntp_key_override = false; // the keys of ESP32TimeServerSettingsSecrets.h
@@ -620,8 +638,21 @@ void web_settings_load_boot()
     {
         static settings_blob_t blob; // static: about 1 kB, the caller (app_main) has a small stack
         char error[96] = "";
-        if (read_blob(handle, NVS_KEY_SAVED, blob))
+        bool had_ote_fields = false;
+        if (read_blob(handle, NVS_KEY_SAVED, blob, &had_ote_fields))
         {
+            if (had_ote_fields)
+            {
+                // Written back without the former OTE password (and device name), so that it does not stay in NVS.
+                // read_blob() has zeroed both, brought an older set to the current version and renewed the CRC.
+                esp_err_t scrub_err = nvs_set_blob(handle, NVS_KEY_SAVED, &blob, sizeof(blob));
+                if (scrub_err == ESP_OK)
+                    scrub_err = nvs_commit(handle);
+                if (scrub_err == ESP_OK)
+                    ESP_LOGI(TAG, "Saved web settings: the former OTE password and device name were erased");
+                else
+                    ESP_LOGW(TAG, "Saved web settings: the former OTE password could not be erased (%s)", esp_err_to_name(scrub_err));
+            }
             if (web_settings_validate(blob.settings, error, sizeof(error)))
             {
                 s_boot = blob.settings;
@@ -1038,21 +1069,6 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
                 FAIL("NTP key %u: letters and digits only", static_cast<unsigned>(i + 1));
     }
 
-    // ---- Over The Ethernet updates ----
-    {
-        const size_t length = strnlen(s.ote_device_name, WEB_OTE_NAME_SIZE);
-        if (length == 0 || length >= WEB_OTE_NAME_SIZE || s.ote_device_name[0] == '-' || s.ote_device_name[length - 1] == '-')
-            FAIL("OTE device name: 1 to 32 letters, digits or '-' (not at the start or end)");
-        for (size_t i = 0; i < length; ++i)
-            if (!isalnum(static_cast<unsigned char>(s.ote_device_name[i])) && s.ote_device_name[i] != '-')
-                FAIL("OTE device name: only letters, digits and '-'");
-        const size_t password_length = strnlen(s.ote_password, WEB_OTE_PASSWORD_SIZE);
-        if (password_length >= WEB_OTE_PASSWORD_SIZE || !is_printable_ascii(s.ote_password, 0x21, 0x7E))
-            FAIL("OTE password: at most 64 printable ASCII characters without spaces");
-        if (s.ote_enabled && password_length < 8)
-            FAIL("OTE password: at least 8 characters when OTE updates are on");
-    }
-
 #undef FAIL
     return true;
 }
@@ -1091,9 +1107,7 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            strcmp(a.mqtt_username, b.mqtt_username) != 0 ||
            !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.mqtt_password),
                                     reinterpret_cast<const uint8_t *>(b.mqtt_password), WEB_MQTT_CREDENTIAL_SIZE) ||
-           a.ote_enabled != b.ote_enabled || strcmp(a.ote_device_name, b.ote_device_name) != 0 ||
-           !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ote_password),
-                                    reinterpret_cast<const uint8_t *>(b.ote_password), WEB_OTE_PASSWORD_SIZE);
+           a.ote_enabled != b.ote_enabled;
 }
 
 bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)

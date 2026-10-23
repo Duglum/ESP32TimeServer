@@ -381,27 +381,18 @@
         </ul>
         <p>Then the image can be sent over HTTPS (TCP 443) in two ways:</p>
         <ol>
-          <li><strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload; the OTE password is not used.</li>
-          <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;mDNS host name&gt;.local -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script authorises the upload with the <em>OTE password</em>, which it takes from the environment variable <code>OTE_PASSWORD</code> or asks for; no login is needed.</li>
+          <li><strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload.</li>
+          <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the factory default password is in use, the device refuses the script.</li>
         </ol>
         <p><strong>Which file:</strong> <code>ESP32TimeServer.bin</code> from the build folder, built with the profile for this board's chip revision (<span id="ote-chip"></span>), not the merged flash image. The device refuses images of another project or chip revision.</p>
         <p><strong>What happens:</strong> the device writes the image into its spare firmware slot, checks the complete image and only then selects it for the next start; until then the running firmware stays untouched. It restarts 5 s after the upload: reload this page after about a minute. During the upload (at most 5 min) this page pauses its other requests.</p>
-        <p><strong>Settings:</strong> <em>mDNS host name</em>: the device announces itself as &lt;name&gt;.local, also while updates are off (letters, digits and '-'). <em>OTE password</em>: at least 8 characters while updates are on; an empty field keeps the stored password. Changes take effect with <em>Apply</em>, which restarts the device once (a new OTE password only counts from then on), and are kept with <em>Save Settings</em>.</p>
-        <p><strong>Security:</strong> the image is not signed, so anyone who can log in to this page or knows the OTE password can install any firmware. Use long random passwords and switch updates off when you do not need them. Wrong OTE passwords count towards the login lock-out, and the allow-list under <em>Security</em> applies to both ways.</p>
+        <p><strong>Setting:</strong> <em>Accept firmware updates over the network</em> takes effect with <em>Apply</em>, which restarts the device once, and is kept with <em>Save Settings</em>.</p>
+        <p><strong>Security:</strong> the image is not signed, so anyone who knows the web admin password can install any firmware, with this page or with the script. Use a long random password and switch updates off when you do not need them. Wrong passwords of the script count towards the login lock-out, and the allow-list under <em>Security</em> applies to both ways.</p>
       </div>
       <!-- Fields of the settings form (form="settings-form"): Apply and Save Settings above include them -->
       <h3 class="sub-heading">Settings <span class="badge restart">restart</span></h3>
       <div class="grid">
         <label class="switch span2"><input type="checkbox" name="ote_enabled" form="settings-form"> Accept firmware updates over the network</label>
-        <p class="callout span2" id="ote-default-pw-warning" hidden>The OTE password is still the default from ESP32TimeServerSettingsSecrets.h, which is published with the source code. Enter a new OTE password below before you apply.</p>
-        <label><span class="lt">mDNS host name</span>
-          <input type="text" name="ote_device_name" form="settings-form" maxlength="32" spellcheck="false" autocomplete="off">
-          <small class="def" data-for="ote_device_name"></small>
-        </label>
-        <label><span class="lt">OTE password</span>
-          <input type="password" name="ote_password" form="settings-form" maxlength="64" autocomplete="new-password" placeholder="unchanged">
-          <small class="note" id="ote-password-state"></small>
-        </label>
       </div>
       <h3 class="sub-heading">Upload</h3>
       <form id="ote-form" class="stack">

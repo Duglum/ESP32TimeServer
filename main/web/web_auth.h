@@ -45,7 +45,7 @@ bool web_auth_check_password(const sockaddr_storage &source, const char *passwor
 // Verifies the password without touching the throttling state of a successful login (used for the
 // password change and the factory reset; failures still count)
 bool web_auth_verify_current_password(const sockaddr_storage &source, const char *password, size_t length);
-// Records a failed check of another secret (the OTE password of the firmware upload) for the throttling
+// Records a failed check without a password to verify (unreadable credentials of a scripted firmware upload)
 void web_auth_record_failed_check(const sockaddr_storage &source);
 
 // ---- Password change: stored immediately, all other sessions are closed ----

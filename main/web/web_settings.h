@@ -36,8 +36,9 @@ static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MAX = 1000; // report buffer 
 static constexpr size_t WEB_MAC_TEXT_SIZE = 18;     // "xx:xx:xx:xx:xx:xx" + NUL
 static constexpr size_t WEB_NTP_KEY_SIZE = 33;      // 32 characters + NUL
 static constexpr size_t WEB_NTP_MAX_KEYS = 8;       // NTP_AUTH_MAX_KEYS
-static constexpr size_t WEB_OTE_NAME_SIZE = 33;     // OTE device name (mDNS host name), 32 characters + NUL
-static constexpr size_t WEB_OTE_PASSWORD_SIZE = 65; // 64 characters + NUL
+// Sizes of the former OTE device name and OTE password fields (unused, they keep the layout of the saved settings)
+static constexpr size_t WEB_OTE_NAME_SIZE = 33;
+static constexpr size_t WEB_OTE_PASSWORD_SIZE = 65;
 
 enum class web_led_type_t : uint8_t
 {
@@ -137,11 +138,15 @@ struct web_settings_t
 
     // Over The Ethernet updates (firmware upload over the web admin server, see web_ote.h)
     bool ote_enabled;
-    char ote_device_name[WEB_OTE_NAME_SIZE]; // mDNS host name: announced as <name>.local (also while OTE is off)
+    // Former OTE device name (mDNS host name; mDNS now uses the host name of the FQDN). Always zero: only keeps the
+    // layout of the saved settings (blob versions 5 to 8).
+    char ote_name_unused[WEB_OTE_NAME_SIZE];
     // PPS holdover in s after the PPS counts as lost (0 to WEB_PPS_HOLDOVER_MAX_S, takes effect at once). Stored in the
     // place of the former ArduinoOTA port (same layout as blob version 5, which is read with the compiled default).
     uint16_t pps_holdover_s;
-    char ote_password[WEB_OTE_PASSWORD_SIZE]; // secret: "Authorization: Bearer" of scripted uploads
+    // Former OTE password (scripted uploads now use the web admin password). Always zero, like ote_name_unused; a
+    // password still stored there is erased from NVS at boot.
+    char ote_password_unused[WEB_OTE_PASSWORD_SIZE];
 
     // PPS lost for longer than the holdover (takes effect at once; added in version 6, after the fields of version 5)
     uint8_t pps_lost_stratum; // stratum of the answers: 2 to 15 (while coasting is possible), 16 = not synchronised

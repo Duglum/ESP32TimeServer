@@ -21,6 +21,7 @@
 #include <cstring>
 #include <ctime>
 #include <new>
+#include <strings.h>
 
 #include "ESP32TimeServerSettings.h"
 
@@ -34,6 +35,7 @@ extern "C"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
+#include "mbedtls/base64.h"
 #include "mbedtls/ssl_ciphersuites.h"
 }
 
@@ -439,8 +441,6 @@ namespace
         // The NTP keys are shown on the page (they have to be entered on the clients); the other secrets are not
         add_ntp_keys(cJSON_AddArrayToObject(object, "ntp_keys"), s.ntp_keys, s.ntp_key_count);
         cJSON_AddBoolToObject(object, "ote_enabled", s.ote_enabled);
-        cJSON_AddStringToObject(object, "ote_device_name", s.ote_device_name);
-        cJSON_AddBoolToObject(object, "ote_password_set", s.ote_password[0] != '\0');
     }
 
     bool json_string(cJSON *root, const char *name, char *out, size_t size, char *err, size_t err_size)
@@ -541,8 +541,7 @@ namespace
                   json_int(root, "tf_d2_pin", s.tf_d2_pin, 0, 54, err, err_size) &&
                   json_int(root, "tf_d3_pin", s.tf_d3_pin, 0, 54, err, err_size) &&
                   json_bool(root, "ntp_auth_enabled", s.ntp_auth_enabled, err, err_size) &&
-                  json_bool(root, "ote_enabled", s.ote_enabled, err, err_size) &&
-                  json_string(root, "ote_device_name", s.ote_device_name, sizeof(s.ote_device_name), err, err_size);
+                  json_bool(root, "ote_enabled", s.ote_enabled, err, err_size);
         if (!ok)
             return false;
 
@@ -656,13 +655,6 @@ namespace
             memset(s.mqtt_password, 0, sizeof(s.mqtt_password));
         else if (secret[0] != '\0')
             snprintf(s.mqtt_password, sizeof(s.mqtt_password), "%s", secret);
-
-        char ote_password[WEB_OTE_PASSWORD_SIZE] = "";
-        if (!json_string(root, "ote_password", ote_password, sizeof(ote_password), err, err_size))
-            return false;
-        if (ote_password[0] != '\0')
-            snprintf(s.ote_password, sizeof(s.ote_password), "%s", ote_password);
-        memset(ote_password, 0, sizeof(ote_password));
 
         // NTP keys: "ntp_keys" (list of {id, key}) replaces the keys and switches to the keys of the web settings,
         // "ntp_key_clear" returns to the compiled keys; neither: unchanged
@@ -907,20 +899,6 @@ namespace
         cJSON *root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "csrf", csrf);
         cJSON_AddBoolToObject(root, "default_password", web_auth_default_password_active());
-        // OTE password still the compiled OTEPassword of ESP32TimeServerSettingsSecrets.h (only the flag is sent).
-        // Copied into zeroed buffers first: bytes after the terminating NUL must not count.
-        {
-            char current[WEB_OTE_PASSWORD_SIZE] = {};
-            char compiled[WEB_OTE_PASSWORD_SIZE] = {};
-            snprintf(current, sizeof(current), "%s", sets->running.ote_password);
-            snprintf(compiled, sizeof(compiled), "%s", sets->defaults.ote_password);
-            const bool is_default = current[0] != '\0' &&
-                                    web_constant_time_equal(reinterpret_cast<const uint8_t *>(current),
-                                                            reinterpret_cast<const uint8_t *>(compiled), sizeof(current));
-            memset(current, 0, sizeof(current));
-            memset(compiled, 0, sizeof(compiled));
-            cJSON_AddBoolToObject(root, "ote_password_default", is_default);
-        }
         cJSON_AddStringToObject(root, "fingerprint", s_identity.fingerprint);
         settings_to_json(cJSON_AddObjectToObject(root, "settings"), sets->running);
         settings_to_json(cJSON_AddObjectToObject(root, "defaults"), sets->defaults);
@@ -1276,8 +1254,9 @@ namespace
 
     // Firmware upload (Over The Ethernet update, see web_ote.h). Two ways to authenticate:
     //  - the page: session cookie, same origin and the CSRF header, as every other state changing request
-    //  - scripts (tools/ote_upload.py): "Authorization: Bearer <OTE password>", inside the TLS connection;
-    //    wrong passwords count for the login throttling
+    //  - scripts (tools/ote_upload.py): HTTP Basic authentication with the web admin password (any user name),
+    //    inside the TLS connection. Refused while the factory password is in use; wrong passwords count for the
+    //    login throttling like failed logins.
     // The body is the raw application image (Content-Type application/octet-stream).
     esp_err_t handle_ote(httpd_req_t *req)
     {
@@ -1289,6 +1268,11 @@ namespace
             struct sockaddr_storage peer{};
             if (!peer_address(req, peer, false))
                 return send_error(req, "400 Bad Request", "No peer address");
+            if (web_auth_default_password_active())
+            {
+                send_error(req, "403 Forbidden", "Scripted uploads are refused while the web admin password is the factory default");
+                return ESP_FAIL; // closes the connection (the body is not read)
+            }
             const uint32_t wait_s = web_auth_login_wait_seconds(peer);
             if (wait_s > 0)
             {
@@ -1297,30 +1281,45 @@ namespace
                 httpd_resp_set_hdr(req, "Retry-After", retry);
                 return send_error(req, "429 Too Many Requests", "Too many failed password checks, please wait");
             }
-            // Both passwords are copied into zero filled buffers and compared over the whole buffer (constant time)
-            char authorization[WEB_OTE_PASSWORD_SIZE + 8] = "";
-            char password[WEB_OTE_PASSWORD_SIZE] = "";
-            char expected[WEB_OTE_PASSWORD_SIZE] = "";
-            const bool parsed = header(req, "Authorization", authorization, sizeof(authorization)) &&
-                                strncmp(authorization, "Bearer ", 7) == 0 && strlen(authorization + 7) < sizeof(password);
-            if (parsed)
-                memcpy(password, authorization + 7, strlen(authorization + 7));
-            const web_settings_t &boot = web_settings_boot();
-            memcpy(expected, boot.ote_password, strnlen(boot.ote_password, sizeof(expected) - 1));
-            const bool ok = parsed && expected[0] != '\0' &&
-                            web_constant_time_equal(reinterpret_cast<const uint8_t *>(password),
-                                                    reinterpret_cast<const uint8_t *>(expected), sizeof(expected));
+            // "Basic " and base64("<user name>:<password>"); the buffers are cleared after the check
+            constexpr size_t CREDENTIALS_MAX = 64 + 1 + WEB_PASSWORD_MAX_LEN; // user name, ':', password
+            char authorization[6 + 4 * ((CREDENTIALS_MAX + 2) / 3) + 8] = "";
+            unsigned char credentials[CREDENTIALS_MAX] = {};
+            const bool read = header(req, "Authorization", authorization, sizeof(authorization));
+            if (read && strncasecmp(authorization, "Basic ", 6) != 0)
+            {
+                // Another scheme (e.g. "Bearer <OTE password>" of an older tools/ote_upload.py): no password checked
+                memset(authorization, 0, sizeof(authorization));
+                httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"ESP32 Time Server\", charset=\"UTF-8\"");
+                send_error(req, "401 Unauthorized", "Use HTTP Basic authentication with the web admin password");
+                return ESP_FAIL;
+            }
+            const char *encoded = authorization + 6;
+            while (*encoded == ' ')
+                ++encoded;
+            size_t encoded_length = read ? strlen(encoded) : 0;
+            while (encoded_length > 0 && encoded[encoded_length - 1] == ' ')
+                --encoded_length;
+            size_t credentials_length = 0;
+            const bool decoded = read && encoded_length > 0 &&
+                                 mbedtls_base64_decode(credentials, sizeof(credentials), &credentials_length,
+                                                       reinterpret_cast<const unsigned char *>(encoded), encoded_length) == 0;
+            const unsigned char *colon = decoded ? static_cast<const unsigned char *>(memchr(credentials, ':', credentials_length)) : nullptr;
+            bool ok = false;
+            if (colon != nullptr)
+                ok = web_auth_check_password(peer, reinterpret_cast<const char *>(colon + 1),
+                                             credentials_length - static_cast<size_t>(colon + 1 - credentials));
+            else
+                web_auth_record_failed_check(peer); // header too long or not decodable
             memset(authorization, 0, sizeof(authorization));
-            memset(password, 0, sizeof(password));
-            memset(expected, 0, sizeof(expected));
+            memset(credentials, 0, sizeof(credentials));
             if (!ok)
             {
-                web_auth_record_failed_check(peer);
                 char address[INET6_ADDRSTRLEN];
                 format_address(peer, address, sizeof(address));
-                ESP_LOGW(TAG, "Web admin: firmware upload with a wrong OTE password from %s", address);
-                httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
-                send_error(req, "401 Unauthorized", "Wrong OTE password");
+                ESP_LOGW(TAG, "Web admin: firmware upload with a wrong password from %s", address);
+                httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"ESP32 Time Server\", charset=\"UTF-8\"");
+                send_error(req, "401 Unauthorized", "Wrong password");
                 return ESP_FAIL; // closes the connection (the body is not read)
             }
         }
