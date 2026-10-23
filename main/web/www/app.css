@@ -310,4 +310,6 @@ details.pins[open] > summary { margin-bottom: .6rem; }
 }
 
 .footer { text-align: center; color: var(--muted); font-size: .78rem; padding: 1rem; }
+.footer a { color: inherit; }
+.footer a:hover { color: var(--accent); }
 [hidden] { display: none !important; }
