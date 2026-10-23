@@ -581,7 +581,6 @@ static constexpr size_t NTP_MAX_PACKET_SIZE = NTP_PACKET_SIZE;
 static constexpr uint64_t NTP_EPOCH_OFFSET = 2208988800ULL;
 // NTP_PRECISION_EXPONENT is defined after the local timebase (it follows its resolution)
 static constexpr uint32_t NTP_ROOT_DISPERSION = 1; // NTP short format, 1/65536 s per unit: 1 = 15.3 us, the smallest non-zero value (served at stratum 1 with active PPS only)
-static constexpr uint64_t NTP_CACHE_TIMESTAMP_MATCH_TOLERANCE = 8;
 static constexpr size_t NTP_SOCKET_BATCH_LIMIT = 16;
 static constexpr EventBits_t ETH_CONNECTED_BIT = BIT0;
 static constexpr EventBits_t ETH_GOT_IP_BIT = BIT1;
@@ -3153,9 +3152,10 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
                                (static_cast<uint32_t>(frame[ip_offset + 14]) << 8) |
                                frame[ip_offset + 15];
     const uint16_t client_port = static_cast<uint16_t>((frame[udp_offset] << 8) | frame[udp_offset + 1]);
-    ntp_client_record_t client_record{};
+    const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
+    uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
     bool rate_limited = false;
-    if (!ntp_cache_find_or_create(client_ip, client_port, &client_record, &rate_limited))
+    if (!ntp_cache_find_or_create(client_ip, client_port, client_origin_timestamp, &interleaved_t3, &rate_limited))
     {
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
@@ -3204,30 +3204,15 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
 #endif
     build_ntp_reply(request, reply, version, receive_time, status);
 
-    const uint64_t client_receive_timestamp =
-        (static_cast<uint64_t>(request[32]) << 56) | (static_cast<uint64_t>(request[33]) << 48) |
-        (static_cast<uint64_t>(request[34]) << 40) | (static_cast<uint64_t>(request[35]) << 32) |
-        (static_cast<uint64_t>(request[36]) << 24) | (static_cast<uint64_t>(request[37]) << 16) |
-        (static_cast<uint64_t>(request[38]) << 8) | request[39];
-    const uint64_t client_origin_timestamp =
-        (static_cast<uint64_t>(request[24]) << 56) | (static_cast<uint64_t>(request[25]) << 48) |
-        (static_cast<uint64_t>(request[26]) << 40) | (static_cast<uint64_t>(request[27]) << 32) |
-        (static_cast<uint64_t>(request[28]) << 24) | (static_cast<uint64_t>(request[29]) << 16) |
-        (static_cast<uint64_t>(request[30]) << 8) | request[31];
-    const uint64_t client_transmit_timestamp =
-        (static_cast<uint64_t>(request[40]) << 56) | (static_cast<uint64_t>(request[41]) << 48) |
-        (static_cast<uint64_t>(request[42]) << 40) | (static_cast<uint64_t>(request[43]) << 32) |
-        (static_cast<uint64_t>(request[44]) << 24) | (static_cast<uint64_t>(request[45]) << 16) |
-        (static_cast<uint64_t>(request[46]) << 8) | request[47];
-    const uint64_t previous_t2 = client_record.prev_t2;
-    const uint64_t previous_t3 = client_record.prev_t3;
-    const bool interleaved_reply = previous_t2 != 0 &&
-                                   client_receive_timestamp != client_transmit_timestamp &&
-                                   client_origin_timestamp == previous_t2;
+    // Interleaved mode (RFC 9769): the origin timestamp is the T2 of an earlier exchange with this client (found by
+    // ntp_cache_find_or_create), the reply carries the T3 of that exchange
+    const uint64_t client_receive_timestamp = read_ntp_timestamp(request, 32);
+    const uint64_t client_transmit_timestamp = read_ntp_timestamp(request, 40);
+    const bool interleaved_reply = interleaved_t3 != 0 && client_receive_timestamp != client_transmit_timestamp;
     if (interleaved_reply)
     {
         write_ntp_timestamp(reply, 24, client_receive_timestamp);
-        write_ntp_timestamp(reply, 40, previous_t3);
+        write_ntp_timestamp(reply, 40, interleaved_t3);
     }
     else
     {
@@ -3387,9 +3372,10 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
     struct in6_addr client_ip{};
     memcpy(&client_ip, frame + ip_offset + 8, sizeof(client_ip));
     const uint16_t client_port = static_cast<uint16_t>((frame[udp_offset] << 8) | frame[udp_offset + 1]);
-    ntp_client_record_ipv6_t client_record{};
+    const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
+    uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
     bool rate_limited = false;
-    if (!ntp_cache_find_or_create_ipv6(&client_ip, client_port, &client_record, &rate_limited))
+    if (!ntp_cache_find_or_create_ipv6(&client_ip, client_port, client_origin_timestamp, &interleaved_t3, &rate_limited))
     {
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
@@ -3439,16 +3425,14 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
 #endif
     build_ntp_reply(request, reply, version, receive_time, status);
 
+    // Interleaved mode (RFC 9769), see the IPv4 path
     const uint64_t client_receive_timestamp = read_ntp_timestamp(request, 32);
-    const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
     const uint64_t client_transmit_timestamp = read_ntp_timestamp(request, 40);
-    const bool interleaved_reply = client_record.prev_t2 != 0 &&
-                                   client_receive_timestamp != client_transmit_timestamp &&
-                                   client_origin_timestamp == client_record.prev_t2;
+    const bool interleaved_reply = interleaved_t3 != 0 && client_receive_timestamp != client_transmit_timestamp;
     if (interleaved_reply)
     {
         write_ntp_timestamp(reply, 24, client_receive_timestamp);
-        write_ntp_timestamp(reply, 40, client_record.prev_t3);
+        write_ntp_timestamp(reply, 40, interleaved_t3);
     }
     else
     {
@@ -9791,23 +9775,23 @@ static void ntp_server_task(void *parameter)
 
                 const struct sockaddr_in *source_ipv4 = nullptr;
                 const struct in6_addr *client_ipv6 = nullptr;
-                ntp_client_record_t client_ipv4_record{};
-                ntp_client_record_ipv6_t client_ipv6_record{};
+                const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
+                uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
                 // Requests of this device to itself are not rate limited (nullptr: no check)
                 bool rate_limited = false;
                 bool *const rate_limit_check = internal_request ? nullptr : &rate_limited;
                 if (source_addr.ss_family == AF_INET)
                 {
                     source_ipv4 = reinterpret_cast<const struct sockaddr_in *>(&source_addr);
-                    ntp_cache_find_or_create(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port), &client_ipv4_record,
-                                             rate_limit_check);
+                    ntp_cache_find_or_create(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port), client_origin_timestamp,
+                                             &interleaved_t3, rate_limit_check);
                 }
                 else if (source_addr.ss_family == AF_INET6)
                 {
                     client_ipv6 = &reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_addr;
                     ntp_cache_find_or_create_ipv6(client_ipv6,
                                                   ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_port),
-                                                  &client_ipv6_record, rate_limit_check);
+                                                  client_origin_timestamp, &interleaved_t3, rate_limit_check);
                 }
                 if (rate_limited) // over the per-client rate limit: dropped without an answer
                 {
@@ -9849,38 +9833,15 @@ static void ntp_server_task(void *parameter)
                 }
 #endif
                 build_ntp_reply(request, reply, ntp_version, receive_time, status);
-                const uint64_t client_receive_timestamp =
-                    (static_cast<uint64_t>(request[32]) << 56) | (static_cast<uint64_t>(request[33]) << 48) |
-                    (static_cast<uint64_t>(request[34]) << 40) | (static_cast<uint64_t>(request[35]) << 32) |
-                    (static_cast<uint64_t>(request[36]) << 24) | (static_cast<uint64_t>(request[37]) << 16) |
-                    (static_cast<uint64_t>(request[38]) << 8) | request[39];
-                const uint64_t client_origin_timestamp =
-                    (static_cast<uint64_t>(request[24]) << 56) | (static_cast<uint64_t>(request[25]) << 48) |
-                    (static_cast<uint64_t>(request[26]) << 40) | (static_cast<uint64_t>(request[27]) << 32) |
-                    (static_cast<uint64_t>(request[28]) << 24) | (static_cast<uint64_t>(request[29]) << 16) |
-                    (static_cast<uint64_t>(request[30]) << 8) | request[31];
-                const uint64_t client_transmit_timestamp =
-                    (static_cast<uint64_t>(request[40]) << 56) | (static_cast<uint64_t>(request[41]) << 48) |
-                    (static_cast<uint64_t>(request[42]) << 40) | (static_cast<uint64_t>(request[43]) << 32) |
-                    (static_cast<uint64_t>(request[44]) << 24) | (static_cast<uint64_t>(request[45]) << 16) |
-                    (static_cast<uint64_t>(request[46]) << 8) | request[47];
-                const uint64_t previous_ipv4_t2 = client_ipv4_record.prev_t2;
-                const uint64_t previous_ipv4_t3 = client_ipv4_record.prev_t3;
-                const uint64_t ipv4_t2_difference = client_origin_timestamp >= previous_ipv4_t2
-                                                        ? client_origin_timestamp - previous_ipv4_t2
-                                                        : previous_ipv4_t2 - client_origin_timestamp;
-                const bool ipv4_interleaved_reply = source_ipv4 != nullptr && previous_ipv4_t2 != 0 &&
-                                                    client_receive_timestamp != client_transmit_timestamp &&
-                                                    ipv4_t2_difference <= NTP_CACHE_TIMESTAMP_MATCH_TOLERANCE;
-                const bool ipv6_interleaved_reply = client_ipv6 != nullptr && client_ipv6_record.prev_t2 != 0 &&
-                                                    client_receive_timestamp != client_transmit_timestamp &&
-                                                    client_origin_timestamp == client_ipv6_record.prev_t2;
-                const bool interleaved_reply = ipv4_interleaved_reply || ipv6_interleaved_reply;
+                // Interleaved mode (RFC 9769): the origin timestamp is the T2 of an earlier exchange with this client
+                const uint64_t client_receive_timestamp = read_ntp_timestamp(request, 32);
+                const uint64_t client_transmit_timestamp = read_ntp_timestamp(request, 40);
+                const bool interleaved_reply = interleaved_t3 != 0 && client_receive_timestamp != client_transmit_timestamp;
                 const uint64_t transmit_time = get_current_time_in_ntp64_format();
                 if (interleaved_reply)
                 {
                     write_ntp_timestamp(reply, 24, client_receive_timestamp);
-                    write_ntp_timestamp(reply, 40, ipv4_interleaved_reply ? previous_ipv4_t3 : client_ipv6_record.prev_t3);
+                    write_ntp_timestamp(reply, 40, interleaved_t3);
                 }
                 else
                 {

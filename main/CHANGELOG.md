@@ -56,6 +56,7 @@ Contents
 | 27 | **Per-client NTP rate limit** (2026-10-23): 20 requests per second and client IP address by default, setting in the Network panel | one client cannot occupy the reply path; requests over the limit are dropped silently, no effect on the time stamps |
 | 28 | **Scripted firmware uploads with the web admin password** (2026-10-23): the settings OTE password and mDNS host name are gone; `tools/ote_upload.py` finds the device by its A / AAAA records (unicast DNS) | one password for the page and the script (the same compiled `WebAdminPassword` on many devices allows bulk updates); no multicast name resolution in the script |
 | 29 | **Quick wins of the review of 2026-10-23** (`REVIEW_2026-10-23.md`): RMC checksum, no software T3 in interleaved replies, MQTT task priority 5, no NVS erase by `initArduino()`, no UBX commands to NMEA receivers, rollover-safe PTP reading in the holdover, interrupt latency default 2.5 µs | no wrong labels from corrupted sentences, no queue-delayed T3 in interleaved replies, MQTT cannot delay NTP replies, password and TLS key survive NVS errors |
+| 30 | **Exchange map for the interleaved mode** (2026-10-23, review finding S-02): the recent exchanges of all clients are found by their T2 (the origin timestamp the client sends back), besides the latest exchange of each address | a spoofed request with a client's address or a second client behind the same NAT address no longer switches the client to basic mode; time stamps unchanged |
 
 No memory leak was found in the review (section 4.13).
 
@@ -217,6 +218,7 @@ This is the mode before the follow-up; it is kept as an option. The default is t
 - Lifetime 30 minutes (chrony polls up to 1024 s). 128 clients per address family.
 - After a response the cache stores the transmit time of this response: the hardware TX time stamp, otherwise the (compensated) software time. Before, the content of field 40 was stored, which is the previous T3 in an interleaved response, so the cache returned a stale T3 from the third exchange on.
 - Interleaved response: origin = receive timestamp of the request, T3 = cached hardware TX time of the previous response.
+- Since 4.29 the recent exchanges of all clients are also kept in an exchange map found by T2, so spoofed requests and NAT clients no longer cost a client its interleaved mode.
 
 ### 4.13 NTP header fields
 
@@ -456,7 +458,7 @@ Every field shows its compiled default; fields that differ from it are marked. F
 
 ### 4.24 Ethernet recovery, ESP-IDF Ethernet driver, OTE over HTTPS (2026-10-21)
 
-Taken over from release 3.0.5 of roblatour/ESP32TimeServer (comparison of 2026-10-21), adapted to this fork. Not taken over: the interleaved cache with extra stored time stamps (the cache stays keyed by the client IP, 4.12) and the stratum 1 holdover after a GNSS loss (see 13; taken over on 2026-10-22 with a default of 2 s, see 4.25).
+Taken over from release 3.0.5 of roblatour/ESP32TimeServer (comparison of 2026-10-21), adapted to this fork. Not taken over: the interleaved cache with extra stored time stamps (the cache stayed keyed by the client IP, 4.12; an exchange map found by T2 was added in its own form on 2026-10-23, see 4.29) and the stratum 1 holdover after a GNSS loss (see 13; taken over on 2026-10-22 with a default of 2 s, see 4.25).
 
 **Ethernet transport recovery** (`ethernet_transport_recovery_task()`, `restart_ethernet_transport()`)
 
@@ -553,6 +555,23 @@ Priorities 1 to 6 of the action list in `REVIEW_2026-10-23.md` (finding IDs in b
 - **Interrupt latency default 2.5 µs** (was 2.6): the first measurement and the stored value of the -O2 build are 2.50 µs. It is only used until the automatic measurement has run.
 - Verified: build with the IDF 6.1 warning flags (-O2, no warning in `main/`) and a compile check with `CALCULATE_STACK_SIZES_ENABLED 1` (debug code). Not yet tested on the board; the stack of the PPS task (two more `int64_t` in the holdover path) should be checked once with `CALCULATE_STACK_SIZES_ENABLED 1`.
 
+### 4.29 Exchange map for the interleaved mode (2026-10-23)
+
+Review finding S-02. In interleaved mode (RFC 9769) the client sends the T2 of the last reply it received back as the origin timestamp, and the reply carries the T3 of that exchange. Until now only the latest exchange of each client address was kept (4.12). Two cases cost a client its interleaved mode:
+- **Spoofing:** one request with a forged source address (the client's) replaced the stored exchange, so the client's next interleaved request no longer matched and got a basic reply. An off-path sender could do this permanently with one packet per poll interval.
+- **NAT:** several clients behind one address replaced each other's exchange.
+
+What changed (`main/custom/ntp_cache.c`):
+- **Exchange map:** besides the latest exchange in the address record (kept for 30 minutes, also for clients that poll rarely), the recent exchanges of all clients are stored in a map found by their T2. T2 is a receive time stamp with ns resolution that an off-path sender cannot know, so it works as a cookie. In addition the entry must belong to the same source address: a 32-bit tag, the IPv4 address itself or an FNV-1a hash of the IPv6 address.
+- **Structure:** 4-way set associative, 512 sets (2048 entries of 16 bytes: T2, T3 − T2 as 32 bits, address tag = 32 kB BSS). The set is chosen by Fibonacci hashing of T2. A new exchange replaces the oldest entry of its set. The age is the difference to the new T2 in modulo arithmetic, so the NTP era change in 2036 is handled, and so is a T3 that is already in the next era. No expiry is needed: an entry stays a correct pair at any age.
+- **Lookup:** `ntp_cache_find_or_create()` / `_ipv6()` now take the origin timestamp of the request and return the T3 for an interleaved reply (0 = basic mode). It is the record first (latest exchange of the address), then the map. This happens in the same mutex section as the address lookup and the rate limit check, with at most 4 extra compares and one 64-bit multiply. The caller still requires receive timestamp ≠ transmit timestamp in the request. The record structures are now private to `ntp_cache.c`.
+- **Storing:** `ntp_cache_update()` / `_ipv6()` write the record and the map. T2 = 0 (no hardware TX time stamp, 4.28) stores nothing in the map.
+- **All three paths** (hardware IPv4 and IPv6, socket path) use the same lookup. The socket path compared the IPv4 origin with a tolerance of ±8 units of 2^-32 s (`NTP_CACHE_TIMESTAMP_MATCH_TOLERANCE`); now every path compares exactly, as the client echoes T2 unchanged. The request time stamps are read with `read_ntp_timestamp()`.
+- **Robustness against floods** (simulation of the same algorithm): an entry survives 500 later exchanges of all clients almost surely, 1000 with 87 % and 2000 with 40 % probability. A spoofing source therefore needs about 1000 to 2000 answered requests per poll interval of its victim (before: one). Under such a flood the replies stay correct, only in basic mode.
+- **Side effect:** a client whose last reply was lost now also stays interleaved. It refers to the reply before, which is still in the map.
+- **Not changed:** the per-client rate limit (per address, 4.26), the record lifetime and the time stamps. The map adds no work before T2 (hardware RX time stamp) and none between the reading of a basic T3 and the transmission.
+- Verified: build (-O2, no warning in `main/`), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, and a Python model of the map with the same constants and rules. Results: single client 99 of 100 interleaved; spoofed basic requests with the client's address: still 99 of 100, the record-only cache 0 of 100; two clients behind one address: 99 + 99; no hardware TX time stamp: basic once, then interleaved; T2 of another address: basic; era change. Not yet tested on the board: `chronyc ntpdata` should keep showing `Interleaved: Yes`.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -584,7 +603,7 @@ Everything else is handed to lwIP, which applies its own rules (broadcast reques
 ### 5.3 Exposure
 
 - Amplification: none worth mentioning (mode 3 → mode 4, same size; no mode 6/7).
-- Flooding: global load shedding (8500 or 14500 requests per second depending on the chip revision) and the Ethernet recovery task. A single host flooding above the global threshold still triggers drops for all clients; a flood with spoofed sources pushes real clients out of the interleaved cache (fallback to basic mode). Per-client rate limit (4.26, default 20 requests per second per IP address): a single host below the global threshold gets at most its limit answered, the rest is dropped before the reply path.
+- Flooding: global load shedding (8500 or 14500 requests per second depending on the chip revision) and the Ethernet recovery task. A single host flooding above the global threshold still triggers drops for all clients; a flood with spoofed sources pushes real clients out of the interleaved cache (fallback to basic mode) only at about 1000 to 2000 answered requests per poll interval of the client (exchange map, 4.29; before 4.29 one spoofed request with the client's address was enough). Per-client rate limit (4.26, default 20 requests per second per IP address): a single host below the global threshold gets at most its limit answered, the rest is dropped before the reply path.
 - Time spoofing: possible on the path without authentication; NTPv4 symmetric keys are available (SHA-256 truncated to 160 bit, constant time comparison). Unauthenticated requests are still answered when authentication is enabled (by design).
 - OTE (if enabled, 4.24): upload over TLS with the login of the page or, for scripts, the web admin password (HTTP Basic, throttled like the login, refused while the factory password is in use, 4.27); the image is checked for project and chip revision and verified, but not signed: whoever knows the web admin password can replace the firmware. Use a long random password, keep OTE off when it is not needed, consider Secure Boot V2 and flash encryption.
 - MQTT (if enabled): `mqtt://` sends the credentials in clear text; prefer `mqtts://` (the broker certificate is checked against the ESP-IDF CA bundle).
@@ -744,6 +763,7 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `labelDeadlineUs`, `ubxPollDelayMs` | `acquire_sync_candidate` | 950 ms, 300 ms | label data window after the PPS edge |
 | `NTP_CACHE_MATCH_PORT` | `ntp_cache.c` | 0 | 1 = also compare the client source port |
 | `CACHE_TIMEOUT_MS_IPV4/IPV6` | `ntp_cache.h` | 1800000 | lifetime of a cache entry |
+| `EXCHANGE_MAP_SET_BITS` / `EXCHANGE_MAP_WAYS` | `ntp_cache.c` | 9 / 4 | exchange map of the interleaved mode: 512 sets × 4 entries (32 kB), 4.29 |
 | `ntpClientRateLimitPerSecond` | `ESP32TimeServerSettings.h` | 20 | default of the per-client rate limit (4.26), 0 = off |
 | `RATE_LIMIT_BURST_US` | `ntp_cache.c` | 1000000 | burst of the per-client rate limit: one second worth of requests |
 | `CONFIG_COMPILER_OPTIMIZATION_PERF` | `sdkconfig.defaults`, `sdkconfig` | y | -O2 |

@@ -21,38 +21,21 @@ extern "C"
 #define MAX_TRACKED_CLIENTS_IPV6 128
 #define CACHE_TIMEOUT_MS_IPV6 1800000
 
-    typedef struct
-    {
-        uint32_t client_ip;
-        uint16_t client_port;
-        uint64_t prev_t2;
-        uint64_t prev_t3;
-        int64_t last_seen_ms;
-        int64_t rate_tat_us; // per-client rate limit: theoretical arrival time of the next request (esp_timer)
-        bool is_active;
-    } ntp_client_record_t;
-
-    typedef struct
-    {
-        struct in6_addr client_ip;
-        uint16_t client_port;
-        uint64_t prev_t2;
-        uint64_t prev_t3;
-        int64_t last_seen_ms;
-        int64_t rate_tat_us; // per-client rate limit: theoretical arrival time of the next request (esp_timer)
-        bool is_active;
-    } ntp_client_record_ipv6_t;
-
     bool ntp_cache_init(void);
     void ntp_cache_deinit(void);
     // Per-client rate limit in requests per second (0 = off), takes effect at once. Can be called before ntp_cache_init().
     void ntp_cache_set_rate_limit(uint32_t requests_per_second);
+    // Finds (or creates) the record of the client address and the interleaved state of the request.
+    // origin_timestamp: origin timestamp of the request (0 = none). *interleaved_t3 (may be NULL) is set to the T3 of
+    // the earlier exchange with this address whose T2 equals the origin timestamp, 0 if there is none (basic mode).
     // rate_limited: NULL = no rate limit check (requests of this device to itself), otherwise set to true if the
     // request exceeds the per-client rate limit (it must then be dropped without an answer)
-    bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, ntp_client_record_t *record, bool *rate_limited);
+    bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, uint64_t origin_timestamp, uint64_t *interleaved_t3,
+                                  bool *rate_limited);
+    // Stores the exchange of an answered request (t2 = 0: none, the next request of the client gets a basic reply)
     bool ntp_cache_update(uint32_t ip, uint16_t port, uint64_t t2, uint64_t t3);
-    bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint16_t port, ntp_client_record_ipv6_t *record,
-                                       bool *rate_limited);
+    bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint16_t port, uint64_t origin_timestamp,
+                                       uint64_t *interleaved_t3, bool *rate_limited);
     bool ntp_cache_update_ipv6(const struct in6_addr *ip, uint16_t port, uint64_t t2, uint64_t t3);
     void ntp_cache_purge_expired(void);
 
