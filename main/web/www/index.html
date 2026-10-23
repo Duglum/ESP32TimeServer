@@ -410,21 +410,26 @@
 
     <section class="card">
       <h2>Security</h2>
-      <div class="grid">
-        <form id="password-form" class="stack">
-          <h3>Change the password</h3>
-          <input type="text" name="username" value="admin" autocomplete="username" hidden>
-          <label><span class="lt">Current password</span><input type="password" id="pw-current" autocomplete="current-password" maxlength="128" required></label>
-          <label><span class="lt">New password (12 to 128 characters)</span><input type="password" id="pw-new" autocomplete="new-password" minlength="12" maxlength="128" required></label>
-          <label><span class="lt">Repeat the new password</span><input type="password" id="pw-repeat" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+      <!-- Both forms share three rows (fields, button, explanation), so the two buttons are always at the same height -->
+      <div class="grid security-grid">
+        <form id="password-form" class="security-form">
+          <div class="stack">
+            <h3>Change the password</h3>
+            <input type="text" name="username" value="admin" autocomplete="username" hidden>
+            <label><span class="lt">Current password</span><input type="password" id="pw-current" autocomplete="current-password" maxlength="128" required></label>
+            <label><span class="lt">New password (12 to 128 characters)</span><input type="password" id="pw-new" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+            <label><span class="lt">Repeat the new password</span><input type="password" id="pw-repeat" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+          </div>
           <button type="submit">Change password</button>
           <p class="hint">Takes effect and is stored at once. Other sessions are logged out.</p>
         </form>
-        <form id="allow-form" class="stack">
-          <h3>Allowed source networks</h3>
-          <label><span class="lt">One address or CIDR network per line, at most 8 (empty = all)</span>
-            <textarea id="allow-list" rows="6" spellcheck="false" placeholder="192.168.1.0/24&#10;fd00::/8"></textarea>
-          </label>
+        <form id="allow-form" class="security-form">
+          <div class="stack fill">
+            <h3>Allowed source networks</h3>
+            <label><span class="lt">One address or CIDR network per line, at most 8 (empty = all)</span>
+              <textarea id="allow-list" rows="6" spellcheck="false" placeholder="192.168.1.0/24&#10;fd00::/8"></textarea>
+            </label>
+          </div>
           <button type="submit">Store allow-list</button>
           <p class="hint">Takes effect and is stored at once. Connections from other addresses are closed before the TLS handshake. A list that does not contain your own address is refused.</p>
         </form>
