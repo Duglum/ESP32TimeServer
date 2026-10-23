@@ -178,7 +178,7 @@ static constexpr const char *timeZoneSpec = "CET-1CEST,M3.5.0,M10.5.0/3";
 // pulse. After it the server answers at stratum 16 (leap indicator "not synchronised") until the PPS and GNSS are back.
 static constexpr int64_t ntpHoldoverDurationUs = 2LL * 1000000LL; // Holdover duration in microseconds (2 seconds)
 // Conservative uncertainty growth while coasting on the learned oscillator rate.
-static constexpr uint32_t ntpHoldoverDispersionPpm = 200;
+static constexpr uint32_t ntpHoldoverDispersionPpm = 100;
 // When the PPS is lost for longer than the holdover (defaults of the web admin settings):
 // - ntpServeAfterHoldover: true = keep answering NTP requests (for ntpServeAfterPpsLostMinutes); false = no answer at
 //   all, so the clients switch to other servers. Answers again when the PPS and GNSS are back.
