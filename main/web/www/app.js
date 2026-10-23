@@ -407,8 +407,8 @@
       ipv6_cidr: s.ipv6_address ? s.ipv6_address + '/' + s.ipv6_prefix : '',
       ipv6_gateway: s.ipv6_gateway,
       dns: (s.dns || []).join('\n'),
-      // "" = hardware MAC: the field shows the hardware MAC
-      mac_address: s.mac_address || (state && state.status ? state.status.mac_hardware : ''),
+      // "" = hardware MAC: the field stays empty and shows the hardware MAC as its (grey) placeholder
+      mac_address: s.mac_address || '',
       gnss_protocol: s.gnss_protocol,
       gnss_tx_pin: String(s.gnss_tx_pin),
       gnss_rx_pin: String(s.gnss_rx_pin),
@@ -787,7 +787,7 @@
       ? t('{mac} (hardware MAC)', { mac: st.mac_address })
       : t('{mac} (set, hardware MAC {hardware})', { mac: st.mac_address, hardware: st.mac_hardware });
     $('mac-hardware').textContent = st.mac_hardware;
-    $('mac-in-use').textContent = st.mac_address;
+    f.mac_address.placeholder = st.mac_hardware;
     $('st-fingerprint').textContent = state.fingerprint;
     // Same form as the IPv6 lines: address in the first line, gateway and source in the second
     fillList('st-ipv4', st.ipv4_address
