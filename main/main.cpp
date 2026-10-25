@@ -2979,7 +2979,8 @@ static bool is_ipv4_ntp_request(const uint8_t *frame, uint32_t length, size_t *i
     if (frame[ipv4_offset + 9] != IPPROTO_UDP)
         return false;
 
-    // Fragments (MF set or fragment offset != 0) are left to lwIP, which reassembles them
+    // Fragments (MF set or fragment offset != 0) are left to lwIP. IP reassembly is off in the sdkconfig
+    // (CONFIG_LWIP_IP4_REASSEMBLY), so lwIP drops them; an NTP request (48 to 68 bytes of payload) is never fragmented.
     const uint16_t fragment_field = static_cast<uint16_t>((frame[ipv4_offset + 6] << 8) | frame[ipv4_offset + 7]);
     if ((fragment_field & 0x3FFFU) != 0)
         return false;
@@ -3209,7 +3210,8 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
     uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
     bool rate_limited = false;
-    if (!ntp_cache_find_or_create(client_ip, client_port, client_origin_timestamp, &interleaved_t3, &rate_limited))
+    uint16_t cache_slot = NTP_CACHE_SLOT_NONE; // record of the client, reused by ntp_cache_update below
+    if (!ntp_cache_find_or_create(client_ip, client_port, client_origin_timestamp, &interleaved_t3, &rate_limited, &cache_slot))
     {
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
@@ -3348,7 +3350,7 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         // Without a hardware TX time stamp (e.g. the frame waited behind others in the TX queue) the stored T2 is 0, so
         // the next request is answered in basic mode: an interleaved reply would carry the software T3, which misses
         // the queueing delay of this frame
-        ntp_cache_update(client_ip, client_port, hardware_transmit_time != 0 ? receive_time : 0, hardware_transmit_time);
+        ntp_cache_update(client_ip, client_port, cache_slot, hardware_transmit_time != 0 ? receive_time : 0, hardware_transmit_time);
         update_tx_delay_estimate(false, authenticated_request, raw_transmit_time, hardware_transmit_time);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
@@ -3429,7 +3431,8 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
     const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
     uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
     bool rate_limited = false;
-    if (!ntp_cache_find_or_create_ipv6(&client_ip, client_port, client_origin_timestamp, &interleaved_t3, &rate_limited))
+    uint16_t cache_slot = NTP_CACHE_SLOT_NONE; // record of the client, reused by ntp_cache_update_ipv6 below
+    if (!ntp_cache_find_or_create_ipv6(&client_ip, client_port, client_origin_timestamp, &interleaved_t3, &rate_limited, &cache_slot))
     {
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
@@ -3558,7 +3561,7 @@ static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint
     if (result == ESP_OK)
     {
         // Without a hardware TX time stamp the next request is answered in basic mode (see the IPv4 path)
-        ntp_cache_update_ipv6(&client_ip, client_port, hardware_transmit_time != 0 ? receive_time : 0, hardware_transmit_time);
+        ntp_cache_update_ipv6(&client_ip, client_port, cache_slot, hardware_transmit_time != 0 ? receive_time : 0, hardware_transmit_time);
         update_tx_delay_estimate(true, authenticated_request, raw_transmit_time, hardware_transmit_time);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
@@ -3606,6 +3609,7 @@ static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uin
         return ESP_OK;
     }
 
+    // Without a hardware receive time stamp there is no exact T2: the request is dropped (not answered by lwIP either)
     if (!timestamp_is_valid(rx_timestamp))
     {
         record_ntp_input(esp_timer_get_time());
@@ -3665,8 +3669,10 @@ static void ntp_cache_purge_task(void *parameter)
     }
 }
 
-// Handles NTP requests from IPv4 sources using Ethernet hardware timestamps to provide high-precision, GNSS-disciplined time responses.
-// If the hardware timestamp is not available or valid, the request will be handled by the standard NTP server (ntp_server_task).
+// Answers the NTP requests (IPv4 and IPv6) that ntp_ethernet_input() queued, with the hardware receive time stamp of
+// the request and the hardware transmit time stamp of the reply. A request without a valid receive time stamp is
+// dropped in ntp_ethernet_input() (it is not handed to lwIP); requests that are not well-formed unicast requests to this
+// device go to lwIP and the socket path (ntp_server_task).
 static void hardware_ntp_server_task(void *parameter)
 {
     (void)parameter;
@@ -5129,6 +5135,13 @@ static bool IRAM_ATTR pps_capture_callback(mcpwm_cap_channel_handle_t,
 
 static void setup_pps_input()
 {
+    // The PPS callback hands the edges over with these: create them before the capture channel is enabled
+    s_pps_semaphore = xSemaphoreCreateBinary();
+    s_pps_timestamp_queue = xQueueCreate(1, sizeof(PpsCaptureEvent));
+    s_pps_sync_timestamp_queue = xQueueCreate(1, sizeof(PpsCaptureEvent));
+    if (s_pps_semaphore == nullptr || s_pps_timestamp_queue == nullptr || s_pps_sync_timestamp_queue == nullptr)
+        ESP_LOGE(TAG, "PPS input: out of memory for the PPS queues");
+
     mcpwm_capture_timer_config_t timer_config{};
     timer_config.group_id = 0;
     timer_config.clk_src = MCPWM_CAPTURE_CLK_SRC_DEFAULT;
@@ -8729,9 +8742,7 @@ void setup_mutexes_and_semaphores(void)
 {
 
     s_time_mutex = xSemaphoreCreateMutex();
-    s_pps_semaphore = xSemaphoreCreateBinary();
-    s_pps_timestamp_queue = xQueueCreate(1, sizeof(PpsCaptureEvent));
-    s_pps_sync_timestamp_queue = xQueueCreate(1, sizeof(PpsCaptureEvent));
+    // The PPS semaphore and queues are created by setup_pps_input()
     s_ote_mutex = xSemaphoreCreateMutex();
     s_sync_state_mutex = xSemaphoreCreateMutex();
     s_network_address_mutex = xSemaphoreCreateMutex();
@@ -9957,6 +9968,7 @@ static void ntp_server_task(void *parameter)
                 const struct in6_addr *client_ipv6 = nullptr;
                 const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
                 uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
+                uint16_t cache_slot = NTP_CACHE_SLOT_NONE; // record of the client, reused by ntp_cache_update
                 // Requests of this device to itself are not rate limited (nullptr: no check)
                 bool rate_limited = false;
                 bool *const rate_limit_check = internal_request ? nullptr : &rate_limited;
@@ -9964,14 +9976,14 @@ static void ntp_server_task(void *parameter)
                 {
                     source_ipv4 = reinterpret_cast<const struct sockaddr_in *>(&source_addr);
                     ntp_cache_find_or_create(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port), client_origin_timestamp,
-                                             &interleaved_t3, rate_limit_check);
+                                             &interleaved_t3, rate_limit_check, &cache_slot);
                 }
                 else if (source_addr.ss_family == AF_INET6)
                 {
                     client_ipv6 = &reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_addr;
                     ntp_cache_find_or_create_ipv6(client_ipv6,
                                                   ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_port),
-                                                  client_origin_timestamp, &interleaved_t3, rate_limit_check);
+                                                  client_origin_timestamp, &interleaved_t3, rate_limit_check, &cache_slot);
                 }
                 if (rate_limited) // over the per-client rate limit: dropped without an answer
                 {
@@ -10042,14 +10054,14 @@ static void ntp_server_task(void *parameter)
                     }
                     if (source_ipv4 != nullptr)
                     {
-                        ntp_cache_update(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port),
+                        ntp_cache_update(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port), cache_slot,
                                          receive_time, transmit_time);
                     }
                     else if (client_ipv6 != nullptr)
                     {
                         ntp_cache_update_ipv6(client_ipv6,
                                               ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_port),
-                                              receive_time, transmit_time);
+                                              cache_slot, receive_time, transmit_time);
                     }
                 }
 #if MQTT_ENABLED
@@ -10867,6 +10879,7 @@ static void update_LED_LCD_Button_task(void *parameter)
             |         |                      |                 |                                                                    |
             |    0    | ESP32 Time Server    | Green           | The server is operating normally                                   |
             |    3    | ESP32 Time Server[3] | Yellow flashing | There are queued MQTT items                                        |
+            |   15    | ESP32 Time Server[H] | Yellow flashing | PPS holdover: PPS lost, still stratum 1 for the holdover time      |
             |    5    | ESP32 Time Server[5] | Yellow          | PPS missing                                                        |
             |    6    | ESP32 Time Server[6] | Yellow          | GNSS missing or invalid                                            |
             |    7    | ESP32 Time Server[7] | Yellow          | GNSS sync stale                                                    |
@@ -10887,9 +10900,9 @@ static void update_LED_LCD_Button_task(void *parameter)
             Note:
             In timekeeping terminology, holdover is the state where a time server continues providing time from its internal
             oscillator after losing its external reference (in this case the GNSS). The device is no longer actively
-            synchronized but is "coasting" on its last-known good time.  Holdover mode is not expressly reported on the
-            LCD's top line or via the RBB LED as it is implied when the PPS missing, the GNSS missing or invalid, the
-            GNSS sync is stale, or the GNSS has lost its satellite lock.
+            synchronized but is "coasting" on its last-known good time.  The PPS holdover (stratum 1 for a short time
+            after the PPS is lost, see the GNSS and PPS settings of the web admin page) is shown as [H]; after it the PPS
+            fault [5] is shown.
 
             The above chart can be found in the folder: misc/status_indicators.md
 

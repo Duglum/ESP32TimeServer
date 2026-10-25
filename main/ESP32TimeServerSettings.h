@@ -227,14 +227,16 @@ static constexpr uint16_t gnssMinimumFixAgeSeconds = 0;
 
 // Note: even if fallback processing is set to true below, accuracy should still be fine as long as PPS is disciplined.
 // For more information here are some detailed timing accuracy notes:
-// - This firmware timestamps NTP responses using gettimeofday() system call, which is backed by the ESP32-P4's high-resolution timer
-//   driven by the built-in 40 MHz external XTAL via the APB clock (~10 ppm). This is the most accurate clock available
-//   on this chip; no external 32.768 kHz RTC crystal is needed or beneficial for NTP timestamping purposes.
-// - The PPS discipline task applies continuous sub-second corrections on every GNSS PPS pulse.
-//   This reduces inter-sync error to well under 1 ms, limited mainly by interrupt latency (~10-100 us).
-// - Preferred GNSS (MAX-M10S) connects at 921600 baud, minimizing serial latency and enabling faster, more precise time
-//   message processing. Fallback modules may be limited to 9600 baud, introducing additional parsing delay and reducing
-//   the accuracy of the time set at each GNSS resync.
+// - NTP requests over Ethernet are time stamped by the EMAC hardware (receive and transmit time stamps of its PTP
+//   clock, 13 ns steps), which the PPS keeps on GNSS time. Requests the hardware path does not take (e.g. those of
+//   this device to itself) are answered by the socket path with the model clock: the fine local timebase (62.5 ns
+//   steps) corrected at every PPS edge. Both run on the 40 MHz crystal of the board; an external 32.768 kHz RTC crystal
+//   would not help.
+// - Every GNSS PPS edge is captured by a hardware timer (12.5 ns), so the interrupt latency does not enter the time;
+//   the served time stamps stay within some 10 ns of the PPS (see main/CHANGELOG.md, sections 4 and 7).
+// - The baud rate only decides how soon the label of a second (its date and time) arrives after the PPS edge: it has to
+//   be complete within 950 ms. It does not affect the accuracy, which comes from the PPS. 921600 baud (MAX-M10S) leaves
+//   the most margin; 9600 baud still works with a single RMC sentence per second.
 
 static constexpr bool allowFallbackProcessing = true;
 

@@ -20,9 +20,9 @@
 | ESP32 Time Server[T] | Red             | Transport layer stalled                                            |
 | ESP32 Time Server[4] | Red             | Sanity check mismatch                                              |
 |                      |                 |                                                                    |
-| ESP32 Time Server[I] | Orange          | IPv4 address not assigned yet preferred                            |
+| ESP32 Time Server[I] | Orange          | No usable IP address                                               |
 | ESP32 Time Server[+] | Orange flashing | Load shedding active                                               |
-| ESP32 Time Server[*] | White           | The server is synchronizing its time                               |
+| ESP32 Time Server[*] | White           | The server is setting its time                                     |
 | ESP32 Time Server's  | Pink            | The button is being pressed                                        |
 
 

@@ -274,6 +274,33 @@ static size_t select_ipv6_slot(const struct in6_addr *ip, uint16_t port, bool *f
     return selected;
 }
 
+// Must be called with s_mutex held.
+// Record of a request for ntp_cache_update: the slot of ntp_cache_find_or_create if it still belongs to this client,
+// otherwise (purged or given to another client meanwhile) the search of select_ipv4_slot. A client has at most one
+// record, so both give the same record; the check saves the second scan of up to 128 records.
+static size_t ipv4_slot_for_update(uint32_t ip, uint16_t port, uint16_t slot, bool *found)
+{
+    if (slot < MAX_TRACKED_CLIENTS_IPV4 && s_ipv4_records[slot].is_active && s_ipv4_records[slot].client_ip == ip &&
+        port_matches(s_ipv4_records[slot].client_port, port))
+    {
+        *found = true;
+        return slot;
+    }
+    return select_ipv4_slot(ip, port, found);
+}
+
+static size_t ipv6_slot_for_update(const struct in6_addr *ip, uint16_t port, uint16_t slot, bool *found)
+{
+    if (slot < MAX_TRACKED_CLIENTS_IPV6 && s_ipv6_records[slot].is_active &&
+        port_matches(s_ipv6_records[slot].client_port, port) &&
+        memcmp(&s_ipv6_records[slot].client_ip, ip, sizeof(*ip)) == 0)
+    {
+        *found = true;
+        return slot;
+    }
+    return select_ipv6_slot(ip, port, found);
+}
+
 bool ntp_cache_init(void)
 {
     if (s_mutex != NULL)
@@ -300,11 +327,15 @@ void ntp_cache_set_rate_limit(uint32_t requests_per_second)
 }
 
 bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, uint64_t origin_timestamp, uint64_t *interleaved_t3,
-                              bool *rate_limited)
+                              bool *rate_limited, uint16_t *slot)
 {
     if (rate_limited != NULL)
     {
         *rate_limited = false;
+    }
+    if (slot != NULL)
+    {
+        *slot = NTP_CACHE_SLOT_NONE;
     }
     if (interleaved_t3 != NULL)
     {
@@ -329,12 +360,16 @@ bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, uint64_t origin_timest
     check_request_locked(&s_ipv4_records[selected].rate_tat_us, &s_ipv4_records[selected].rate_tat_cookie_us,
                          s_ipv4_records[selected].prev_t2, s_ipv4_records[selected].prev_t3, address_tag_ipv4(ip),
                          origin_timestamp, interleaved_t3, rate_limited);
+    if (slot != NULL)
+    {
+        *slot = (uint16_t)selected;
+    }
 
     xSemaphoreGive(s_mutex);
     return true;
 }
 
-bool ntp_cache_update(uint32_t ip, uint16_t port, uint64_t t2, uint64_t t3)
+bool ntp_cache_update(uint32_t ip, uint16_t port, uint16_t slot, uint64_t t2, uint64_t t3)
 {
     if (s_mutex == NULL || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
     {
@@ -342,7 +377,7 @@ bool ntp_cache_update(uint32_t ip, uint16_t port, uint64_t t2, uint64_t t3)
     }
 
     bool found = false;
-    const size_t selected = select_ipv4_slot(ip, port, &found);
+    const size_t selected = ipv4_slot_for_update(ip, port, slot, &found);
 
     if (!found)
     {
@@ -361,11 +396,15 @@ bool ntp_cache_update(uint32_t ip, uint16_t port, uint64_t t2, uint64_t t3)
 }
 
 bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint16_t port, uint64_t origin_timestamp,
-                                   uint64_t *interleaved_t3, bool *rate_limited)
+                                   uint64_t *interleaved_t3, bool *rate_limited, uint16_t *slot)
 {
     if (rate_limited != NULL)
     {
         *rate_limited = false;
+    }
+    if (slot != NULL)
+    {
+        *slot = NTP_CACHE_SLOT_NONE;
     }
     if (interleaved_t3 != NULL)
     {
@@ -390,12 +429,16 @@ bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint16_t port, uin
     check_request_locked(&s_ipv6_records[selected].rate_tat_us, &s_ipv6_records[selected].rate_tat_cookie_us,
                          s_ipv6_records[selected].prev_t2, s_ipv6_records[selected].prev_t3, address_tag_ipv6(ip),
                          origin_timestamp, interleaved_t3, rate_limited);
+    if (slot != NULL)
+    {
+        *slot = (uint16_t)selected;
+    }
 
     xSemaphoreGive(s_mutex);
     return true;
 }
 
-bool ntp_cache_update_ipv6(const struct in6_addr *ip, uint16_t port, uint64_t t2, uint64_t t3)
+bool ntp_cache_update_ipv6(const struct in6_addr *ip, uint16_t port, uint16_t slot, uint64_t t2, uint64_t t3)
 {
     if (s_mutex == NULL || ip == NULL || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
     {
@@ -403,7 +446,7 @@ bool ntp_cache_update_ipv6(const struct in6_addr *ip, uint16_t port, uint64_t t2
     }
 
     bool found = false;
-    const size_t selected = select_ipv6_slot(ip, port, &found);
+    const size_t selected = ipv6_slot_for_update(ip, port, slot, &found);
 
     if (!found)
     {
