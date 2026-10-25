@@ -62,6 +62,7 @@ Contents
 | 33 | **GNSS validity after a cold start** (2026-10-26, review finding Z-04): RMC mode indicator, u-blox `fullyResolved` / `confirmedTime`, web setting *Minimum GNSS fix age before stratum 1* (default off, 750 s recommended) | no stratum 1 with a solution of a dead reckoning, manual or simulator mode, nor with a UTC second that may still be off after a cold start |
 | 34 | **Clean-ups of the review** (2026-10-26, findings E-11, E-13, E-16): PPS queues created before the capture starts, outdated comments corrected, one address lookup per NTP request | no handle of the PPS callback is written while it may run; `ntp_cache_update()` no longer scans the 128 records a second time; time stamps unchanged |
 | 35 | **One hardware NTP handler for IPv4 and IPv6** (2026-10-26, review finding E-12): `process_hardware_ntp_request()` with a family flag instead of two copies of about 200 lines | one place for every later change of the reply path; the frames on the wire and the time stamps are unchanged |
+| 36 | **Integer absolute times in the PPS task and the PTP functions** (2026-10-26, review finding Z-13): the PPS edge as whole ns plus a fraction, doubles only for differences | no rounding error that grows with the uptime (before: the edge up to 23 ns off after a year, 87 ns after three years) |
 
 No memory leak was found in the review (section 4.13).
 
@@ -658,6 +659,30 @@ Review finding E-12. `process_hardware_ntp_request()` and `process_hardware_ipv6
 - **Size:** image −1.7 kB, DIRAM unchanged.
 - Verified: build (-O2, no warning in `main/`), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, stack frames from the disassembly, and a reading of each family's path against the former function (the frame written to the EMAC checked field by field; there is no host compiler for a test). Not tested on the board yet: IPv4 and IPv6 requests with chrony (`Interleaved: Yes`, `TX timestamping: Hardware`), an authenticated request of each family, and the transmit delay estimates in the debug output (`Basic T3 TX delay: v4 … v6 …`).
 
+### 4.35 Integer absolute times in the PPS task and the PTP functions (2026-10-26)
+
+Review finding Z-13. The ESP32-P4 computes `double` in software (ROM routines, IEEE binary64). The PPS task held absolute times as doubles of the µs since boot (`isr_us`, `edge_local_us`) and of the system time (`sys_us`); the PTP functions multiplied `edge_local_us` by 1000. A double of the time since boot has steps of about 1 ns after 100 days and 4 ns after a year, and the anchor of the edge is formed from the difference of two such numbers and a mean of 48 of them.
+
+What changed (`main/main.cpp`):
+- **`local_instant_t`:** an instant on the fine local timebase as whole ns (`int64_t`) and the rest of −0.5 to 0.5 ns (`double`). `local_ns_since()` gives the ns from such an instant to a local time: the difference is formed in integers, so the double holds only a small number. `floor_div()` rounds integer divisions down.
+- **Anchor of the edge:** d (ISR time − tick time) is formed in integers: the whole seconds of the capture ticks in integer ns, the rest of the second as a double below 1e9 ns. The values of the window are kept relative to `anchor_ref_ns` (the integer part of the first d of the window), so the statistic (mean of the lowest 75 % of 64 values) works on numbers of a few µs. The statistic itself is unchanged (no new measurement of the interrupt latency). The edge is tick time + central value − interrupt latency, which is the former ISR time − excess − latency.
+- **System clock phase:** the system clock value at the edge is formed in integer ns (a double of the Unix time in µs has steps of 0.25 µs); the second of the edge and the phase follow from it.
+- **PTP functions:** `ptp_write_from_edge()`, `set_hardware_clock_from_pps()`, `ptp_measure_offset_sw()`, `ptp_servo_step()` and `ptp_servo_update()` take the edge as `local_instant_t` and work with `local_ns_since()`. The model clock gets the edge in whole ns as before (it was rounded there already).
+- **Interrupt latency measurement:** the differences of the local times are formed before the conversion to double.
+- **Unchanged:** the filters of the frequency estimate, the servo and the PTP mapping stay in double (they hold small numbers); the statistic of the anchor; the measured interrupt latency in NVS (`PPS_ISR_LATENCY_CODE_VERSION` unchanged); the debug line prints the same quantities.
+- **Stack:** frame of the PPS task 736 B instead of 704 B (+32 B; +48 B since 4.29 with 4.31). The stack stays at 3584 B (`PPS_Discipline_Task_Stack_Size`, fixed); to be checked on the board with `CALCULATE_STACK_SIZES_ENABLED 1`.
+- Verified: build (-O2, no warning in `main/`), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, and a Python model (IEEE binary64 like the ROM routines) of the former and the new arithmetic against exact rational arithmetic of the same formulas, 200 windows of 64 edges per uptime:
+
+| Uptime | Edge, before: max / RMS | Edge, now | System clock phase, before / now (max) | Software PTP reading (time since the edge), before / now (max) |
+|---|---|---|---|---|
+| 1 h | 0.002 / 0.001 ns | < 0.001 ns | 124 / 1 ns | 0.002 / < 0.001 ns |
+| 30 d | 1.7 / 0.54 ns | < 0.001 ns | 123 / 1 ns | 1.7 / < 0.001 ns |
+| 100 d | 5.2 / 1.8 ns | < 0.001 ns | 124 / 1 ns | 5.2 / < 0.001 ns |
+| 1 year | 23 / 6.9 ns | < 0.001 ns | 139 / 1 ns | 22 / < 0.001 ns |
+| 3 years | 87 / 32 ns | < 0.001 ns | 177 / 1 ns | 88 / < 0.001 ns |
+
+  The edge error reached the served time stamps through the software PTP measurement (without loopback, or for seconds without a loopback pulse) and through the model clock (socket path); the loopback measurement itself does not use the edge time. The phase of the system clock only steers `adjtime()` (µs resolution). Not tested on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -963,6 +988,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - Re-lock after a holdover (4.31): built and modelled, not tested on the board yet. Check: disconnect the PPS for 10 minutes (holdover set long enough), then reconnect; chrony's `measurements.log` should show a ramp of the offset instead of a step, and the debug output `PTP servo: re-lock, mapping residual … ns`. Check the stack of the PPS task once with `CALCULATE_STACK_SIZES_ENABLED 1`.
 - GNSS validity after a cold start (4.32): built and modelled, the page tested against a mock, not tested on the board yet. Check: with the setting at 750 s, the status line counts the fix age after a start and stratum 1 comes after about 12.5 min with the console line; with a u-blox receiver after a cold start (backup battery removed) the first synchronisation waits for `fullyResolved`. An RMC with mode N or E must not lead to stratum 1.
 - One hardware NTP handler (4.34): built, not tested on the board yet. Check IPv4 and IPv6 with chrony (`chronyc ntpdata`: `Interleaved: Yes`, `TX timestamping: Hardware`, similar offsets and delays as before), one authenticated request per family, and the stack of the hardware NTP task with `CALCULATE_STACK_SIZES_ENABLED 1`.
+- Integer absolute times (4.35): built and modelled, not tested on the board yet. Check: the debug line of the PPS task (`raw_phase`, `resid`, `jitter_excess`, `d_central`) shows the same values as before, the PTP status (offset, innovation, noise) is unchanged, and the stack of the PPS task with `CALCULATE_STACK_SIZES_ENABLED 1`.
 
 ## 13. Recommendations that are not in the code
 

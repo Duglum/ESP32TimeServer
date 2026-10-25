@@ -868,6 +868,27 @@ static inline __attribute__((always_inline)) int64_t local_now_ns() { return loc
 // The same instant on the esp_timer_get_time() scale (whole microseconds, truncated like esp_timer)
 static inline __attribute__((always_inline)) int64_t local_ticks_to_esp_us(uint64_t ticks) { return static_cast<int64_t>(ticks / LOCAL_TICKS_PER_US); }
 
+// Instant on the fine local timebase known to better than 1 ns (the PPS edge): whole ns since boot and the rest of
+// -0.5 to 0.5 ns. Absolute times stay integers: a double of the time since boot has steps of 4 ns after a year, so
+// doubles only hold differences to such an instant (review Z-13).
+struct local_instant_t
+{
+    int64_t ns;
+    double frac_ns;
+};
+
+// ns from the instant t to the local time now_ns (exact to far below 1 ns for differences of hours)
+static inline double local_ns_since(int64_t now_ns, const local_instant_t &t)
+{
+    return static_cast<double>(now_ns - t.ns) - t.frac_ns;
+}
+
+// a / b rounded down (b > 0), also for negative a
+static inline int64_t floor_div(int64_t a, int64_t b)
+{
+    return a >= 0 ? a / b : -((-a + b - 1) / b);
+}
+
 // ---- Configuration of the EMAC PTP clock (see PTP_CLOCK_FROM_PLL) ----
 static std::atomic<bool> s_ptp_clock_pll{false}; // the PTP clock runs from PLL_F80M
 
@@ -5223,8 +5244,7 @@ static void measure_pps_isr_latency_task(void *)
             continue;
 
         // The trigger happened somewhere between the two clock reads: use the middle (result in us)
-        const double latency = (static_cast<double>(s_isr_latency_test_cb_ns) -
-                                0.5 * (static_cast<double>(t0) + static_cast<double>(t1))) / 1000.0;
+        const double latency = (static_cast<double>(s_isr_latency_test_cb_ns - t0) - 0.5 * static_cast<double>(t1 - t0)) / 1000.0;
         if ((t1 - t0) <= maxGapUs * 1000LL && latency >= 0.0 && latency <= 500.0)
             lat[valid++] = latency;
     }
@@ -5601,7 +5621,7 @@ static void ptp_latency_calibration_task(void *)
 // correct_drift: false = elapsed time in oscillator units (PTP_FREE_RUNNING 0, its conversion expects that),
 //                true  = elapsed time corrected by the measured ppb, i.e. true time (PTP_FREE_RUNNING 1)
 // Returns true if the clock was written.
-static bool ptp_write_from_edge(int64_t pps_second, double edge_local_us, bool correct_drift)
+static bool ptp_write_from_edge(int64_t pps_second, const local_instant_t &edge_local, bool correct_drift)
 {
     static constexpr int64_t acceptDevNs = 2000; // tolerated deviation from the expected write latency
     static constexpr int maxAttempts = 3;
@@ -5614,7 +5634,7 @@ static bool ptp_write_from_edge(int64_t pps_second, double edge_local_us, bool c
     for (int attempt = 0; attempt < maxAttempts; ++attempt)
     {
         const int64_t ref_ns = local_now_ns();
-        const double elapsed_ns = static_cast<double>(ref_ns) - edge_local_us * 1000.0;
+        const double elapsed_ns = local_ns_since(ref_ns, edge_local);
         const int64_t total_ns = pps_second * 1000000000LL + llround(elapsed_ns - elapsed_ns * ppb * 1e-9) + latency_ns;
 
         struct timespec ts{};
@@ -5658,13 +5678,13 @@ static bool ptp_write_from_edge(int64_t pps_second, double edge_local_us, bool c
 #if !PTP_FREE_RUNNING
 // PTP_FREE_RUNNING 0: sets the EMAC PTP clock to PPS second + time elapsed since the edge (every second) and measures
 // the offset of the result against the model clock.
-static void set_hardware_clock_from_pps(int64_t pps_second, double edge_local_us)
+static void set_hardware_clock_from_pps(int64_t pps_second, const local_instant_t &edge_local)
 {
     if (!s_ptp_clock_ready.load(std::memory_order_acquire))
         return;
 
     s_ptp_comp_valid.store(false, std::memory_order_release);
-    if (!ptp_write_from_edge(pps_second, edge_local_us, false))
+    if (!ptp_write_from_edge(pps_second, edge_local, false))
         return;
 
     // Offset of the PTP clock against the model clock after this write: mean of several read-backs, each one
@@ -5690,7 +5710,7 @@ static void set_hardware_clock_from_pps(int64_t pps_second, double edge_local_us
         if (b - a > maxBracketNs)
             continue;
         const int64_t rb_ns = static_cast<int64_t>(rb.tv_sec) * 1000000000LL + rb.tv_nsec;
-        const int64_t model_ns = pps_second_ns + llround(0.5 * static_cast<double>(a + b) - edge_local_us * 1000.0);
+        const int64_t model_ns = pps_second_ns + llround(0.5 * (local_ns_since(a, edge_local) + local_ns_since(b, edge_local)));
         offset_sum += rb_ns - model_ns;
         ++valid_reads;
     }
@@ -5792,7 +5812,7 @@ static bool ptp_read_raw_ns(int64_t &raw_ns)
 
 // Software measurement of raw PTP - true time at the PPS edge. rate_ppb = current rate of the offset, used to refer
 // the readings (some ms after the edge) back to the edge. Returns the number of readings used (0 = failed).
-static int ptp_measure_offset_sw(int64_t edge_sec, double edge_local_us, double rate_ppb, int reads,
+static int ptp_measure_offset_sw(int64_t edge_sec, const local_instant_t &edge_local, double rate_ppb, int reads,
                                  double &offset_ns, int64_t &bracket_ns)
 {
     static int64_t value[ptp_sw_reads_max]; // static: the PPS task has little stack
@@ -5801,7 +5821,6 @@ static int ptp_measure_offset_sw(int64_t edge_sec, double edge_local_us, double 
     static constexpr int64_t bracketSlackNs = 250;  // readings within this of the shortest bracket are used
 
     const double ppb = static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed));
-    const double edge_ns = edge_local_us * 1000.0;
     const int64_t edge_sec_ns = edge_sec * 1000000000LL;
     int n = 0;
     int64_t min_bracket = INT64_MAX;
@@ -5816,7 +5835,7 @@ static int ptp_measure_offset_sw(int64_t edge_sec, double edge_local_us, double 
             break;
         if (b - a > maxBracketNs)
             continue;
-        const double el = static_cast<double>(a + (b - a) / 2) - edge_ns; // local ns since the edge
+        const double el = local_ns_since(a + (b - a) / 2, edge_local);     // local ns since the edge
         const double el_true = el - el * ppb * 1e-9;                       // true ns since the edge
         value[n] = llround(static_cast<double>(raw - edge_sec_ns) - el_true - rate_ppb * el_true * 1e-9);
         bracket[n] = b - a;
@@ -5954,7 +5973,7 @@ static double ptp_relock_residual(int64_t ref_true_ns, double ref_offset_ns, boo
 }
 
 // Sets the PTP clock to true time (for large offsets only); the filter starts again in the new epoch
-static void ptp_servo_step(int64_t edge_sec, double edge_local_us, double offset_ns)
+static void ptp_servo_step(int64_t edge_sec, const local_instant_t &edge_local, double offset_ns)
 {
     ptp_servo_state_t &st = s_ptp_servo;
     s_ptp_comp_valid.store(false, std::memory_order_release);
@@ -5962,7 +5981,7 @@ static void ptp_servo_step(int64_t edge_sec, double edge_local_us, double offset
     // Run at the estimated GNSS rate right away, so the raw clock is usable until the next measurement
     ptp_apply_command(static_cast<int32_t>(std::clamp(llround(-st.free_ppb), static_cast<long long>(-ptp_max_command_ppb),
                                                       static_cast<long long>(ptp_max_command_ppb))));
-    const bool written = ptp_write_from_edge(edge_sec, edge_local_us, true);
+    const bool written = ptp_write_from_edge(edge_sec, edge_local, true);
     st.epoch = s_ptp_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     st.initialized = false;
     ++st.steps;
@@ -5976,7 +5995,7 @@ static void ptp_servo_step(int64_t edge_sec, double edge_local_us, double offset
 
 // Called by the PPS task for every accepted PPS edge (s_time_mutex held, after the model clock was published).
 // rate_valid: the PPS task has a frequency estimate of the crystal (s_clock_ppb), used as the start value of the rate.
-static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gnss_cap_ticks, bool rate_valid)
+static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local, uint32_t gnss_cap_ticks, bool rate_valid)
 {
     ptp_servo_state_t &st = s_ptp_servo;
     if (!s_ptp_clock_ready.load(std::memory_order_acquire) || !rate_valid)
@@ -6008,7 +6027,7 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
     const bool loopback = s_ptp_loopback_active.load(std::memory_order_acquire) && st.initialized;
     double sw_offset_ns = 0.0;
     int64_t sw_bracket_ns = 0;
-    const int sw_reads = ptp_measure_offset_sw(edge_sec, edge_local_us, st.free_ppb + st.cmd_ppb, loopback ? 4 : ptp_sw_reads_max,
+    const int sw_reads = ptp_measure_offset_sw(edge_sec, edge_local, st.free_ppb + st.cmd_ppb, loopback ? 4 : ptp_sw_reads_max,
                                                sw_offset_ns, sw_bracket_ns);
     if (s_ptp_epoch.load(std::memory_order_acquire) != epoch || !s_ptp_clock_ready.load(std::memory_order_acquire))
         return; // the clock was set or re-initialised meanwhile
@@ -6063,7 +6082,7 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
     {
         if (fabs(measurement_ns) > ptp_step_threshold_ns)
         {
-            ptp_servo_step(edge_sec, edge_local_us, measurement_ns);
+            ptp_servo_step(edge_sec, edge_local, measurement_ns);
             return;
         }
         st.offset_ns = measurement_ns;
@@ -6134,7 +6153,7 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
 
         if (fabs(st.offset_ns) > ptp_step_threshold_ns)
         {
-            ptp_servo_step(edge_sec, edge_local_us, st.offset_ns);
+            ptp_servo_step(edge_sec, edge_local, st.offset_ns);
             return;
         }
 
@@ -6158,7 +6177,7 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
                                                             static_cast<long long>(ptp_max_command_ppb)));
     const int32_t old_command = st.cmd_ppb;
     ptp_apply_command(command);
-    const double update_local_s = std::max(0.0, (static_cast<double>(local_now_ns()) - edge_local_us * 1000.0) * 1e-9);
+    const double update_local_s = std::max(0.0, local_ns_since(local_now_ns(), edge_local) * 1e-9);
     const double update_s = update_local_s - update_local_s * static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed)) * 1e-9;
     st.prev_cmd_ppb = old_command;
     st.update_after_edge_s = update_s;
@@ -6267,6 +6286,7 @@ static void pps_discipline_task(void *parameter)
     static double anchor_sorted[anchorWindow];
     int anchor_count = 0;
     int anchor_head = 0;
+    int64_t anchor_ref_ns = 0; // anchor_d is relative to this (integer part of the first d of the window)
 
     bool have_last = false;
     uint32_t last_ticks = 0;
@@ -6289,7 +6309,6 @@ static void pps_discipline_task(void *parameter)
         if (xQueueReceive(s_pps_timestamp_queue, &capture_event, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
             const int64_t edge_us = capture_event.approximate_edge_us; // ISR time (noisy), whole microseconds
-            const double isr_us = static_cast<double>(capture_event.isr_local_ns) / 1000.0; // the same, fine timebase
             const uint32_t ticks = capture_event.cap_ticks;            // hardware ticks (exact)
             const double hz = static_cast<double>(s_pps_capture_hz);
 
@@ -6408,7 +6427,16 @@ static void pps_discipline_task(void *parameter)
             // lowest 75 % of the last 64 values. The measured interrupt latency (see measure_pps_isr_latency_task)
             // is calculated with the same statistic and the same timebase, so the shape of the jitter cancels
             // out. A minimum would not do that: its bias depends on the noise.
-            const double d = isr_us - static_cast<double>(unwrapped) * 1e6 / hz;
+            // In ns. The ISR time and the tick time both grow with the uptime, so d is formed in integers (whole
+            // seconds of ticks) and kept relative to anchor_ref_ns: the doubles of the statistic stay small and exact to
+            // far below 1 ns at any uptime (review Z-13; with doubles of the absolute times the edge was up to 23 ns off
+            // after a year).
+            const uint64_t tick_hz = s_pps_capture_hz;
+            const int64_t tick_whole_ns = static_cast<int64_t>(unwrapped / tick_hz) * 1000000000LL;
+            const double tick_rest_ns = static_cast<double>(unwrapped % tick_hz) * 1e9 / hz;
+            if (anchor_count == 0)
+                anchor_ref_ns = capture_event.isr_local_ns - tick_whole_ns - llround(tick_rest_ns);
+            const double d = static_cast<double>(capture_event.isr_local_ns - tick_whole_ns - anchor_ref_ns) - tick_rest_ns;
             anchor_d[anchor_head] = d;
             anchor_head = (anchor_head + 1) % anchorWindow;
             if (anchor_count < anchorWindow)
@@ -6421,9 +6449,14 @@ static void pps_discipline_task(void *parameter)
             for (int i = 0; i < anchor_keep; ++i)
                 anchor_sum += anchor_sorted[i];
             const double d_central = anchor_sum / anchor_keep;
-            const double excess_us = d - d_central; // jitter of this edge relative to the central value
-            const double edge_local_us = isr_us - excess_us -
-                                         static_cast<double>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)) / 1000.0;
+            const double excess_ns = d - d_central; // jitter of this edge relative to the central value
+            (void)excess_ns;                        // only read by the debug log
+            // Edge = ISR time - excess - interrupt latency = tick time + central value of d - interrupt latency
+            const double edge_sub_ns = tick_rest_ns + d_central;
+            const int64_t edge_sub_whole_ns = llround(edge_sub_ns);
+            const local_instant_t edge_local{tick_whole_ns + anchor_ref_ns + edge_sub_whole_ns -
+                                                 static_cast<int64_t>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)),
+                                             edge_sub_ns - static_cast<double>(edge_sub_whole_ns)};
 
             // ---- 4. Phase correction ----
             if (!s_time_has_been_set.load() || s_time_setting_in_progress.load())
@@ -6452,18 +6485,19 @@ static void pps_discipline_task(void *parameter)
             }
             best_gap /= 1000; // us (debug output)
 
-            const double sys_us = static_cast<double>(now.tv_sec) * 1e6 + static_cast<double>(now.tv_usec);
-            const double mid_local_us = 0.5e-3 * (static_cast<double>(t1) + static_cast<double>(t2));
-            const double edge_sys_us = sys_us - (mid_local_us - edge_local_us); // system clock value at the edge
-
-            const int64_t edge_sec = static_cast<int64_t>(floor(edge_sys_us / 1e6 + 0.5));
-            const double phase_error_us = edge_sys_us - static_cast<double>(edge_sec) * 1e6;
+            // System clock value at the edge = reading - time since the edge. In integer ns: a double of the absolute
+            // system time has steps of 0.25 us.
+            const int64_t sys_ns = static_cast<int64_t>(now.tv_sec) * 1000000000LL + static_cast<int64_t>(now.tv_usec) * 1000LL;
+            const double since_edge_ns = 0.5 * (local_ns_since(t1, edge_local) + local_ns_since(t2, edge_local));
+            const int64_t edge_sec = floor_div(sys_ns - llround(since_edge_ns) + 500000000LL, 1000000000LL);
+            const double phase_error_us = (static_cast<double>(sys_ns - edge_sec * 1000000000LL) - since_edge_ns) * 1e-3;
 
             // Residual error after drift compensation (the actual quality figure)
             double resid_us = phase_error_us;
             if (s_clock_comp_valid.load(std::memory_order_acquire))
                 resid_us -= static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed)) * 1e-9 *
-                            (edge_local_us - static_cast<double>(s_clock_anchor_us.load(std::memory_order_relaxed)));
+                            ((static_cast<double>(edge_local.ns - s_clock_anchor_us.load(std::memory_order_relaxed) * 1000LL) +
+                              edge_local.frac_ns) * 1e-3);
 
             bool ok = false;
             if (fabs(phase_error_us) <= static_cast<double>(maxPhaseErrorUsToCorrect))
@@ -6494,13 +6528,13 @@ static void pps_discipline_task(void *parameter)
             if (ok)
             {
                 // Model clock: second of the edge + exact esp_timer time of the edge (hardware ticks)
-                model_publish(edge_sec, llround(edge_local_us * 1000.0),
+                model_publish(edge_sec, edge_local.ns,
                               s_clock_ppb.load(std::memory_order_relaxed));
 
                 // Set the system clock anchor only when the clock has settled
                 if (fabs(phase_error_us) <= settledPhaseUs)
                 {
-                    s_clock_anchor_us.store(llround(edge_local_us), std::memory_order_relaxed);
+                    s_clock_anchor_us.store(floor_div(edge_local.ns + 500, 1000), std::memory_order_relaxed);
                     s_clock_comp_valid.store(true, std::memory_order_release);
                 }
                 else
@@ -6510,10 +6544,10 @@ static void pps_discipline_task(void *parameter)
 
 #if PTP_FREE_RUNNING
                 // Measure the PTP clock against this edge and steer its frequency (the clock is not written)
-                ptp_servo_update(edge_sec, edge_local_us, ticks, est_valid);
+                ptp_servo_update(edge_sec, edge_local, ticks, est_valid);
 #else
                 // Set the PTP clock from the PPS second (not from the system clock, whose slew is still pending)
-                set_hardware_clock_from_pps(edge_sec, edge_local_us);
+                set_hardware_clock_from_pps(edge_sec, edge_local);
 #endif
                 s_ntp_reference_time_64 = get_current_time_in_ntp64_format();
                 s_ntp_reference_valid = true;
@@ -6529,7 +6563,8 @@ static void pps_discipline_task(void *parameter)
             if ((log_counter++ % 16) == 0)
             {
                 ESP_LOGI(TAG, "PPS: ppm=%.4f raw_phase=%.2f us resid=%.2f us jitter_excess=%.2f us d_central=%.2f gap=%lld us",
-                         est_ppm, phase_error_us, resid_us, excess_us, d_central, static_cast<long long>(best_gap));
+                         est_ppm, phase_error_us, resid_us, excess_ns * 1e-3,
+                         static_cast<double>(anchor_ref_ns) * 1e-3 + d_central * 1e-3, static_cast<long long>(best_gap));
 #if PTP_FREE_RUNNING
                 ptp_servo_log_status();
 #else
