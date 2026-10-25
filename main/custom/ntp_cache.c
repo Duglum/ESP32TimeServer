@@ -45,7 +45,8 @@ typedef struct
     uint64_t prev_t2; // latest exchange of this address (0 = none)
     uint64_t prev_t3;
     int64_t last_seen_ms;
-    int64_t rate_tat_us; // per-client rate limit: theoretical arrival time of the next request (esp_timer)
+    int64_t rate_tat_us;        // per-client rate limit: theoretical arrival time of the next request (esp_timer)
+    int64_t rate_tat_cookie_us; // the same for requests with a T2 cookie (see check_request_locked)
     bool is_active;
 } ntp_client_record_t;
 
@@ -56,7 +57,8 @@ typedef struct
     uint64_t prev_t2; // latest exchange of this address (0 = none)
     uint64_t prev_t3;
     int64_t last_seen_ms;
-    int64_t rate_tat_us; // per-client rate limit: theoretical arrival time of the next request (esp_timer)
+    int64_t rate_tat_us;        // per-client rate limit: theoretical arrival time of the next request (esp_timer)
+    int64_t rate_tat_cookie_us; // the same for requests with a T2 cookie (see check_request_locked)
     bool is_active;
 } ntp_client_record_ipv6_t;
 
@@ -178,6 +180,28 @@ static uint64_t interleaved_t3_locked(uint64_t record_t2, uint64_t record_t3, ui
         }
     }
     return 0;
+}
+
+// Must be called with s_mutex held.
+// Interleaved state and rate limit of a request. The interleaved lookup comes first: a request whose origin timestamp
+// is the T2 of an earlier exchange with this address carries a value that only the real client got (in the reply to
+// that exchange, see the exchange map), so it is counted in a bucket of its own with the same limit. A host sending
+// with the client's address but without its T2 fills the other bucket and can no longer exhaust the limit of the
+// client's interleaved requests (review S-17).
+static void check_request_locked(int64_t *rate_tat_us, int64_t *rate_tat_cookie_us, uint64_t record_t2,
+                                 uint64_t record_t3, uint32_t address_tag, uint64_t origin_timestamp,
+                                 uint64_t *interleaved_t3, bool *rate_limited)
+{
+    const uint64_t t3 = interleaved_t3_locked(record_t2, record_t3, address_tag, origin_timestamp);
+    const bool limited = rate_limited != NULL && rate_limit_exceeded(t3 != 0 ? rate_tat_cookie_us : rate_tat_us);
+    if (rate_limited != NULL)
+    {
+        *rate_limited = limited;
+    }
+    if (interleaved_t3 != NULL && !limited)
+    {
+        *interleaved_t3 = t3;
+    }
 }
 
 static bool port_matches(uint16_t record_port, uint16_t port)
@@ -302,16 +326,9 @@ bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, uint64_t origin_timest
         s_ipv4_records[selected].last_seen_ms = current_time_ms();
     }
     s_ipv4_records[selected].client_port = port;
-    const bool limited = rate_limited != NULL && rate_limit_exceeded(&s_ipv4_records[selected].rate_tat_us);
-    if (rate_limited != NULL)
-    {
-        *rate_limited = limited;
-    }
-    if (interleaved_t3 != NULL && !limited)
-    {
-        *interleaved_t3 = interleaved_t3_locked(s_ipv4_records[selected].prev_t2, s_ipv4_records[selected].prev_t3,
-                                                address_tag_ipv4(ip), origin_timestamp);
-    }
+    check_request_locked(&s_ipv4_records[selected].rate_tat_us, &s_ipv4_records[selected].rate_tat_cookie_us,
+                         s_ipv4_records[selected].prev_t2, s_ipv4_records[selected].prev_t3, address_tag_ipv4(ip),
+                         origin_timestamp, interleaved_t3, rate_limited);
 
     xSemaphoreGive(s_mutex);
     return true;
@@ -370,16 +387,9 @@ bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint16_t port, uin
         s_ipv6_records[selected].last_seen_ms = current_time_ms();
     }
     s_ipv6_records[selected].client_port = port;
-    const bool limited = rate_limited != NULL && rate_limit_exceeded(&s_ipv6_records[selected].rate_tat_us);
-    if (rate_limited != NULL)
-    {
-        *rate_limited = limited;
-    }
-    if (interleaved_t3 != NULL && !limited)
-    {
-        *interleaved_t3 = interleaved_t3_locked(s_ipv6_records[selected].prev_t2, s_ipv6_records[selected].prev_t3,
-                                                address_tag_ipv6(ip), origin_timestamp);
-    }
+    check_request_locked(&s_ipv6_records[selected].rate_tat_us, &s_ipv6_records[selected].rate_tat_cookie_us,
+                         s_ipv6_records[selected].prev_t2, s_ipv6_records[selected].prev_t3, address_tag_ipv6(ip),
+                         origin_timestamp, interleaved_t3, rate_limited);
 
     xSemaphoreGive(s_mutex);
     return true;

@@ -29,7 +29,8 @@ extern "C"
     // origin_timestamp: origin timestamp of the request (0 = none). *interleaved_t3 (may be NULL) is set to the T3 of
     // the earlier exchange with this address whose T2 equals the origin timestamp, 0 if there is none (basic mode).
     // rate_limited: NULL = no rate limit check (requests of this device to itself), otherwise set to true if the
-    // request exceeds the per-client rate limit (it must then be dropped without an answer)
+    // request exceeds the per-client rate limit (it must then be dropped without an answer). Requests that refer to an
+    // earlier exchange (interleaved T3 found) and the other requests of an address have separate limits.
     bool ntp_cache_find_or_create(uint32_t ip, uint16_t port, uint64_t origin_timestamp, uint64_t *interleaved_t3,
                                   bool *rate_limited);
     // Stores the exchange of an answered request (t2 = 0: none, the next request of the client gets a basic reply)
