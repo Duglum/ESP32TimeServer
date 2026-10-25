@@ -2851,7 +2851,9 @@ static std::atomic<bool> s_hw_tx_timestamp_recovery_requested{false}; // set whe
 
 // Transmits a complete Ethernet frame. If possible the EMAC returns the hardware TX time stamp, converted
 // to NTP format with the same drift compensation as T2. *tx_time_ntp64 stays 0 if no usable time stamp exists.
-static esp_err_t transmit_with_hw_timestamp(esp_eth_handle_t handle, uint8_t *frame, size_t length, uint64_t *tx_time_ntp64)
+// noinline: called once (process_hardware_ntp_request); inlined, its locals would deepen every other call chain of
+// that function (e.g. the SHA-256 of the authentication) on the stack of the hardware NTP task
+__attribute__((noinline)) static esp_err_t transmit_with_hw_timestamp(esp_eth_handle_t handle, uint8_t *frame, size_t length, uint64_t *tx_time_ntp64)
 {
     if (tx_time_ntp64 != nullptr)
         *tx_time_ntp64 = 0;
@@ -2938,7 +2940,7 @@ static uint64_t compensate_basic_t3(uint64_t t3, bool ipv6, bool authenticated)
 }
 
 // Called by the hardware NTP task (only writer) with the uncompensated software T3 and the hardware TX time stamp
-static void update_tx_delay_estimate(bool ipv6, bool authenticated, uint64_t software_t3, uint64_t hardware_t3)
+__attribute__((noinline)) static void update_tx_delay_estimate(bool ipv6, bool authenticated, uint64_t software_t3, uint64_t hardware_t3)
 {
     if (software_t3 == 0 || hardware_t3 == 0)
         return;
@@ -3156,12 +3158,21 @@ static uint16_t ipv6_udp_checksum(const uint8_t *source, const uint8_t *destinat
 
 static uint64_t read_ntp_timestamp(const uint8_t *packet, size_t offset);
 
-static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *frame, uint32_t length, void *netif, void *info)
+// Answers a hardware time stamped NTP request of either family (review E-12: one function instead of an IPv4 and an
+// IPv6 copy). Validation, authentication, client record, rate limit, status, reply, transmission and the stored
+// exchange are the same for both; the family decides the client address, the IP header, the checksums (IPv4: header
+// checksum, UDP checksum 0; IPv6: UDP checksum) and which transmit delay estimate is used.
+// T3 is read right before the transmission: between the reading and transmit_with_hw_timestamp() only the reply and
+// the headers of the frame are completed.
+static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *frame, uint32_t length, void *netif, void *info,
+                                              bool ipv6)
 {
     size_t ip_offset = 0;
     size_t udp_offset = 0;
     const eth_mac_time_t *rx_timestamp = static_cast<const eth_mac_time_t *>(info);
-    if (!is_ipv4_ntp_request(frame, length, &ip_offset, &udp_offset) || !timestamp_is_valid(rx_timestamp))
+    const bool parsed = ipv6 ? is_ipv6_ntp_request(frame, length, &ip_offset, &udp_offset)
+                             : is_ipv4_ntp_request(frame, length, &ip_offset, &udp_offset);
+    if (!parsed || !timestamp_is_valid(rx_timestamp))
     {
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
@@ -3202,16 +3213,26 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     const bool authenticated_request = false;
 #endif
 
-    const uint32_t client_ip = (static_cast<uint32_t>(frame[ip_offset + 12]) << 24) |
-                               (static_cast<uint32_t>(frame[ip_offset + 13]) << 16) |
-                               (static_cast<uint32_t>(frame[ip_offset + 14]) << 8) |
-                               frame[ip_offset + 15];
+    // Client address: IPv4 as a number in host order, IPv6 as the 16 bytes of the source address
+    uint32_t client_ipv4 = 0;
+    struct in6_addr client_ipv6{};
+    if (ipv6)
+        memcpy(&client_ipv6, frame + ip_offset + 8, sizeof(client_ipv6));
+    else
+        client_ipv4 = (static_cast<uint32_t>(frame[ip_offset + 12]) << 24) |
+                      (static_cast<uint32_t>(frame[ip_offset + 13]) << 16) |
+                      (static_cast<uint32_t>(frame[ip_offset + 14]) << 8) |
+                      frame[ip_offset + 15];
     const uint16_t client_port = static_cast<uint16_t>((frame[udp_offset] << 8) | frame[udp_offset + 1]);
     const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
     uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
     bool rate_limited = false;
-    uint16_t cache_slot = NTP_CACHE_SLOT_NONE; // record of the client, reused by ntp_cache_update below
-    if (!ntp_cache_find_or_create(client_ip, client_port, client_origin_timestamp, &interleaved_t3, &rate_limited, &cache_slot))
+    uint16_t cache_slot = NTP_CACHE_SLOT_NONE; // record of the client, reused by the cache update below
+    const bool cached = ipv6 ? ntp_cache_find_or_create_ipv6(&client_ipv6, client_port, client_origin_timestamp,
+                                                             &interleaved_t3, &rate_limited, &cache_slot)
+                             : ntp_cache_find_or_create(client_ipv4, client_port, client_origin_timestamp,
+                                                        &interleaved_t3, &rate_limited, &cache_slot);
+    if (!cached)
     {
         release_hardware_ntp_request_buffer(frame);
         return ESP_OK;
@@ -3228,10 +3249,21 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     if (s_mqtt_on)
     {
         struct sockaddr_storage source_address{};
-        auto *source_ipv4_address = reinterpret_cast<struct sockaddr_in *>(&source_address);
-        source_ipv4_address->sin_family = AF_INET;
-        source_ipv4_address->sin_port = htons(client_port);
-        memcpy(&source_ipv4_address->sin_addr, frame + ip_offset + 12, sizeof(source_ipv4_address->sin_addr));
+        if (ipv6)
+        {
+            auto *source_ipv6_address = reinterpret_cast<struct sockaddr_in6 *>(&source_address);
+            source_ipv6_address->sin6_family = AF_INET6;
+            source_ipv6_address->sin6_port = htons(client_port);
+            source_ipv6_address->sin6_scope_id = esp_netif_get_netif_impl_index(static_cast<esp_netif_t *>(netif));
+            source_ipv6_address->sin6_addr = client_ipv6;
+        }
+        else
+        {
+            auto *source_ipv4_address = reinterpret_cast<struct sockaddr_in *>(&source_address);
+            source_ipv4_address->sin_family = AF_INET;
+            source_ipv4_address->sin_port = htons(client_port);
+            memcpy(&source_ipv4_address->sin_addr, frame + ip_offset + 12, sizeof(source_ipv4_address->sin_addr));
+        }
         s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
         if (authenticated_request)
             s_ntp_authenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
@@ -3261,7 +3293,8 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     build_ntp_reply(request, reply, version, receive_time, status);
 
     // Interleaved mode (RFC 9769): the origin timestamp is the T2 of an earlier exchange with this client (found by
-    // ntp_cache_find_or_create), the reply carries the T3 of that exchange
+    // ntp_cache_find_or_create), the reply carries the T3 of that exchange. In basic mode T3 is written in the
+    // transmit loop below.
     const uint64_t client_receive_timestamp = read_ntp_timestamp(request, 32);
     const uint64_t client_transmit_timestamp = read_ntp_timestamp(request, 40);
     const bool interleaved_reply = interleaved_t3 != 0 && client_receive_timestamp != client_transmit_timestamp;
@@ -3270,35 +3303,39 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         write_ntp_timestamp(reply, 24, client_receive_timestamp);
         write_ntp_timestamp(reply, 40, interleaved_t3);
     }
-    else
-    {
-        write_ntp_timestamp(reply, 40, get_current_time_in_ntp64_format());
-    }
 
-    uint8_t response_frame[RAW_NTP_FRAME_SIZE] = {};
+    // Response frame: the Ethernet and IP addresses of the request swapped, NTP port to the client's port. The
+    // lengths and checksums depend on the reply length and are set in the transmit loop.
+    uint8_t response_frame[RAW_IPV6_NTP_FRAME_SIZE] = {}; // the larger of the two families
+    static_assert(RAW_IPV6_NTP_FRAME_SIZE >= RAW_NTP_FRAME_SIZE, "response frame buffer");
     memcpy(response_frame, frame + 6, 6);
     memcpy(response_frame + 6, frame, 6);
-    response_frame[12] = 0x08;
-    response_frame[13] = 0x00;
     uint8_t *ip = response_frame + ETH_HEADER_SIZE;
-    ip[0] = 0x45;
-    ip[2] = 0;
-    ip[3] = IPV4_HEADER_SIZE + UDP_HEADER_SIZE + NTP_PACKET_SIZE;
-    ip[8] = 64;
-    ip[9] = IPPROTO_UDP;
-    memcpy(ip + 12, frame + ip_offset + 16, 4);
-    memcpy(ip + 16, frame + ip_offset + 12, 4);
-    const uint16_t checksum = internet_checksum(ip, IPV4_HEADER_SIZE);
-    ip[10] = static_cast<uint8_t>(checksum >> 8);
-    ip[11] = static_cast<uint8_t>(checksum);
-    uint8_t *udp = ip + IPV4_HEADER_SIZE;
-    udp[0] = 0;
+    const size_t ip_header_size = ipv6 ? IPV6_HEADER_SIZE : IPV4_HEADER_SIZE;
+    if (ipv6)
+    {
+        response_frame[12] = 0x86;
+        response_frame[13] = 0xDD;
+        ip[0] = 0x60;
+        ip[6] = IPPROTO_UDP;
+        ip[7] = 64;
+        memcpy(ip + 8, frame + ip_offset + 24, 16);
+        memcpy(ip + 24, frame + ip_offset + 8, 16);
+    }
+    else
+    {
+        response_frame[12] = 0x08;
+        response_frame[13] = 0x00;
+        ip[0] = 0x45;
+        ip[8] = 64;
+        ip[9] = IPPROTO_UDP;
+        memcpy(ip + 12, frame + ip_offset + 16, 4);
+        memcpy(ip + 16, frame + ip_offset + 12, 4);
+    }
+    uint8_t *udp = ip + ip_header_size;
     udp[1] = static_cast<uint8_t>(NTP_PORT);
     udp[2] = frame[udp_offset];
     udp[3] = frame[udp_offset + 1];
-    udp[4] = 0;
-    udp[5] = UDP_HEADER_SIZE + NTP_PACKET_SIZE;
-    memcpy(udp + UDP_HEADER_SIZE, reply, NTP_PACKET_SIZE);
 
     uint64_t own_transmit_time = 0; // T3 as written into a basic mode response (compensated)
     uint64_t raw_transmit_time = 0; // clock reading before the transmit call
@@ -3314,7 +3351,7 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
                 for (uint32_t attempt = 0; attempt < HARDWARE_NTP_TRANSMIT_RETRY_COUNT; ++attempt)
                 {
                     raw_transmit_time = get_current_time_in_ntp64_format();
-                    own_transmit_time = compensate_basic_t3(raw_transmit_time, false, authenticated_request);
+                    own_transmit_time = compensate_basic_t3(raw_transmit_time, ipv6, authenticated_request);
                     if (!interleaved_reply)
                     {
                         write_ntp_timestamp(reply, 40, own_transmit_time);
@@ -3325,18 +3362,34 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
                     if (authenticated_request && !ntp_auth_append_response(reply, sizeof(reply), &reply_length, authentication_key_id))
                         break;
 #endif
-                    ip[2] = static_cast<uint8_t>((IPV4_HEADER_SIZE + UDP_HEADER_SIZE + reply_length) >> 8);
-                    ip[3] = static_cast<uint8_t>(IPV4_HEADER_SIZE + UDP_HEADER_SIZE + reply_length);
-                    ip[10] = 0;
-                    ip[11] = 0;
-                    const uint16_t refreshed_ip_checksum = internet_checksum(ip, IPV4_HEADER_SIZE);
-                    ip[10] = static_cast<uint8_t>(refreshed_ip_checksum >> 8);
-                    ip[11] = static_cast<uint8_t>(refreshed_ip_checksum);
-                    udp[4] = static_cast<uint8_t>((UDP_HEADER_SIZE + reply_length) >> 8);
-                    udp[5] = static_cast<uint8_t>(UDP_HEADER_SIZE + reply_length);
-                    memcpy(udp + UDP_HEADER_SIZE, reply, reply_length);
+                    if (ipv6)
+                    {
+                        ip[4] = static_cast<uint8_t>((UDP_HEADER_SIZE + reply_length) >> 8);
+                        ip[5] = static_cast<uint8_t>(UDP_HEADER_SIZE + reply_length);
+                        udp[4] = static_cast<uint8_t>((UDP_HEADER_SIZE + reply_length) >> 8);
+                        udp[5] = static_cast<uint8_t>(UDP_HEADER_SIZE + reply_length);
+                        memcpy(udp + UDP_HEADER_SIZE, reply, reply_length);
+                        udp[6] = 0;
+                        udp[7] = 0;
+                        const uint16_t udp_checksum = ipv6_udp_checksum(ip + 8, ip + 24, udp, UDP_HEADER_SIZE + reply_length);
+                        udp[6] = static_cast<uint8_t>(udp_checksum >> 8);
+                        udp[7] = static_cast<uint8_t>(udp_checksum);
+                    }
+                    else
+                    {
+                        ip[2] = static_cast<uint8_t>((IPV4_HEADER_SIZE + UDP_HEADER_SIZE + reply_length) >> 8);
+                        ip[3] = static_cast<uint8_t>(IPV4_HEADER_SIZE + UDP_HEADER_SIZE + reply_length);
+                        ip[10] = 0;
+                        ip[11] = 0;
+                        const uint16_t ip_checksum = internet_checksum(ip, IPV4_HEADER_SIZE);
+                        ip[10] = static_cast<uint8_t>(ip_checksum >> 8);
+                        ip[11] = static_cast<uint8_t>(ip_checksum);
+                        udp[4] = static_cast<uint8_t>((UDP_HEADER_SIZE + reply_length) >> 8);
+                        udp[5] = static_cast<uint8_t>(UDP_HEADER_SIZE + reply_length);
+                        memcpy(udp + UDP_HEADER_SIZE, reply, reply_length);
+                    }
 
-                    result = transmit_with_hw_timestamp(handle, response_frame, ETH_HEADER_SIZE + IPV4_HEADER_SIZE + UDP_HEADER_SIZE + reply_length, &hardware_transmit_time);
+                    result = transmit_with_hw_timestamp(handle, response_frame, ETH_HEADER_SIZE + ip_header_size + UDP_HEADER_SIZE + reply_length, &hardware_transmit_time);
                     if (result != ESP_ERR_NO_MEM)
                         break;
                     esp_rom_delay_us(HARDWARE_NTP_TRANSMIT_RETRY_DELAY_US);
@@ -3350,8 +3403,12 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         // Without a hardware TX time stamp (e.g. the frame waited behind others in the TX queue) the stored T2 is 0, so
         // the next request is answered in basic mode: an interleaved reply would carry the software T3, which misses
         // the queueing delay of this frame
-        ntp_cache_update(client_ip, client_port, cache_slot, hardware_transmit_time != 0 ? receive_time : 0, hardware_transmit_time);
-        update_tx_delay_estimate(false, authenticated_request, raw_transmit_time, hardware_transmit_time);
+        const uint64_t stored_t2 = hardware_transmit_time != 0 ? receive_time : 0;
+        if (ipv6)
+            ntp_cache_update_ipv6(&client_ipv6, client_port, cache_slot, stored_t2, hardware_transmit_time);
+        else
+            ntp_cache_update(client_ipv4, client_port, cache_slot, stored_t2, hardware_transmit_time);
+        update_tx_delay_estimate(ipv6, authenticated_request, raw_transmit_time, hardware_transmit_time);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
         s_last_ntp_response_us.store(response_us, std::memory_order_relaxed);
@@ -3377,205 +3434,6 @@ static uint64_t read_ntp_timestamp(const uint8_t *packet, size_t offset)
            (static_cast<uint64_t>(packet[offset + 5]) << 16) |
            (static_cast<uint64_t>(packet[offset + 6]) << 8) |
            static_cast<uint64_t>(packet[offset + 7]);
-}
-
-static esp_err_t process_hardware_ipv6_ntp_request(esp_eth_handle_t handle, uint8_t *frame, uint32_t length, void *netif, void *info)
-{
-    size_t ip_offset = 0;
-    size_t udp_offset = 0;
-    const eth_mac_time_t *rx_timestamp = static_cast<const eth_mac_time_t *>(info);
-    if (!is_ipv6_ntp_request(frame, length, &ip_offset, &udp_offset) || !timestamp_is_valid(rx_timestamp))
-    {
-        release_hardware_ntp_request_buffer(frame);
-        return ESP_OK;
-    }
-
-    const eth_mac_time_t receive_timestamp = *rx_timestamp;
-    const uint8_t *request = frame + udp_offset + UDP_HEADER_SIZE;
-    const uint8_t version = (request[0] >> 3) & 0x07;
-    const uint8_t mode = request[0] & 0x07;
-    if (version < 3 || version > 4 || mode != 3)
-    {
-        release_hardware_ntp_request_buffer(frame);
-        return ESP_OK;
-    }
-
-#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
-    const size_t request_length = static_cast<size_t>((frame[udp_offset + 4] << 8) | frame[udp_offset + 5]) - UDP_HEADER_SIZE;
-    uint32_t authentication_key_id = 0;
-    const ntp_auth_result_t authentication_result = ntp_auth_verify_request(request, request_length, version, &authentication_key_id);
-    if (authentication_result != ntp_auth_result_t::unauthenticated && authentication_result != ntp_auth_result_t::valid)
-    {
-#if MQTT_ENABLED
-        if (s_mqtt_on)
-        {
-            s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-            if (version == 4)
-                s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-            else
-                s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-            s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
-        }
-#endif
-        release_hardware_ntp_request_buffer(frame);
-        return ESP_OK;
-    }
-    const bool authenticated_request = authentication_result == ntp_auth_result_t::valid;
-#else
-    const bool authenticated_request = false;
-#endif
-
-    struct in6_addr client_ip{};
-    memcpy(&client_ip, frame + ip_offset + 8, sizeof(client_ip));
-    const uint16_t client_port = static_cast<uint16_t>((frame[udp_offset] << 8) | frame[udp_offset + 1]);
-    const uint64_t client_origin_timestamp = read_ntp_timestamp(request, 24);
-    uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
-    bool rate_limited = false;
-    uint16_t cache_slot = NTP_CACHE_SLOT_NONE; // record of the client, reused by ntp_cache_update_ipv6 below
-    if (!ntp_cache_find_or_create_ipv6(&client_ip, client_port, client_origin_timestamp, &interleaved_t3, &rate_limited, &cache_slot))
-    {
-        release_hardware_ntp_request_buffer(frame);
-        return ESP_OK;
-    }
-    if (rate_limited) // over the per-client rate limit: dropped without an answer
-    {
-        s_ntp_rate_limited_requests.fetch_add(1, std::memory_order_relaxed);
-        release_hardware_ntp_request_buffer(frame);
-        return ESP_OK;
-    }
-
-    const uint64_t receive_time = ntp64_from_hardware_timestamp(receive_timestamp);
-#if MQTT_ENABLED
-    if (s_mqtt_on)
-    {
-        struct sockaddr_storage source_address{};
-        auto *source_ipv6_address = reinterpret_cast<struct sockaddr_in6 *>(&source_address);
-        source_ipv6_address->sin6_family = AF_INET6;
-        source_ipv6_address->sin6_port = htons(client_port);
-        source_ipv6_address->sin6_scope_id = esp_netif_get_netif_impl_index(static_cast<esp_netif_t *>(netif));
-        source_ipv6_address->sin6_addr = client_ip;
-        s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
-        if (authenticated_request)
-            s_ntp_authenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
-        else
-            s_ntp_unauthenticated_valid_requests.fetch_add(1, std::memory_order_relaxed);
-        mqtt_enqueue_ntp_request(source_address);
-    }
-#endif
-    uint8_t reply[NTP_MAX_PACKET_SIZE] = {};
-    const ntp_reply_status_t status = get_ntp_reply_status();
-    if (!status.serve) // PPS lost for longer than the holdover, set to stop serving
-    {
-        release_hardware_ntp_request_buffer(frame);
-        return ESP_OK;
-    }
-#if MQTT_ENABLED
-    if (s_mqtt_on)
-    {
-        if (status.gnss_synchronized && status.pps_disciplined)
-            s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
-        if (!status.gnss_synchronized)
-            s_ntp_responses_gnss_unsynchronized.fetch_add(1, std::memory_order_relaxed);
-        if (!status.pps_disciplined)
-            s_ntp_responses_pps_undisciplined.fetch_add(1, std::memory_order_relaxed);
-    }
-#endif
-    build_ntp_reply(request, reply, version, receive_time, status);
-
-    // Interleaved mode (RFC 9769), see the IPv4 path
-    const uint64_t client_receive_timestamp = read_ntp_timestamp(request, 32);
-    const uint64_t client_transmit_timestamp = read_ntp_timestamp(request, 40);
-    const bool interleaved_reply = interleaved_t3 != 0 && client_receive_timestamp != client_transmit_timestamp;
-    if (interleaved_reply)
-    {
-        write_ntp_timestamp(reply, 24, client_receive_timestamp);
-        write_ntp_timestamp(reply, 40, interleaved_t3);
-    }
-    else
-    {
-        write_ntp_timestamp(reply, 40, get_current_time_in_ntp64_format());
-    }
-
-    uint8_t response_frame[RAW_IPV6_NTP_FRAME_SIZE] = {};
-    memcpy(response_frame, frame + 6, 6);
-    memcpy(response_frame + 6, frame, 6);
-    response_frame[12] = 0x86;
-    response_frame[13] = 0xDD;
-    uint8_t *ip = response_frame + ETH_HEADER_SIZE;
-    ip[0] = 0x60;
-    ip[5] = UDP_HEADER_SIZE + NTP_PACKET_SIZE;
-    ip[6] = IPPROTO_UDP;
-    ip[7] = 64;
-    memcpy(ip + 8, frame + ip_offset + 24, 16);
-    memcpy(ip + 24, frame + ip_offset + 8, 16);
-    uint8_t *udp = ip + IPV6_HEADER_SIZE;
-    udp[1] = static_cast<uint8_t>(NTP_PORT);
-    udp[2] = frame[udp_offset];
-    udp[3] = frame[udp_offset + 1];
-    udp[5] = UDP_HEADER_SIZE + NTP_PACKET_SIZE;
-    memcpy(udp + UDP_HEADER_SIZE, reply, NTP_PACKET_SIZE);
-    const uint16_t checksum = ipv6_udp_checksum(ip + 8, ip + 24, udp, UDP_HEADER_SIZE + NTP_PACKET_SIZE);
-    udp[6] = static_cast<uint8_t>(checksum >> 8);
-    udp[7] = static_cast<uint8_t>(checksum);
-
-    uint64_t own_transmit_time = 0; // T3 as written into a basic mode response (compensated)
-    uint64_t raw_transmit_time = 0; // clock reading before the transmit call
-    uint64_t hardware_transmit_time = 0;
-    esp_err_t result = ESP_ERR_INVALID_STATE;
-    if (s_hardware_ntp_accepting.load(std::memory_order_acquire) && s_hardware_ntp_transmit_mutex != nullptr &&
-        xSemaphoreTake(s_hardware_ntp_transmit_mutex, portMAX_DELAY) == pdTRUE)
-    {
-        if (s_hardware_ntp_accepting.load(std::memory_order_acquire))
-        {
-            for (uint32_t attempt = 0; attempt < HARDWARE_NTP_TRANSMIT_RETRY_COUNT; ++attempt)
-            {
-                raw_transmit_time = get_current_time_in_ntp64_format();
-                own_transmit_time = compensate_basic_t3(raw_transmit_time, true, authenticated_request);
-                if (!interleaved_reply)
-                {
-                    write_ntp_timestamp(reply, 40, own_transmit_time);
-                }
-                size_t reply_length = NTP_PACKET_SIZE;
-#if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
-                if (authenticated_request && !ntp_auth_append_response(reply, sizeof(reply), &reply_length, authentication_key_id))
-                    break;
-#endif
-                ip[4] = static_cast<uint8_t>((UDP_HEADER_SIZE + reply_length) >> 8);
-                ip[5] = static_cast<uint8_t>(UDP_HEADER_SIZE + reply_length);
-                udp[4] = static_cast<uint8_t>((UDP_HEADER_SIZE + reply_length) >> 8);
-                udp[5] = static_cast<uint8_t>(UDP_HEADER_SIZE + reply_length);
-                memcpy(udp + UDP_HEADER_SIZE, reply, reply_length);
-                udp[6] = 0;
-                udp[7] = 0;
-                const uint16_t refreshed_checksum = ipv6_udp_checksum(ip + 8, ip + 24, udp, UDP_HEADER_SIZE + reply_length);
-                udp[6] = static_cast<uint8_t>(refreshed_checksum >> 8);
-                udp[7] = static_cast<uint8_t>(refreshed_checksum);
-                result = transmit_with_hw_timestamp(handle, response_frame, ETH_HEADER_SIZE + IPV6_HEADER_SIZE + UDP_HEADER_SIZE + reply_length, &hardware_transmit_time);
-                if (result != ESP_ERR_NO_MEM)
-                    break;
-                esp_rom_delay_us(HARDWARE_NTP_TRANSMIT_RETRY_DELAY_US);
-            }
-        }
-        xSemaphoreGive(s_hardware_ntp_transmit_mutex);
-    }
-    if (result == ESP_OK)
-    {
-        // Without a hardware TX time stamp the next request is answered in basic mode (see the IPv4 path)
-        ntp_cache_update_ipv6(&client_ip, client_port, cache_slot, hardware_transmit_time != 0 ? receive_time : 0, hardware_transmit_time);
-        update_tx_delay_estimate(true, authenticated_request, raw_transmit_time, hardware_transmit_time);
-        const int64_t response_us = esp_timer_get_time();
-        s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
-        s_last_ntp_response_us.store(response_us, std::memory_order_relaxed);
-#if MQTT_ENABLED
-        if (s_mqtt_on)
-        {
-            s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
-        }
-#endif
-    }
-
-    release_hardware_ntp_request_buffer(frame);
-    return result;
 }
 
 static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uint32_t length, void *netif, void *info)
@@ -3681,12 +3539,10 @@ static void hardware_ntp_server_task(void *parameter)
     {
         if (xQueueReceive(s_hardware_ntp_request_queue, &ntp_request, portMAX_DELAY) == pdTRUE)
         {
-            if (ntp_request.frame[12] == 0x86 && ntp_request.frame[13] == 0xDD && IPV6_ENABLED)
-                process_hardware_ipv6_ntp_request(ntp_request.handle, ntp_request.frame, ntp_request.length,
-                                                  ntp_request.netif, &ntp_request.rx_timestamp);
-            else if (IPV4_ENABLED)
+            const bool ipv6 = ntp_request.frame[12] == 0x86 && ntp_request.frame[13] == 0xDD;
+            if (ipv6 ? IPV6_ENABLED : IPV4_ENABLED)
                 process_hardware_ntp_request(ntp_request.handle, ntp_request.frame, ntp_request.length,
-                                             ntp_request.netif, &ntp_request.rx_timestamp);
+                                             ntp_request.netif, &ntp_request.rx_timestamp, ipv6);
             else
                 release_hardware_ntp_request_buffer(ntp_request.frame);
 #if CALCULATE_STACK_SIZES_ENABLED
