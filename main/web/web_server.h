@@ -25,6 +25,8 @@ struct web_app_status_t
     bool gnss_locked;
     bool stratum_one;
     bool pps_holdover;            // stratum 1 in the PPS holdover (PPS lost)
+    bool gnss_fix_waiting;        // no stratum 1 yet: the minimum GNSS fix age after the start is not reached
+    uint32_t gnss_fix_age_s;      // age of the current GNSS fix (0 = none)
     bool ublox_receiver;          // UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED: the baud rate is detected automatically
     uint32_t gnss_baud_in_use;
     char gnss_dynamic_model[16];  // U-Blox UBX: dynamic platform model read from the receiver ("" = not known)

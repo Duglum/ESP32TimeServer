@@ -416,6 +416,7 @@
       gnss_pps_pin: String(s.gnss_pps_pin),
       gnss_baud: String(s.gnss_baud),
       ptp_loopback_pin: s.ptp_loopback_pin < 0 ? '' : String(s.ptp_loopback_pin),
+      gnss_min_fix_age: String(s.gnss_min_fix_age),
       pps_holdover: String(s.pps_holdover),
       pps_lost_serve: s.pps_lost_serve,
       pps_lost_serve_min: String(s.pps_lost_serve_min),
@@ -499,7 +500,7 @@
       if (name === 'ptp_loopback_pin' && value === '') text = t('off');
       if (name === 'led_brightness') text += ' %';
       if (name === 'mqtt_report_period') text += ' s';
-      if (name === 'pps_holdover') text = value === '0' ? t('off') : text + ' s';
+      if (name === 'pps_holdover' || name === 'gnss_min_fix_age') text = value === '0' ? t('off') : text + ' s';
       if (name === 'pps_lost_serve_min') text = value === '0' ? t('no limit') : text + ' min';
       if (name === 'ntp_client_rate_limit') text = value === '0' ? t('off') : t('{n} per second', { n: value });
       if (name === 'pps_dispersion') text = (lang === 'de' ? text.replace('.', ',') : text) + ' ms/s';
@@ -610,6 +611,7 @@
       gnss_pps_pin: pin('gnss_pps_pin', 'PPS pin'),
       gnss_baud: Number(f.gnss_baud.value),
       ptp_loopback_pin: pin('ptp_loopback_pin', 'PTP PPS loopback pin', true),
+      gnss_min_fix_age: Number(f.gnss_min_fix_age.value),
       pps_holdover: Number(f.pps_holdover.value),
       pps_lost_serve: f.pps_lost_serve.checked,
       pps_lost_serve_min: Number(f.pps_lost_serve_min.value),
@@ -688,6 +690,10 @@
     if (f.ntp_client_rate_limit.value.trim() === '' || !Number.isInteger(body.ntp_client_rate_limit) ||
         body.ntp_client_rate_limit < 0 || body.ntp_client_rate_limit > 10000) {
       throw new Error(t('Rate limit per client: 0 to 10000 requests per second'));
+    }
+    if (f.gnss_min_fix_age.value.trim() === '' || !Number.isInteger(body.gnss_min_fix_age) ||
+        body.gnss_min_fix_age < 0 || body.gnss_min_fix_age > 3600) {
+      throw new Error(t('Minimum GNSS fix age: 0 to 3600 s'));
     }
     if (!Number.isInteger(body.pps_holdover) || body.pps_holdover < 0 || body.pps_holdover > 600) {
       throw new Error(t('PPS holdover: 0 to 600 s'));
@@ -770,9 +776,11 @@
     const st = state.status;
     setHost(state.settings.fqdn);
     yesNo($('st-time'), st.stratum_one, st.pps_holdover ? t('stratum 1, PPS holdover (PPS lost)') : t('stratum 1, GNSS and PPS locked'),
-      st.time_set
-        ? t('not stratum 1 (PPS {pps}, GNSS {gnss})', { pps: st.pps_active ? t('active') : t('missing'), gnss: st.gnss_locked ? t('locked') : t('not locked') })
-        : t('waiting for the GNSS time'));
+      !st.time_set
+        ? t('waiting for the GNSS time')
+        : st.gnss_fix_waiting
+          ? t('not stratum 1 yet: GNSS fix {age} s old, {min} s required after the start', { age: st.gnss_fix_age_s, min: state.settings.gnss_min_fix_age })
+          : t('not stratum 1 (PPS {pps}, GNSS {gnss})', { pps: st.pps_active ? t('active') : t('missing'), gnss: st.gnss_locked ? t('locked') : t('not locked') }));
     $('st-utc').textContent = st.utc || t('not set yet');
     const gnss = [st.ublox_receiver ? t('U-Blox UBX protocol') : t('NMEA standard protocol')];
     if (st.gnss_baud_in_use) gnss.push(t('{baud} baud', { baud: st.gnss_baud_in_use }));

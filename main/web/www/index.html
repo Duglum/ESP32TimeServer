@@ -170,6 +170,15 @@
           </label>
         </div>
 
+        <h3 class="sub-heading">After a start</h3>
+        <div class="grid">
+          <label class="span2"><span class="lt">Minimum GNSS fix age before stratum 1 (s, 0 = off)</span>
+            <input type="number" name="gnss_min_fix_age" min="0" max="3600">
+            <small class="note">0 to 3600 s. After a cold start (no backup battery, or switched off for a long time) a GNSS receiver may report UTC off by whole seconds until it has received the leap seconds, which the satellites broadcast every 12.5 minutes. With a value the server answers at stratum 16 after each start until the GNSS time has been valid for this long without a gap of more than 30 s; then the time is checked against the GNSS once more (a wrong second is corrected) and stratum 1 is allowed until the next start. Recommended: 750 s (12.5 min) for a receiver without backup battery. Takes effect at once with Apply while the server waits; once stratum 1 was reached, a change applies from the next start. A u-blox receiver also reports when its UTC time is fully resolved, which is checked in any case.</small>
+            <small class="def" data-for="gnss_min_fix_age"></small>
+          </label>
+        </div>
+
         <h3 class="sub-heading">When the PPS is lost</h3>
         <p class="hint first">The PPS counts as lost after 3.5 s without a pulse. The settings below take effect at once with Apply. When the PPS and the GNSS are back, the server returns to stratum 1 by itself.</p>
         <div class="grid">

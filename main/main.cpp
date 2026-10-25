@@ -1484,6 +1484,14 @@ static std::atomic<bool> s_ntp_pps_missing{false};
 static std::atomic<bool> s_ntp_gnss_invalid{false};
 static std::atomic<bool> s_ntp_sanity_mismatch{false};
 static std::atomic<bool> s_ntp_sync_stale{false};
+// Minimum GNSS fix age before stratum 1 (review Z-04, web setting, live, 0 = off): after a cold start a receiver can
+// report UTC with a wrong number of leap seconds until it has received the UTC parameters (broadcast every 12.5 min).
+// Stratum 1 needs a sync check (GNSS second against the clock, step if needed) made when the fix was at least this old;
+// once passed, it holds until the next start. See gnss_fix_note_valid() and gnss_time_sync_task().
+static std::atomic<int64_t> s_gnss_min_fix_age_us{0};
+static std::atomic<int64_t> s_gnss_fix_since_us{0};      // start of the current fix (esp_timer, 0 = none yet)
+static std::atomic<int64_t> s_gnss_fix_last_valid_us{0}; // last valid GNSS reading of the current fix
+static std::atomic<bool> s_gnss_fix_qualified{false};    // the sync check after the minimum fix age was made
 static constexpr int64_t Sync_Stale_After_Us = static_cast<int64_t>(periodicGNSSRefreshEveryThisNumberOfMinutes) * 60LL * 1000000LL * 3LL;
 static constexpr int64_t Gnss_Validity_Timeout_Us = 3500000LL;
 static constexpr int64_t Pps_Lost_Coast_Max_Us = 3600LL * 1000000LL; // the model clock keeps the learned rate for one hour
@@ -1735,9 +1743,41 @@ static void sync_state_reset_failure_counters()
     }
 }
 
+// A valid GNSS reading (sync candidate or validity check of the GNSS time sync task). The fix starts again after a
+// gap of Gnss_Invalid_Reacquisition_After_Us without a valid reading.
+static void gnss_fix_note_valid(int64_t now_us)
+{
+    const int64_t last_us = s_gnss_fix_last_valid_us.load(std::memory_order_relaxed);
+    if (s_gnss_fix_since_us.load(std::memory_order_relaxed) == 0 || now_us - last_us > Gnss_Invalid_Reacquisition_After_Us)
+        s_gnss_fix_since_us.store(now_us, std::memory_order_relaxed);
+    s_gnss_fix_last_valid_us.store(now_us, std::memory_order_relaxed);
+}
+
+// Age of the current GNSS fix in us (0 = no fix)
+static int64_t gnss_fix_age_us(int64_t now_us)
+{
+    const int64_t since_us = s_gnss_fix_since_us.load(std::memory_order_relaxed);
+    if (since_us == 0 || now_us - s_gnss_fix_last_valid_us.load(std::memory_order_relaxed) > Gnss_Invalid_Reacquisition_After_Us)
+        return 0;
+    return now_us - since_us;
+}
+
 static void sync_state_note_success(time_t update_delta)
 {
     set_gnss_lock_state(true);
+
+    // A sync check made with a fix of at least the minimum age (or with the setting off) allows stratum 1
+    if (!s_gnss_fix_qualified.load(std::memory_order_relaxed))
+    {
+        const int64_t min_age_us = s_gnss_min_fix_age_us.load(std::memory_order_relaxed);
+        if (min_age_us == 0 || gnss_fix_age_us(esp_timer_get_time()) >= min_age_us)
+        {
+            s_gnss_fix_qualified.store(true, std::memory_order_release);
+            if (min_age_us != 0)
+                ESP_LOGI(TAG, "GNSS fix older than %lld s and time checked: stratum 1 allowed",
+                         static_cast<long long>(min_age_us / 1000000LL));
+        }
+    }
 
 #if MQTT_ENABLED && MQTT_HISTORICAL_REPORTING_ENABLED
     bool recovery_completed = s_historical_gnss_fault_active.exchange(false) ||
@@ -2529,6 +2569,7 @@ static ntp_reply_status_t get_ntp_reply_status()
                            !s_time_setting_in_progress.load(std::memory_order_acquire) &&
                            !has_sync_fault(faults) && pps_active && gnss_synchronized &&
                            s_ntp_reference_valid.load(std::memory_order_acquire) &&
+                           s_gnss_fix_qualified.load(std::memory_order_acquire) &&
                            (!s_ptp_clock_ready.load(std::memory_order_acquire) ||
                             s_ptp_comp_valid.load(std::memory_order_acquire));
 
@@ -2554,6 +2595,7 @@ static ntp_reply_status_t get_ntp_reply_status()
             // however long the PPS is lost and whatever the serving time after it (3600e6 us * 10000 ppm * 65536 =
             // 2.4e18 < 9.2e18). The stratum 16 replies keep NTP_ROOT_DISPERSION.
             const bool can_coast = !s_time_setting_in_progress.load(std::memory_order_acquire) &&
+                                   s_gnss_fix_qualified.load(std::memory_order_acquire) &&
                                    last_gnss_valid_us > 0 && last_pps_us - last_gnss_valid_us <= Gnss_Validity_Timeout_Us &&
                                    !faults.sanity_mismatch &&
                                    s_model_valid.load(std::memory_order_acquire) &&
@@ -4250,6 +4292,14 @@ static bool parse_nmea_rmc_sentence(const char *sentence, nmea_rmc_time_t *time_
     if (status_field[0] != 'A')
         return false;
 
+    // Mode indicator (field 12, NMEA 2.3 and later): only an autonomous, differential, precise or RTK solution counts.
+    // E (dead reckoning), N (not valid), M (manual input), S (simulator) and unknown letters are refused; a receiver
+    // that sends no mode indicator is judged by the status alone, as before.
+    char mode_field[4] = "";
+    if (get_nmea_field(sentence, 12, mode_field, sizeof(mode_field)) && mode_field[0] != '\0' &&
+        strchr("ADPRF", mode_field[0]) == nullptr)
+        return false;
+
     char time_field[16] = "";
     char date_field[16] = "";
     if (!get_nmea_field(sentence, 1, time_field, sizeof(time_field)) || !get_nmea_field(sentence, 9, date_field, sizeof(date_field)))
@@ -4555,6 +4605,17 @@ struct gnss_probe_result_t
     char sample[33] = "";
 };
 
+// u-blox, after getPVT(): the UTC time of day is confirmed (NAV-PVT flags2.confirmedTime). Required only when the
+// receiver reports whether it could confirm it (confirmedAvai); otherwise the other validity flags decide.
+static bool ubx_time_confirmed()
+{
+    if (s_gnss.packetUBXNAVPVT == nullptr)
+        return false;
+    if (!s_gnss.packetUBXNAVPVT->data.flags2.bits.confirmedAvai)
+        return true;
+    return s_gnss.getConfirmedTime();
+}
+
 static bool current_gnss_timing_is_valid()
 {
     if (s_use_nmea_fallback)
@@ -4584,6 +4645,10 @@ static bool current_gnss_timing_is_valid()
     bool gnss_fix_ok = s_gnss.getGnssFixOk(status_query_timeout_ms);
     bool date_valid = s_gnss.getDateValid(status_query_timeout_ms);
     bool time_valid = s_gnss.getTimeValid(status_query_timeout_ms);
+    // validTime alone does not mean that the leap seconds are known: after a cold start the UTC time can be off by
+    // whole seconds until it is fully resolved
+    bool fully_resolved = s_gnss.getTimeFullyResolved(status_query_timeout_ms);
+    bool time_confirmed = ubx_time_confirmed();
 
 #if DEBUG_ENABLED
 
@@ -4600,9 +4665,15 @@ static bool current_gnss_timing_is_valid()
     if (!time_valid)
         ESP_LOGW(TAG, "GNSS time is invalid");
 
+    if (!fully_resolved)
+        ESP_LOGW(TAG, "GNSS time is not fully resolved");
+
+    if (!time_confirmed)
+        ESP_LOGW(TAG, "GNSS time is not confirmed");
+
 #endif
 
-    return (fix_type > 2) && gnss_fix_ok && date_valid && time_valid;
+    return (fix_type > 2) && gnss_fix_ok && date_valid && time_valid && fully_resolved && time_confirmed;
 }
 
 static gnss_probe_result_t probe_gnss_uart(uint32_t baud);
@@ -9233,6 +9304,16 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
 #endif
             return false;
         }
+        // The UTC second is only certain once the time is fully resolved (leap seconds known) and, if the receiver
+        // reports it, confirmed
+        if (!s_gnss.getTimeFullyResolved() || !ubx_time_confirmed())
+        {
+            candidate->failures.gnss_invalid = true;
+#if DEBUG_ENABLED
+            ESP_LOGE(TAG, "GNSS invalid - UTC time not fully resolved or not confirmed.");
+#endif
+            return false;
+        }
 
         int year = s_gnss.getYear();
         int month = s_gnss.getMonth();
@@ -9376,6 +9457,7 @@ static void gnss_time_sync_task(void *parameter)
             handle_runtime_sync_failure(candidate.failures, 0, 1000);
             continue;
         }
+        gnss_fix_note_valid(esp_timer_get_time());
 
         if (first_sync)
         {
@@ -9507,6 +9589,13 @@ static void gnss_time_sync_task(void *parameter)
             {
                 invalid_started_us = 0;
                 sync_state_note_gnss_validity(true);
+                const int64_t now_us = esp_timer_get_time();
+                gnss_fix_note_valid(now_us);
+                // Minimum fix age reached: check the time again now instead of at the next periodic refresh
+                const int64_t min_age_us = s_gnss_min_fix_age_us.load(std::memory_order_relaxed);
+                if (!s_gnss_fix_qualified.load(std::memory_order_relaxed) && min_age_us != 0 &&
+                    gnss_fix_age_us(now_us) >= min_age_us)
+                    break;
             }
             else
             {
@@ -10919,7 +11008,7 @@ void setup_symmetric_key_authentication()
 // ---- Interface to the web admin (web/web_settings.h, web/web_server.h) ----
 
 // Live settings: time zone, LCD text options, LED brightness, NTP authentication, PPS loss behaviour, NTP client
-// rate limit
+// rate limit, minimum GNSS fix age
 void app_apply_live_settings(const web_settings_t &settings)
 {
     if (s_live_settings_mutex != nullptr)
@@ -10935,6 +11024,7 @@ void app_apply_live_settings(const web_settings_t &settings)
     s_pps_lost_serve_us.store(static_cast<int64_t>(settings.pps_lost_serve_min) * 60LL * 1000000LL, std::memory_order_relaxed);
     s_pps_dispersion_ppm.store(settings.pps_dispersion_ppm, std::memory_order_relaxed);
     ntp_cache_set_rate_limit(settings.ntp_client_rate_limit);
+    s_gnss_min_fix_age_us.store(static_cast<int64_t>(settings.gnss_min_fix_age_s) * 1000000LL, std::memory_order_relaxed);
     s_lcd_24_hour.store(settings.lcd_24_hour, std::memory_order_relaxed);
     s_lcd_pad_hour.store(settings.lcd_pad_hour, std::memory_order_relaxed);
     s_lcd_show_time_zone.store(settings.lcd_show_time_zone, std::memory_order_relaxed);
@@ -10998,6 +11088,9 @@ void app_get_status(web_app_status_t &status)
     const ntp_reply_status_t reply_status = get_ntp_reply_status();
     status.stratum_one = reply_status.stratum == 1;
     status.pps_holdover = reply_status.holdover;
+    status.gnss_fix_waiting = !s_gnss_fix_qualified.load(std::memory_order_acquire) &&
+                              s_gnss_min_fix_age_us.load(std::memory_order_relaxed) != 0;
+    status.gnss_fix_age_s = static_cast<uint32_t>(gnss_fix_age_us(esp_timer_get_time()) / 1000000LL);
     status.ublox_receiver = s_gnss_ublox;
     status.gnss_baud_in_use = s_detected_gnss_baud;
     const uint8_t dynamic_model = s_gnss_dynamic_model.load(std::memory_order_relaxed);

@@ -397,6 +397,7 @@ namespace
         cJSON_AddBoolToObject(object, "pps_lost_serve", s.pps_lost_serve);
         cJSON_AddNumberToObject(object, "pps_lost_serve_min", s.pps_lost_serve_min);
         cJSON_AddNumberToObject(object, "pps_dispersion_ppm", s.pps_dispersion_ppm);
+        cJSON_AddNumberToObject(object, "gnss_min_fix_age", s.gnss_min_fix_age_s);
         cJSON_AddBoolToObject(object, "lcd_enabled", s.lcd_enabled);
         cJSON_AddStringToObject(object, "lcd_title", s.lcd_title);
         cJSON_AddBoolToObject(object, "lcd_24_hour", s.lcd_24_hour);
@@ -511,6 +512,7 @@ namespace
                   json_bool(root, "pps_lost_serve", s.pps_lost_serve, err, err_size) &&
                   json_int(root, "pps_lost_serve_min", s.pps_lost_serve_min, 0, WEB_PPS_LOST_SERVE_MAX_MIN, err, err_size) &&
                   json_int(root, "pps_dispersion_ppm", s.pps_dispersion_ppm, 1, WEB_PPS_DISPERSION_MAX_PPM, err, err_size) &&
+                  json_int(root, "gnss_min_fix_age", s.gnss_min_fix_age_s, 0, WEB_GNSS_MIN_FIX_AGE_MAX_S, err, err_size) &&
                   json_bool(root, "lcd_enabled", s.lcd_enabled, err, err_size) &&
                   json_string(root, "lcd_title", s.lcd_title, sizeof(s.lcd_title), err, err_size) &&
                   json_bool(root, "lcd_24_hour", s.lcd_24_hour, err, err_size) &&
@@ -975,6 +977,8 @@ namespace
         cJSON_AddBoolToObject(status, "gnss_locked", sets->app.gnss_locked);
         cJSON_AddBoolToObject(status, "stratum_one", sets->app.stratum_one);
         cJSON_AddBoolToObject(status, "pps_holdover", sets->app.pps_holdover);
+        cJSON_AddBoolToObject(status, "gnss_fix_waiting", sets->app.gnss_fix_waiting);
+        cJSON_AddNumberToObject(status, "gnss_fix_age_s", sets->app.gnss_fix_age_s);
         cJSON_AddBoolToObject(status, "ublox_receiver", sets->app.ublox_receiver);
         cJSON_AddNumberToObject(status, "gnss_baud_in_use", sets->app.gnss_baud_in_use);
         cJSON_AddStringToObject(status, "gnss_dynamic_model", sets->app.gnss_dynamic_model);

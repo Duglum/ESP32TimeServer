@@ -31,6 +31,7 @@ static constexpr uint16_t WEB_PPS_LOST_SERVE_MAX_MIN = 1440; // serving time aft
 static constexpr uint16_t WEB_PPS_HOLDOVER_MAX_S = 600;       // PPS holdover: 0 to 10 min (below the 15 min GNSS sync stale limit)
 static constexpr uint16_t WEB_PPS_DISPERSION_MAX_PPM = 10000; // root dispersion growth while coasting: up to 10 ms per second
 static constexpr uint16_t WEB_NTP_RATE_LIMIT_MAX = 10000;     // NTP requests per second and client (0 = no limit)
+static constexpr uint16_t WEB_GNSS_MIN_FIX_AGE_MAX_S = 3600;  // minimum GNSS fix age before stratum 1: up to 1 h (0 = off)
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MIN = 50;   // MQTT_CLIENT_LIMIT (report queue in RAM)
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MAX = 1000; // report buffer about 77 kB (no PSRAM)
 static constexpr size_t WEB_MAC_TEXT_SIZE = 18;     // "xx:xx:xx:xx:xx:xx" + NUL
@@ -161,6 +162,10 @@ struct web_settings_t
     // NTP requests per second and client IP address (0 = no limit, at most WEB_NTP_RATE_LIMIT_MAX); requests over the
     // limit are dropped without an answer (takes effect at once; added in version 8)
     uint16_t ntp_client_rate_limit;
+
+    // Minimum GNSS fix age in s before stratum 1 after a start (0 = off, at most WEB_GNSS_MIN_FIX_AGE_MAX_S; takes
+    // effect at once until stratum 1 was reached; added in version 9)
+    uint16_t gnss_min_fix_age_s;
 };
 
 // Compiled defaults

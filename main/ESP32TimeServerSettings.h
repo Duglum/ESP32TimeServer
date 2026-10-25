@@ -211,6 +211,14 @@ static constexpr uint8_t ntpStratumAfterHoldover = 16;
 //   (64 or 128 requests per second); such clients are limited to this rate.
 static constexpr uint16_t ntpClientRateLimitPerSecond = 20;
 
+// Minimum GNSS fix age before stratum 1 (default of the web admin setting "Minimum GNSS fix age before stratum 1",
+// whole seconds, 0 to 3600; 0 = off). After a cold start a GNSS receiver may report UTC off by whole seconds until it
+// has received the UTC parameters (leap seconds), which the satellites broadcast every 12.5 minutes. With a value the
+// server answers at stratum 16 after a start until the GNSS time has been valid for this long (without a gap of 30 s)
+// and the time has been checked again. Recommended: 750 (12.5 min) for a receiver without backup battery. A u-blox
+// receiver reports when its UTC time is fully resolved, which is checked in any case.
+static constexpr uint16_t gnssMinimumFixAgeSeconds = 0;
+
 // This project was designed and tested to work with a SparkFun GNSS Receiver Breakout board which uses a u-blox - MAX-M10S module.
 // ( https://www.sparkfun.com/sparkfun-gnss-receiver-breakout-max-m10s-qwiic.html )
 // However, the code has fallback logic for non/cloned/older u-blox gnss modules and has been tested with one such device as well.

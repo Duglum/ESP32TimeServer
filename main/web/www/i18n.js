@@ -65,6 +65,8 @@
     'stratum 1, PPS holdover (PPS lost)': 'Stratum 1, PPS-Holdover (PPS verloren)',
     'stratum 1, GNSS and PPS locked': 'Stratum 1, GNSS und PPS synchronisiert',
     'not stratum 1 (PPS {pps}, GNSS {gnss})': 'nicht Stratum 1 (PPS {pps}, GNSS {gnss})',
+    'not stratum 1 yet: GNSS fix {age} s old, {min} s required after the start':
+      'noch nicht Stratum 1: GNSS-Fix {age} s alt, {min} s nach dem Start nötig',
     'active': 'aktiv',
     'missing': 'fehlt',
     'locked': 'synchronisiert',
@@ -154,6 +156,10 @@
     'NMEA Standard Protocol (needs RMC sentence)': 'NMEA-Standardprotokoll (benötigt RMC-Sentence)',
     'GNSS baud rate <span class="badge restart">restart</span>': 'GNSS-Baudrate <span class="badge restart">Neustart</span>',
     'With the U-Blox UBX protocol the baud rate is found and configured automatically.': 'Mit dem U-Blox-UBX-Protokoll wird die Baudrate automatisch erkannt und eingestellt.',
+    'After a start': 'Nach einem Start',
+    'Minimum GNSS fix age before stratum 1 (s, 0 = off)': 'Mindestalter des GNSS-Fix vor Stratum 1 (s, 0 = aus)',
+    '0 to 3600 s. After a cold start (no backup battery, or switched off for a long time) a GNSS receiver may report UTC off by whole seconds until it has received the leap seconds, which the satellites broadcast every 12.5 minutes. With a value the server answers at stratum 16 after each start until the GNSS time has been valid for this long without a gap of more than 30 s; then the time is checked against the GNSS once more (a wrong second is corrected) and stratum 1 is allowed until the next start. Recommended: 750 s (12.5 min) for a receiver without backup battery. Takes effect at once with Apply while the server waits; once stratum 1 was reached, a change applies from the next start. A u-blox receiver also reports when its UTC time is fully resolved, which is checked in any case.':
+      '0 bis 3600 s. Nach einem Kaltstart (keine Pufferbatterie oder lange ausgeschaltet) kann ein GNSS-Empfänger UTC um ganze Sekunden falsch melden, bis er die Schaltsekunden empfangen hat, die die Satelliten alle 12,5 Minuten aussenden. Mit einem Wert antwortet der Server nach jedem Start mit Stratum 16, bis die GNSS-Zeit so lange ohne eine Lücke von mehr als 30 s gültig war; dann wird die Zeit noch einmal mit dem GNSS verglichen (eine falsche Sekunde wird korrigiert), und Stratum 1 ist bis zum nächsten Start erlaubt. Empfohlen: 750 s (12,5 min) für einen Empfänger ohne Pufferbatterie. Wirkt sofort mit Übernehmen, solange der Server wartet; nachdem Stratum 1 erreicht wurde, gilt eine Änderung ab dem nächsten Start. Ein u-blox-Empfänger meldet zusätzlich, wann seine UTC-Zeit vollständig aufgelöst ist; das wird in jedem Fall geprüft.',
     'When the PPS is lost': 'Wenn der PPS ausfällt',
     'The PPS counts as lost after 3.5 s without a pulse. The settings below take effect at once with Apply. When the PPS and the GNSS are back, the server returns to stratum 1 by itself.':
       'Der PPS gilt nach 3,5 s ohne Impuls als ausgefallen. Die folgenden Einstellungen wirken sofort mit Übernehmen. Sobald PPS und GNSS wieder da sind, kehrt der Server von selbst zu Stratum 1 zurück.',
@@ -188,6 +194,7 @@
     'GNSS RX pin': 'GNSS-RX-Pin',
     'PPS pin': 'PPS-Pin',
     'PTP PPS loopback pin': 'PTP-PPS-Loopback-Pin',
+    'Minimum GNSS fix age: 0 to 3600 s': 'Mindestalter des GNSS-Fix: 0 bis 3600 s',
     'PPS holdover: 0 to 600 s': 'PPS-Holdover: 0 bis 600 s',
     'Keep answering after the PPS loss: 0 to 1440 min': 'Weiter antworten nach dem PPS-Ausfall: 0 bis 1440 min',
     'Stratum after the holdover: 2 to 16': 'Stratum nach dem Holdover: 2 bis 16',
@@ -556,6 +563,7 @@
     ['NTP key ID %lu is used twice', 'NTP-Key-ID {1} ist doppelt vergeben'],
     ['NTP keys: at most %u', 'NTP-Schlüssel: höchstens {1}'],
     ['Rate limit per client: 0 (no limit) to %u requests per second', 'Rate-Limit pro Client: 0 (unbegrenzt) bis {1} Anfragen pro Sekunde'],
+    ['Minimum GNSS fix age: 0 (off) to %u seconds', 'Mindestalter des GNSS-Fix: 0 (aus) bis {1} Sekunden'],
     ['PPS holdover: 0 to %u seconds', 'PPS-Holdover: 0 bis {1} Sekunden'],
     ['Serving time after the PPS loss: 0 (no limit) to %u minutes', 'Antwortzeit nach dem PPS-Ausfall: 0 (unbegrenzt) bis {1} Minuten'],
     ['Stratum after the holdover: 2 to 16', 'Stratum nach dem Holdover: 2 bis 16'],
