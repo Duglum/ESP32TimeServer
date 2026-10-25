@@ -58,6 +58,7 @@ Contents
 | 29 | **Quick wins of the review of 2026-10-23** (`REVIEW_2026-10-23.md`): RMC checksum, no software T3 in interleaved replies, MQTT task priority 5, no NVS erase by `initArduino()`, no UBX commands to NMEA receivers, rollover-safe PTP reading in the holdover, interrupt latency default 2.5 µs | no wrong labels from corrupted sentences, no queue-delayed T3 in interleaved replies, MQTT cannot delay NTP replies, password and TLS key survive NVS errors |
 | 30 | **Exchange map for the interleaved mode** (2026-10-23, review finding S-02): the recent exchanges of all clients are found by their T2 (the origin timestamp the client sends back), besides the latest exchange of each address | a spoofed request with a client's address or a second client behind the same NAT address no longer switches the client to basic mode; time stamps unchanged |
 | 31 | **Own rate limit bucket for requests with a T2 cookie** (2026-10-25, review finding S-17): requests that refer to an earlier exchange of their address are counted apart from the other requests of that address | a host sending with a client's address can no longer exhaust the limit of the client's interleaved requests; time stamps unchanged |
+| 32 | **Re-lock after a PPS holdover without a phase step** (2026-10-25, review finding Z-06): the PTP mapping continues from the holdover mapping and the accumulated error decays with 16 s (at most 5 µs/s); no stratum 1 while the PTP time stamps are not mapped | no jump of T2 / T3 when the PPS returns, clients see a short ramp; steps above 100 µs stay steps; normal operation unchanged |
 
 No memory leak was found in the review (section 4.13).
 
@@ -317,8 +318,8 @@ The PTP clock is set once (at the time synchronisation, after an Ethernet recove
 
 Other cases:
 
-- PPS lost (3.5 s): `ptp_servo_holdover()` sets the command to the pure rate (no offset correction) and continues the mapping from the current offset. The mapping is used for up to one hour, like the model clock. When the PPS returns, the filter starts again with the kept rate.
-- Clock set from outside (`synchronize_hardware_clock()`, Ethernet recovery): an epoch counter starts the filter again; after a recovery the EMAC runs with the base addend again (`esp_eth_mac_ptp_enable()`), which the servo is told. Until the next measurement the raw PTP clock is used.
+- PPS lost (3.5 s): `ptp_servo_holdover()` sets the command to the pure rate (no offset correction) and continues the mapping from the current offset. The mapping is used for up to one hour, like the model clock. When the PPS returns, the filter starts again with the kept rate; since 4.31 the mapping continues from the holdover mapping and the error accumulated in the holdover decays with 16 s instead of appearing as a step.
+- Clock set from outside (`synchronize_hardware_clock()`, Ethernet recovery): an epoch counter starts the filter again; after a recovery the EMAC runs with the base addend again (`esp_eth_mac_ptp_enable()`), which the servo is told. Until the next measurement the raw PTP clock is used (since 4.31 without stratum 1).
 - Steps by the servo set the frequency command first, so the raw clock is right at once (simulated transient after a 3 ms start error: 0.35 µs).
 - The servo only runs once the PPS task has a frequency estimate of the crystal.
 - Constant error left in the software mode: the position of the register read inside the bracket (the same assumption as in the offset measurement of 4.8). The loopback removes it and measures it (debug `software - loopback`); while the loopback is active its learned value also corrects the software measurement of seconds without a loopback pulse.
@@ -587,6 +588,29 @@ What changed (`main/custom/ntp_cache.c`):
 - **Memory:** 8 bytes per record, 2 kB BSS (DIRAM 176 092 B, was 174 044 B).
 - Verified: build (-O2, no warning in `main/`), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, and a Python model of the address record, the exchange map and both buckets with the same constants and integer arithmetic (10 minutes per case). A chrony-like client with 16 requests per second alone: 9600 of 9600 answered, all but the first interleaved (the same with one bucket). With a spoofing host sending 50 per second with the client's address: one bucket 3591 of 9599 answered, two buckets 9599 of 9599 (9598 interleaved). Spoofing host with 1000 per second: 9598 of 9598. Client starting during the flood: its first (basic) request needs some tries (median 2, 12 and 24 lost requests at 50, 200 and 1000 per second, at most 182 in 10 runs). Three replies without hardware TX time stamp during the flood: 4 requests lost in total, then interleaved again. Not tested on the board yet.
 
+### 4.31 Re-lock after a PPS holdover without a phase step (2026-10-25)
+
+Review finding Z-06, `PTP_FREE_RUNNING 1` (hardware time stamps). During a PPS holdover (4.20, 4.25) the PTP mapping extrapolates the offset with the estimated rate. The true rate drifts meanwhile (temperature), so when the PPS returns, the measured offset differs from the mapped one by the error accumulated in the holdover. Until now the first measurement after the holdover set the mapping at once: T2 / T3 jumped by that error (about 0.3 µs after 300 s, some 10 µs after an hour). In addition the time stamps between a step of the PTP clock and the next servo update were not mapped, but were served with stratum 1.
+
+What changed (`main/main.cpp`):
+- **(a) No stratum 1 without a valid mapping:** `get_ntp_reply_status()` gives stratum 1 only if the PTP clock is not in use or its mapping is valid (`!s_ptp_clock_ready || s_ptp_comp_valid`). This covers the second after a step by the servo, after `synchronize_hardware_clock()` and after an Ethernet recovery. The holdover already required it (4.25).
+- **(b) Continuous mapping at the re-lock:** `ptp_servo_holdover()` marks the published mapping (`relock_pending`). At the first servo update after the holdover, `ptp_relock_residual()` evaluates that mapping at the new reference point; the difference to the new estimate (the residual) is added to the published offset, so the served time continues exactly where the holdover left it. The residual then decays with `PTP_RELOCK_TIME_CONSTANT_S` (16 s, the time constant of the servo), at most `ptp_relock_max_slew_ppb` (5 µs per second), as an extra rate of the mapping. Below 1 ns it ends.
+- **Not affected:** the filter, the frequency command and the outlier handling work on the estimate as before; the residual only changes the published mapping. Without a holdover the residual is 0 and the published values are the same as before (also in the model, bit for bit). Steps stay steps: an offset above 100 µs after the holdover sets the PTP clock as before and ends the re-lock (the time stamps then jump, with stratum 16 until the next update). A filter restart within the re-lock (the first loopback measurement in the 3 s after the start, or 5 outliers in a row) is absorbed in the residual the same way. If the PPS is lost again during the ramp, the next holdover continues from the mapping including the residual.
+- **Root dispersion:** while the residual is above 15 µs (one unit), the stratum 1 replies advertise it as root dispersion (`s_ptp_relock_residual_ns`), otherwise `NTP_ROOT_DISPERSION` as before.
+- **Not changed:** the socket path (model clock, system clock) and `PTP_FREE_RUNNING 0`. With `PTP_FREE_RUNNING 0` the mapping is invalid for the few µs of each write, so a reply built in that moment now gets stratum 16.
+- **Debug output:** `PTP servo: re-lock, mapping residual … ns`, and a status line `PTP re-lock: mapping residual … ns, rate … ppb` while it decays.
+- **Cost:** in normal operation one compare per second in the PPS task and one atomic load per stratum 1 reply. Frame of the PPS task 704 B instead of 688 B (`ptp_servo_update()` is inlined; stack 3584 unchanged, to be checked on the board with `CALCULATE_STACK_SIZES_ENABLED 1`). DIRAM 176 108 B (+16).
+- Verified: build (-O2, no warning in `main/`), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, and a Python model of the filter, the servo and the mapping with the same constants (loopback noise 15 ns, update a few ms after the edge). Normal operation (20 min): identical served time with and without the change. Jump of the served time at the re-lock and time until the error is below 50 ns:
+
+| Holdover, rate change in it | Error at the end of the holdover | Before: jump | Now: jump | Now: below 50 ns after |
+|---|---|---|---|---|
+| 300 s, 1 ppb | 0.74 µs | −0.72 µs | 1 ns | 41 s |
+| 600 s, 2 ppb | 2.06 µs | −2.04 µs | 0 ns | 60 s |
+| 3600 s, 8 ppb | 33.9 µs | −33.9 µs | 0 ns | 98 s (largest change 2.0 µs per s) |
+| 3600 s, 40 ppb | 149 µs | step | step | – |
+
+  After the ramp the served error is the same as without the change (RMS 6.80 ns in both). Over 10 seeds the jump at the re-lock is at most 1 ns (rounding). Not tested on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -758,6 +782,7 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `ptp_filter_alpha`, `ptp_filter_beta` | PTP servo | 0.25, 0.035 | weights of the offset / rate filter |
 | `PTP_SERVO_TIME_CONSTANT_S` | PTP servo | 16 | decay time of the PTP offset under the servo |
 | `ptp_step_threshold_ns` | PTP servo | 100 µs | larger offsets are stepped, smaller ones slewed |
+| `PTP_RELOCK_TIME_CONSTANT_S`, `ptp_relock_max_slew_ppb` | PTP servo | 16 s, 5000 ppb | decay of the mapping residual after a holdover (4.31) |
 | `PTP_PPS_LOOPBACK_DELAY_NS` | PTP servo | 0 | delay of the loopback path minus the GNSS PPS input path |
 | `NTP_ROOT_DISPERSION` | `main.cpp`, top | 1 | advertised root dispersion, 1/65536 s per unit |
 | `PTP_CLOCK_FROM_PLL` | after `PTP_FREE_RUNNING` | 1 | 1 = PTP clock from PLL_F80M (13 ns steps), 0 = 40 MHz crystal (40 ns steps) |
@@ -886,6 +911,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - Scripted uploads with the web admin password (4.27): built, script tested against a mock, not tested on the board yet. Points to check first: an upload with `tools/ote_upload.py` and the web admin password (also a password set on the page), the 403 with the factory password, the 401 and the lock-out after wrong passwords, the log line that erases the former OTE password from the saved settings (once, at the first start), `<host name>.local` after a change of the FQDN.
 - Per-client rate limit (4.26): built and simulated, not tested on the board yet. Points to check first: a chrony client with `minpoll -4 maxpoll -4` over hours (status counter stays 0), a flood from one host (e.g. `ntpdate`/`sntp` in a loop) is held to the limit while other clients keep their replies, Apply of 0 and of a new value without a restart.
 - Own bucket for requests with a T2 cookie (4.30): built and modelled, not tested on the board yet. Check: send 50 requests per second with the address of a chrony client from a test computer (e.g. scapy); `chronyc ntpdata` of the real client keeps showing replies with `Interleaved: Yes`, and the status counter of dropped requests grows.
+- Re-lock after a holdover (4.31): built and modelled, not tested on the board yet. Check: disconnect the PPS for 10 minutes (holdover set long enough), then reconnect; chrony's `measurements.log` should show a ramp of the offset instead of a step, and the debug output `PTP servo: re-lock, mapping residual … ns`. Check the stack of the PPS task once with `CALCULATE_STACK_SIZES_ENABLED 1`.
 
 ## 13. Recommendations that are not in the code
 

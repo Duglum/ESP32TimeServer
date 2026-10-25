@@ -722,6 +722,7 @@ static inline void ptp_latency_calibration_add_sample(int64_t latency_ns)
 static std::atomic<bool> s_clock_comp_valid{false};    // system clock drift compensation is valid
 static std::atomic<int64_t> s_clock_anchor_us{0};      // esp_timer time at which the system clock was exact
 static std::atomic<bool> s_ptp_comp_valid{false};      // PTP clock drift compensation is valid
+static std::atomic<uint32_t> s_ptp_relock_residual_ns{0}; // residual of the PTP mapping after a holdover (ns, see ptp_relock_residual)
 static std::atomic<int32_t> s_clock_ppb{0};            // oscillator error in ppb, >0 = clock runs fast
 
 #if !PTP_FREE_RUNNING
@@ -2522,13 +2523,24 @@ static ntp_reply_status_t get_ntp_reply_status()
         bool sync_stale = last_successful_sync_us > 0 &&
                           (now_us - last_successful_sync_us) > Sync_Stale_After_Us;
         bool gnss_synchronized = gnss_recent && !sync_stale && !faults.gnss_invalid;
+        // With hardware time stamps the PTP mapping must be valid: after a step or a restart of the PTP clock the time
+        // stamps are not mapped to true time until the next servo update
         bool stratum_one = s_time_has_been_set.load(std::memory_order_acquire) &&
                            !s_time_setting_in_progress.load(std::memory_order_acquire) &&
                            !has_sync_fault(faults) && pps_active && gnss_synchronized &&
-                           s_ntp_reference_valid.load(std::memory_order_acquire);
+                           s_ntp_reference_valid.load(std::memory_order_acquire) &&
+                           (!s_ptp_clock_ready.load(std::memory_order_acquire) ||
+                            s_ptp_comp_valid.load(std::memory_order_acquire));
 
         if (stratum_one)
-            return {0, 1, "GPS", true, gnss_synchronized, pps_active};
+        {
+            // While the PTP mapping slews back after a holdover, the root dispersion covers the remaining residual
+            uint32_t dispersion = NTP_ROOT_DISPERSION;
+            const uint32_t residual_ns = s_ptp_relock_residual_ns.load(std::memory_order_relaxed);
+            if (residual_ns != 0)
+                dispersion = std::max(dispersion, static_cast<uint32_t>((static_cast<uint64_t>(residual_ns) * 65536ULL + 999999999ULL) / 1000000000ULL));
+            return {0, 1, "GPS", true, gnss_synchronized, pps_active, false, dispersion};
+        }
 
         // PPS lost (no pulse for Gnss_Validity_Timeout_Us) after the time was set
         const int64_t pps_age_us = now_us - last_pps_us;
@@ -5779,6 +5791,8 @@ static constexpr double ptp_servo_max_slew_ppb = 20000.0; // offset correction a
 static constexpr int32_t ptp_max_command_ppb = 5000000;   // limit of the frequency command (the HAL clamps at +-5,120,000 ppb)
 static constexpr double ptp_step_threshold_ns = 100000.0; // larger offsets are stepped (clock_settime), smaller slewed
 static constexpr double ptp_loopback_gate_ns = 20000.0;   // software and loopback measurement must agree within this
+static constexpr double PTP_RELOCK_TIME_CONSTANT_S = 16.0; // decay time of the mapping residual after a holdover
+static constexpr double ptp_relock_max_slew_ppb = 5000.0;  // the residual changes by at most 5 us per second
 // Delay of the loopback path (EMAC pulse -> pad -> capture) minus the delay of the GNSS PPS input path, in ns.
 // Both paths go through a pad and the GPIO matrix, so the difference is a few ns at most; 0 is fine.
 static constexpr int64_t PTP_PPS_LOOPBACK_DELAY_NS = 0;
@@ -5800,6 +5814,11 @@ struct ptp_servo_state_t
     int settle = 0;                    // seconds after a start in which a loopback measurement may replace the estimate
     double sw_bias_ns = 0.0;           // delay error of the software measurement (software - loopback)
     uint32_t sw_bias_samples = 0;
+    // re-lock after a holdover (see ptp_relock_residual)
+    bool relock_pending = false;       // the holdover mapping is published: the next start continues from it
+    double relock_residual_ns = 0.0;   // mapping offset - estimated offset at the last reference point
+    double relock_rate_ppb = 0.0;      // rate of the residual after that reference point
+    int64_t relock_ref_true_ns = 0;    // true time of that reference point
     // statistics for the debug output
     double last_measurement_ns = 0.0;
     double last_innovation_ns = 0.0;
@@ -5944,11 +5963,62 @@ static bool ptp_apply_command(int32_t cmd_ppb)
     return true;
 }
 
+// Ends a re-lock after a holdover: the mapping follows the estimate directly again
+static void ptp_relock_reset()
+{
+    ptp_servo_state_t &st = s_ptp_servo;
+    st.relock_pending = false;
+    st.relock_residual_ns = 0.0;
+    st.relock_rate_ppb = 0.0;
+    s_ptp_relock_residual_ns.store(0, std::memory_order_relaxed);
+}
+
+// Residual of the mapping after a holdover (review Z-06). During the holdover the mapping extrapolates the offset with
+// the estimated rate; when the PPS is back, the measured offset differs by the error accumulated meanwhile. Taking the
+// measurement at once would make the served time stamps jump by that error. Instead the first mapping after the
+// holdover starts where the holdover mapping is at its reference point, and the difference (residual) decays with
+// PTP_RELOCK_TIME_CONSTANT_S, at most ptp_relock_max_slew_ppb. The filter, the servo and the steps are not affected;
+// without a holdover the residual is 0 and the mapping is the same as before.
+// continuity: true = start the residual so that the new mapping continues the published one at this reference point
+// Returns the residual at the reference point; st.relock_rate_ppb is its rate after it.
+static double ptp_relock_residual(int64_t ref_true_ns, double ref_offset_ns, bool continuity)
+{
+    ptp_servo_state_t &st = s_ptp_servo;
+    if (continuity)
+    {
+        int64_t published_ns = 0;
+        const bool have = s_ptp_comp_valid.load(std::memory_order_acquire) &&
+                          ptp_map_offset_at(ref_true_ns + llround(ref_offset_ns), published_ns);
+        const double residual_ns = have ? static_cast<double>(published_ns) - ref_offset_ns : 0.0;
+        st.relock_residual_ns = (fabs(residual_ns) <= ptp_step_threshold_ns) ? residual_ns : 0.0;
+#if DEBUG_ENABLED
+        ESP_LOGI(TAG, "PTP servo: re-lock, mapping residual %.1f ns", st.relock_residual_ns);
+#endif
+    }
+    else if (st.relock_residual_ns != 0.0)
+    {
+        // The residual moved on with its rate since the last reference point; it ends below 1 ns (or at zero)
+        const double residual_ns = st.relock_residual_ns +
+                                   st.relock_rate_ppb * static_cast<double>(ref_true_ns - st.relock_ref_true_ns) * 1e-9;
+        st.relock_residual_ns = (fabs(residual_ns) < 1.0 || (residual_ns > 0.0) != (st.relock_residual_ns > 0.0)) ? 0.0 : residual_ns;
+    }
+    else
+    {
+        st.relock_rate_ppb = 0.0;
+        return 0.0;
+    }
+    st.relock_ref_true_ns = ref_true_ns;
+    st.relock_rate_ppb = std::clamp(-st.relock_residual_ns / PTP_RELOCK_TIME_CONSTANT_S, -ptp_relock_max_slew_ppb, ptp_relock_max_slew_ppb);
+    s_ptp_relock_residual_ns.store(static_cast<uint32_t>(ceil(fabs(st.relock_residual_ns))), std::memory_order_relaxed);
+    return st.relock_residual_ns;
+}
+
 // Sets the PTP clock to true time (for large offsets only); the filter starts again in the new epoch
 static void ptp_servo_step(int64_t edge_sec, double edge_local_us, double offset_ns)
 {
     ptp_servo_state_t &st = s_ptp_servo;
     s_ptp_comp_valid.store(false, std::memory_order_release);
+    ptp_relock_reset(); // the clock is set: steps stay steps
     // Run at the estimated GNSS rate right away, so the raw clock is usable until the next measurement
     ptp_apply_command(static_cast<int32_t>(std::clamp(llround(-st.free_ppb), static_cast<long long>(-ptp_max_command_ppb),
                                                       static_cast<long long>(ptp_max_command_ppb))));
@@ -5983,6 +6053,7 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
     {
         st.epoch = epoch;
         st.initialized = false;
+        ptp_relock_reset(); // the published mapping belongs to the old clock
     }
     if (!st.have_rate)
     {
@@ -6045,6 +6116,9 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
     if (st.initialized && (dt <= 0 || dt > 60))
         st.initialized = false; // edges missing for more than a minute (or time stepped): start again
 
+    // true: the estimate starts again in this update; while a holdover mapping or a residual is published, the new
+    // mapping then continues the published one (ptp_relock_residual)
+    bool relock_continuity = false;
     if (!st.initialized)
     {
         if (fabs(measurement_ns) > ptp_step_threshold_ns)
@@ -6058,6 +6132,10 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
         st.last_innovation_ns = 0.0;
         st.settle = 3;
         st.initialized = true;
+        relock_continuity = st.relock_pending;
+        if (!relock_continuity)
+            ptp_relock_reset();
+        st.relock_pending = false;
     }
     else
     {
@@ -6081,6 +6159,7 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
             st.offset_ns = measurement_ns;
             st.noise_ns = 0.0;
             st.settle = 0;
+            relock_continuity = st.relock_residual_ns != 0.0;
         }
         else if (fabs(innovation_ns) > gate_ns && st.rejects < 4)
         {
@@ -6103,6 +6182,7 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
             st.offset_ns = measurement_ns;
             st.free_ppb = static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed));
             st.noise_ns = 0.0;
+            relock_continuity = st.relock_residual_ns != 0.0;
         }
         else
         {
@@ -6144,10 +6224,14 @@ static void ptp_servo_update(int64_t edge_sec, double edge_local_us, uint32_t gn
     st.update_after_edge_s = update_s;
 
     // ---- Mapping, reference point = instant of this update ----
+    // After a holdover the mapping carries a residual that slews to 0 (0 otherwise, see ptp_relock_residual)
     const double ref_offset_ns = st.offset_ns + (st.free_ppb + old_command) * update_s;
     const int64_t ref_true_ns = edge_sec * 1000000000LL + llround(update_s * 1e9);
-    ptp_map_publish(ref_true_ns + llround(ref_offset_ns), llround(ref_offset_ns),
-                    llround((st.free_ppb + old_command) * 1000.0), llround((st.free_ppb + st.cmd_ppb) * 1000.0));
+    const double prev_relock_rate_ppb = st.relock_rate_ppb;
+    const double map_offset_ns = ref_offset_ns + ptp_relock_residual(ref_true_ns, ref_offset_ns, relock_continuity);
+    ptp_map_publish(ref_true_ns + llround(map_offset_ns), llround(map_offset_ns),
+                    llround((st.free_ppb + old_command + prev_relock_rate_ppb) * 1000.0),
+                    llround((st.free_ppb + st.cmd_ppb + st.relock_rate_ppb) * 1000.0));
     s_ptp_comp_valid.store(true, std::memory_order_release);
 }
 
@@ -6187,8 +6271,13 @@ static void ptp_servo_holdover()
     const int32_t old_command = st.cmd_ppb;
     ptp_apply_command(static_cast<int32_t>(std::clamp(llround(-st.free_ppb), static_cast<long long>(-ptp_max_command_ppb),
                                                       static_cast<long long>(ptp_max_command_ppb))));
-    ptp_map_publish(raw_ns, offset_ns, llround((st.free_ppb + old_command) * 1000.0), llround((st.free_ppb + st.cmd_ppb) * 1000.0));
+    ptp_map_publish(raw_ns, offset_ns, llround((st.free_ppb + old_command + st.relock_rate_ppb) * 1000.0),
+                    llround((st.free_ppb + st.cmd_ppb) * 1000.0));
     st.initialized = false; // the next PPS edge starts the filter again, the rate estimate is kept
+    // The next start continues from this mapping (no phase step, see ptp_relock_residual); a residual of an earlier
+    // re-lock is part of offset_ns
+    ptp_relock_reset();
+    st.relock_pending = true;
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "PTP servo: holdover, offset %.1f ns, rate %.3f ppb, command %d ppb", static_cast<double>(offset_ns),
              st.free_ppb, static_cast<int>(st.cmd_ppb));
@@ -6208,6 +6297,8 @@ static void ptp_servo_log_status()
         ESP_LOGI(TAG, "PTP loopback: used %lu missing %lu rejected %lu | software - loopback %.1f ns (%lu)",
                  static_cast<unsigned long>(st.loopback_used), static_cast<unsigned long>(st.loopback_missing),
                  static_cast<unsigned long>(st.loopback_rejected), st.sw_bias_ns, static_cast<unsigned long>(st.sw_bias_samples));
+    if (st.relock_residual_ns != 0.0)
+        ESP_LOGI(TAG, "PTP re-lock: mapping residual %.1f ns, rate %.1f ppb", st.relock_residual_ns, st.relock_rate_ppb);
 }
 #endif
 #endif
