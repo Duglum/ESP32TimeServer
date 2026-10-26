@@ -81,6 +81,7 @@ Contents
 | 52 | **RMC phase only within 1 s of the PPS edge** (2026-10-26, board finding) | an RMC after a missing PPS edge no longer counts as about 1 s late (status page maximum, diagnostics histogram) |
 | 53 | **Robust check of the 80 MHz PLL source of the PTP clock** (2026-10-26, board finding) | a reading disturbed at the start no longer drops the 13 ns time stamps for the whole run; the warning names the failed step |
 | 54 | **qErr flagged invalid by the receiver shown as such** (2026-10-26, board finding with the M10) | the status line no longer says *TIM-TP missing*; the diagnostics show the raw qErr and flags of the latest TIM-TP |
+| 55 | **qErr and MON-RF lines moved to the diagnostics** (2026-10-26, request) | the status shows only protocol, baud rate, model and satellites of the GNSS receiver |
 
 No memory leak was found in the review (section 4.13).
 
@@ -824,7 +825,7 @@ Review G-03, the part left after 4.37: the time pulse configuration (CFG-TP) and
 - `gnss_ubx`: the CFG-TP keys of time pulse 1 (IDs of the u-blox M10 interface description: `PULSE_DEF`, `PULSE_LENGTH_DEF`, `PERIOD(_LOCK)_TP1` or `FREQ(_LOCK)_TP1`, `LEN(_LOCK)_TP1`, `TP1_ENA`, `SYNC_GNSS_TP1`, `USE_LOCKED_TP1`, `ALIGN_TO_TOW_TP1`, `POL_TP1`, `TIMEGRID_TP1`, `ANT_CABLEDELAY`, `USER_DELAY_TP1`) and `gnss_ubx_query_rf()`: poll of UBX-MON-RF, first RF block (antenna status and power, jamming state, CW jamming indicator, noise per ms, AGC count).
 - Setup (`read_gnss_time_pulse()`, after the dynamic model): the keys are read from the RAM layer (CFG-VALGET, one key per request) and logged in one console line, e.g. `GNSS time pulse: on, period 1000000 us (without lock 1000000 us), length 100000 us (without lock 0 us), rising edge, UTC grid, cable delay 50 ns, user delay 0 ns`. Warnings: time pulse off; falling edge at the second (the PPS input captures the rising edge, the time would be off by the pulse length); period once locked not 1 s; not aligned to the second of GNSS time. A note when the pulse also runs without lock (then 4.43 applies). If a key is not answered, `GNSS time pulse: configuration could not be read (CFG-TP)`.
 - GNSS time sync task: in its validity loop (once per second) MON-RF is polled every 10th time (300 ms timeout); answers are kept for 30 s.
-- Status page, GNSS receiver: `antenna OK, jamming none, AGC 62 % (MON-RF)` (antenna: starting, unknown, OK, short circuit, open; jamming: unknown, none, warning, critical). Diagnostics panel: the time pulse (period and length once locked and without lock, or *no pulse without lock*; edge, time grid, *not aligned to the second* if so, cable and user delay) and the RF values (noise, AGC count, CW jamming indicator). German texts added.
+- Status page, GNSS receiver (moved to the diagnostics with 4.54): `antenna OK, jamming none, AGC 62 % (MON-RF)` (antenna: starting, unknown, OK, short circuit, open; jamming: unknown, none, warning, critical). Diagnostics panel: the time pulse (period and length once locked and without lock, or *no pulse without lock*; edge, time grid, *not aligned to the second* if so, cable and user delay) and the RF values (noise, AGC count, CW jamming indicator). German texts added.
 - Stack: GNSS time sync task frame 176 -> 192 B; the poll adds 32 + 192 B (`run_command` with the frame buffer) and the UART driver below it, less than the `printf` depth that set the measured size. Measure the task once more with `CALCULATE_STACK_SIZES_ENABLED 1`.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, page against the mock (UBX variant, English and German, `I18N.missing` empty). The key IDs and the MON-RF layout are taken from the interface description, not checked on the M10 yet.
 
@@ -904,6 +905,10 @@ First board test with the u-blox M10 (UBX protocol): stratum 1, NAV-PVT, `fullyR
 - Status page: a new qErr state 4, `no qErr: the receiver flags it invalid (TIM-TP)`, when TIM-TP arrives but none had a valid qErr since the start.
 - Diagnostics, qErr row: `latest TIM-TP: qErr <q> ps, flags 0x<f>`, the values as received whatever the flags (`gnss_ubx_status_t::last_tp_qerr_ps`, `last_tp_flags`). They settle the open question of 4.37: if the qErr values vary by some ns while bit 4 is set, the bit has the other meaning on this firmware; if they stay 0, the receiver gives no qErr (then the correction is not available with this module).
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, the page against the mock. Not on the board yet.
+
+### 4.54 qErr and MON-RF lines moved to the diagnostics (2026-10-26)
+
+Request of 2026-10-26: the lines `no qErr: ...` (qErr state) and `antenna ..., jamming ..., AGC ... % (MON-RF)` were too detailed for the status. The status page keeps protocol, baud rate, dynamic model and satellites (and the RMC phase with the NMEA protocol). In the diagnostics panel the qErr row starts with the qErr state (learning, active with slope, off, flagged invalid, missing), followed by its details, and the MON-RF line of the GNSS receiver now holds antenna, jamming, AGC (in % and as the count), noise and the CW jamming indicator. The values come from `/api/state` (states) and `/api/diag` (counts) as before; no firmware change except the embedded page. German texts adjusted (`I18N.missing` empty). Verified: build, page against the mock (UBX, English and German).
 
 ## 5. Security and open ports
 

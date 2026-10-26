@@ -92,7 +92,8 @@
     'open': 'offen',
     'warning': 'Warnung',
     'critical': 'kritisch',
-    'antenna {antenna}, jamming {jamming}, AGC {agc} % (MON-RF)': 'Antenne {antenna}, Störungen: {jamming}, AGC {agc} % (MON-RF)',
+    'antenna {antenna}, jamming {jamming}, AGC {agc} % ({count}), noise {n} per ms, CW jamming indicator {j} (MON-RF)':
+      'Antenne {antenna}, Störungen: {jamming}, AGC {agc} % ({count}), Rauschen {n} pro ms, CW-Störindikator {j} (MON-RF)',
     // ---- Diagnostics panel ----
     'Diagnostics': 'Diagnose',
     'Measured by the device itself, without a reference clock. Updated every 10 s while this panel is open.':
@@ -178,7 +179,6 @@
     'rising': 'steigende',
     'falling': 'fallende',
     'not aligned to the second': 'nicht auf die Sekunde ausgerichtet',
-    'RF: noise {n} per ms, AGC {agc}, CW jamming indicator {j}': 'HF: Rauschen {n} pro ms, AGC {agc}, CW-Störindikator {j}',
     'NMEA standard protocol': 'NMEA-Standardprotokoll',
     '{baud} baud': '{baud} Baud',
     '{model} mode': 'Modus {model}',

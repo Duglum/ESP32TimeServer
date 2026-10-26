@@ -835,22 +835,8 @@
       gnss.push(t('RMC {ms} ms after the PPS ({min} to {max} ms since the start)',
         { ms: st.gnss_rmc_after_pps_ms, min: st.gnss_rmc_after_pps_min_ms, max: st.gnss_rmc_after_pps_max_ms }));
     }
-    // U-Blox UBX protocol: NAV-PVT and the qErr correction of the time pulse (TIM-TP)
+    // U-Blox UBX protocol: satellites of NAV-PVT (qErr and MON-RF are in the diagnostics panel)
     if (st.gnss_pvt_satellites >= 0) gnss.push(t('{n} satellites in use (NAV-PVT)', { n: st.gnss_pvt_satellites }));
-    if (st.ublox_receiver && st.gnss_pvt_satellites >= 0) {
-      const slope = Number(st.gnss_qerr_slope).toFixed(2);
-      gnss.push(st.gnss_qerr_state === 1 ? t('qErr correction: learning the sign')
-        : st.gnss_qerr_state === 2 ? t('qErr correction active (slope {slope})', { slope })
-          : st.gnss_qerr_state === 3 ? t('qErr correction off: no correlation (slope {slope})', { slope })
-            : st.gnss_qerr_state === 4 ? t('no qErr: the receiver flags it invalid (TIM-TP)')
-              : t('no qErr (TIM-TP missing or PTP loopback off)'));
-    }
-    // U-Blox UBX protocol: antenna supervisor and jamming monitor (MON-RF)
-    if (st.ublox_receiver && st.gnss_rf_known) {
-      const antenna = [t('starting'), t('unknown'), t('OK'), t('short circuit'), t('open')][st.gnss_antenna_status] || t('unknown');
-      const jamming = [t('unknown'), t('none'), t('warning'), t('critical')][st.gnss_jamming_state] || t('unknown');
-      gnss.push(t('antenna {antenna}, jamming {jamming}, AGC {agc} % (MON-RF)', { antenna, jamming, agc: st.gnss_agc_percent }));
-    }
     fillList('st-gnss', gnss, '', false);
     const keys = st.ntp_auth_keys_in_use;
     $('st-auth').textContent = st.ntp_auth_available
@@ -955,7 +941,15 @@
     $('dg-loopback').textContent = !d.loopback_active ? t('off')
       : t('pulses used {used}, missing {missing}, implausible {rejected}; software minus loopback {bias} ns',
         { used: d.loopback_used, missing: d.loopback_missing, rejected: d.loopback_rejected, bias: num(d.sw_bias_ns, 1) });
-    $('dg-qerr').textContent = t('correction sign {sign}, samples {n}, standard deviation {sd} ns; TIM-TP matched {m}, missing {u}, invalid {i}',
+    // qErr correction of the time pulse (TIM-TP): its state comes with the status
+    const st = state ? state.status : {};
+    const slope = Number(st.gnss_qerr_slope || 0).toFixed(2);
+    const qerrState = st.gnss_qerr_state === 1 ? t('qErr correction: learning the sign')
+      : st.gnss_qerr_state === 2 ? t('qErr correction active (slope {slope})', { slope })
+        : st.gnss_qerr_state === 3 ? t('qErr correction off: no correlation (slope {slope})', { slope })
+          : st.gnss_qerr_state === 4 ? t('no qErr: the receiver flags it invalid (TIM-TP)')
+            : t('no qErr (TIM-TP missing or PTP loopback off)');
+    $('dg-qerr').textContent = qerrState + '; ' + t('correction sign {sign}, samples {n}, standard deviation {sd} ns; TIM-TP matched {m}, missing {u}, invalid {i}',
       { sign: d.qerr_sign > 0 ? '+1' : d.qerr_sign < 0 ? '-1' : t('none'), n: d.qerr_samples, sd: num(d.qerr_sd_ns, 1),
         m: d.qerr_matched, u: d.qerr_unmatched, i: d.qerr_invalid }) +
       (d.tp_messages > 0 ? '; ' + t('latest TIM-TP: qErr {q} ps, flags 0x{f}',
@@ -1024,7 +1018,11 @@
             aligned: d.tp_aligned ? '' : ', ' + t('not aligned to the second'), c: d.tp_cable_delay_ns, u: d.tp_user_delay_ns }));
       }
       if (d.rf_known) {
-        gnss.push(t('RF: noise {n} per ms, AGC {agc}, CW jamming indicator {j}', { n: d.rf_noise_per_ms, agc: d.rf_agc_count, j: d.rf_jam_indicator }));
+        // Antenna supervisor and jamming monitor (MON-RF); their states come with the status
+        const antenna = [t('starting'), t('unknown'), t('OK'), t('short circuit'), t('open')][st.gnss_antenna_status] || t('unknown');
+        const jamming = [t('unknown'), t('none'), t('warning'), t('critical')][st.gnss_jamming_state] || t('unknown');
+        gnss.push(t('antenna {antenna}, jamming {jamming}, AGC {agc} % ({count}), noise {n} per ms, CW jamming indicator {j} (MON-RF)',
+          { antenna, jamming, agc: Math.round(d.rf_agc_count * 100 / 8191), count: d.rf_agc_count, n: d.rf_noise_per_ms, j: d.rf_jam_indicator }));
       }
     } else {
       gnss.push(t('sentences {n}, checksum errors {e}, UART overflows {o}', { n: d.nmea_sentences, e: d.nmea_checksum_errors, o: d.uart_overflows }));
