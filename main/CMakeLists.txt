@@ -33,7 +33,6 @@ set(MAIN_REQUIRES
         spi_flash
         mdns
         nvs_flash
-        driver
         esp_driver_gpio
         esp_driver_ledc
         esp_driver_mcpwm

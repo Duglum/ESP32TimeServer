@@ -75,6 +75,7 @@ Contents
 | 46 | **lwIP and UART interrupt in IRAM** (2026-10-26, review E-04): `CONFIG_LWIP_IRAM_OPTIMIZATION`, `CONFIG_UART_ISR_IN_IRAM` | the lwIP RX/TX path runs without flash cache misses; the GNSS UART keeps receiving during flash writes (NVS, OTE); DIRAM about +17 kB |
 | 47 | **Core dump of a crash** (2026-10-26, review E-07): written to a new `coredump` partition (128 kB at the end of the flash), logged at the next start, shown in the diagnostics with download and delete | a crash in the field can be analysed afterwards (`idf.py coredump-info`); **the partition table has to be flashed once over USB** |
 | 48 | **Rollback of a failed firmware update** (2026-10-26, review E-06): an image written by an OTE update is kept only after a self check (Ethernet, NTP server, web admin, GNSS data for 60 s); otherwise, after a crash, a reset or 15 min, the previous image starts again | a broken update no longer leaves the server down until someone flashes it over USB; **the bootloader has to be flashed once over USB** |
+| 49 | **`driver` no longer required by main** (2026-10-26, review E-09) | the main component names the `esp_driver_*` components it uses; same image |
 
 No memory leak was found in the review (section 4.13).
 
@@ -855,6 +856,10 @@ Review E-06: after an OTE update the new image was started and kept whatever hap
 - While the running image is being checked, ESP-IDF refuses a new upload (`ESP_ERR_OTA_ROLLBACK_INVALID_STATE`); the page and `tools/ote_upload.py` get `409 The running firmware is still being checked after its update (at most 15 minutes): upload again afterwards`. The status page shows `new after an update: being checked (at most 15 min)` next to the firmware version. German texts added.
 - Images flashed over USB are not checked. No eFuse is involved (`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` stays off).
 - Verified: build (-O2, no warning; bootloader 0x5E10), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, the status line against the mock. Not on the board yet.
+
+### 4.48 `driver` no longer required by the main component (2026-10-26)
+
+Review E-09. In ESP-IDF 6.1 the component `driver` only holds the legacy I2C, touch sensor and TWAI drivers; the code of `main` uses none of them (its driver headers are `driver/gpio.h`, `ledc.h`, `mcpwm_cap.h`, `sdmmc_host.h` and `uart.h`, all from the `esp_driver_*` components named since 4.38). `driver` is removed from `MAIN_REQUIRES` in `main/CMakeLists.txt`. It is still part of the build because the I2C component of the LCD (`esp-idf-lib__i2cdev`) requires it itself. The image is the same size. Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`.
 
 ## 5. Security and open ports
 
