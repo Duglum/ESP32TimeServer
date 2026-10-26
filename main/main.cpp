@@ -5567,6 +5567,23 @@ static bool ptp_apply_command(int32_t cmd_ppb)
     return true;
 }
 
+// Diagnostics: a running holdover ends without the re-lock ramp (the clock was set or the estimate started again
+// without continuity): duration, no time error
+static void ptp_holdover_end_set()
+{
+    ptp_servo_state_t &st = s_ptp_servo;
+    if (st.holdover_started_us == 0)
+        return;
+    const int64_t now_us = esp_timer_get_time();
+    st.last_holdover_s = static_cast<double>(now_us - st.holdover_started_us) * 1e-6;
+    st.last_holdover_end_us = now_us;
+    st.holdover_started_us = 0;
+    st.holdover_error_open = false;
+    st.last_holdover_stepped = true;
+    st.last_holdover_error_ns = 0.0;
+    ++st.holdovers;
+}
+
 // Ends a re-lock after a holdover: the mapping follows the estimate directly again
 static void ptp_relock_reset()
 {
@@ -5608,8 +5625,8 @@ static double ptp_relock_residual(int64_t ref_true_ns, double ref_offset_ns, boo
         }
         if (st.holdover_error_open)
         {
-            st.last_holdover_error_ns = -residual_ns;
-            st.last_holdover_stepped = fabs(residual_ns) > ptp_step_threshold_ns;
+            st.last_holdover_error_ns = have ? -residual_ns : 0.0;
+            st.last_holdover_stepped = !have || fabs(residual_ns) > ptp_step_threshold_ns;
         }
 #if DEBUG_ENABLED
         ESP_LOGI(TAG, "PTP servo: re-lock, mapping residual %.1f ns", st.relock_residual_ns);
@@ -5702,17 +5719,7 @@ static void ptp_servo_step(int64_t edge_sec, const local_instant_t &edge_local, 
     st.epoch = s_ptp_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     st.initialized = false;
     ++st.steps;
-    if (st.holdover_started_us != 0)
-    {
-        // Diagnostics: the offset after the holdover was too large for the ramp (the PTP clock is set)
-        const int64_t now_us = esp_timer_get_time();
-        st.last_holdover_s = static_cast<double>(now_us - st.holdover_started_us) * 1e-6;
-        st.last_holdover_end_us = now_us;
-        st.holdover_started_us = 0;
-        st.last_holdover_stepped = true;
-        st.last_holdover_error_ns = 0.0;
-        ++st.holdovers;
-    }
+    ptp_holdover_end_set(); // the offset after a holdover was too large for the ramp
     st.holdover_error_open = false;
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "PTP clock %s (offset was %.1f us)", written ? "set" : "could not be set", offset_ns / 1000.0);
@@ -5742,6 +5749,7 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
         st.epoch = epoch;
         st.initialized = false;
         ptp_relock_reset(); // the published mapping belongs to the old clock
+        ptp_holdover_end_set(); // the PTP clock was set (GNSS time sync, Ethernet recovery)
     }
     if (!st.have_rate)
     {
@@ -5841,7 +5849,10 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
         time_diag_add_phase(edge_sec, measurement_ns, 0.0, st.free_ppb, diag_source, true);
         relock_continuity = st.relock_pending;
         if (!relock_continuity)
+        {
             ptp_relock_reset();
+            ptp_holdover_end_set();
+        }
         st.relock_pending = false;
     }
     else
@@ -9533,8 +9544,16 @@ static void gnss_time_sync_task(void *parameter)
                 pending_step_delta = 0;
                 // The clock already shows the right second. While the PPS discipline is running a step would only
                 // disturb it (model clock and PTP compensation are invalid until the next PPS edge), so skip it.
-                step_clock = !(s_pps_discipline_active.load(std::memory_order_acquire) &&
-                               s_model_valid.load(std::memory_order_acquire));
+                // The same while the clocks coast through a PPS holdover (model clock within its hour, PTP mapping
+                // valid): the PPS task re-locks without a phase step once it follows the PPS again (review Z-06).
+                // After a GNSS loss of more than 30 s this check comes first: the PPS is followed again only 5 s
+                // after the GNSS time is valid (review Z-05), so a step here would set the PTP clock from the system
+                // clock (us) and skip the re-lock.
+                int64_t model_unix_ns = 0;
+                const bool model_running = model_ns_at(local_now_ns(), model_unix_ns);
+                const bool ptp_mapped = !s_ptp_clock_ready.load(std::memory_order_acquire) ||
+                                        s_ptp_comp_valid.load(std::memory_order_acquire);
+                step_clock = !(model_running && (s_pps_discipline_active.load(std::memory_order_acquire) || ptp_mapped));
             }
             else if (update_delta != pending_step_delta)
             {
