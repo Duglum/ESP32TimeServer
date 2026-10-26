@@ -63,6 +63,8 @@
     '{limit} per second and client, {n} requests dropped since the start': '{limit} pro Sekunde und Client, {n} Anfragen seit dem Start verworfen',
     'off, {n} requests dropped since the start': 'aus, {n} Anfragen seit dem Start verworfen',
     'stratum 1, PPS holdover (PPS lost)': 'Stratum 1, PPS-Holdover (PPS verloren)',
+    '{n} satellites in use, fix quality {q} (GGA)': '{n} Satelliten in Verwendung, Fix-Qualität {q} (GGA)',
+    'RMC {ms} ms after the PPS ({min} to {max} ms since the start)': 'RMC {ms} ms nach dem PPS ({min} bis {max} ms seit dem Start)',
     'stratum 1, GNSS and PPS locked': 'Stratum 1, GNSS und PPS synchronisiert',
     'not stratum 1 (PPS {pps}, GNSS {gnss})': 'nicht Stratum 1 (PPS {pps}, GNSS {gnss})',
     'not stratum 1 yet: GNSS fix {age} s old, {min} s required after the start':
@@ -156,7 +158,10 @@
     'NMEA Standard Protocol (needs RMC sentence)': 'NMEA-Standardprotokoll (benötigt RMC-Sentence)',
     'GNSS baud rate <span class="badge restart">restart</span>': 'GNSS-Baudrate <span class="badge restart">Neustart</span>',
     'With the U-Blox UBX protocol the baud rate is found and configured automatically.': 'Mit dem U-Blox-UBX-Protokoll wird die Baudrate automatisch erkannt und eingestellt.',
-    'After a start': 'Nach einem Start',
+    'Validity of the GNSS time': 'Gültigkeit der GNSS-Zeit',
+    'Minimum satellites in use before stratum 1 (0 = off)': 'Mindestzahl verwendeter Satelliten vor Stratum 1 (0 = aus)',
+    '0 to 50. The GNSS time only counts while the receiver\'s position solution uses at least this many satellites; with fewer the server answers at stratum 16 after a few seconds (a 3D fix needs 4; a higher value such as 6 excludes weak fixes). NMEA protocol: needs GGA sentences in addition to RMC, the receiver has to be set to send them; while this is on and no GGA arrives, the server stays at stratum 16. U-Blox UBX protocol: the satellites of the navigation solution. Takes effect at once with Apply.':
+      '0 bis 50. Die GNSS-Zeit zählt nur, solange die Positionslösung des Empfängers mindestens so viele Satelliten verwendet; mit weniger antwortet der Server nach wenigen Sekunden mit Stratum 16 (ein 3D-Fix braucht 4; ein höherer Wert wie 6 schließt schwache Fixes aus). NMEA-Protokoll: braucht GGA-Sätze zusätzlich zu RMC, der Empfänger muss sie senden; solange dies eingeschaltet ist und kein GGA ankommt, bleibt der Server bei Stratum 16. U-Blox-UBX-Protokoll: die Satelliten der Navigationslösung. Wirkt sofort mit Übernehmen.',
     'Minimum GNSS fix age before stratum 1 (s, 0 = off)': 'Mindestalter des GNSS-Fix vor Stratum 1 (s, 0 = aus)',
     '0 to 3600 s. After a cold start (no backup battery, or switched off for a long time) a GNSS receiver may report UTC off by whole seconds until it has received the leap seconds, which the satellites broadcast every 12.5 minutes. With a value the server answers at stratum 16 after each start until the GNSS time has been valid for this long without a gap of more than 30 s; then the time is checked against the GNSS once more (a wrong second is corrected) and stratum 1 is allowed until the next start. Recommended: 750 s (12.5 min) for a receiver without backup battery. Takes effect at once with Apply while the server waits; once stratum 1 was reached, a change applies from the next start. A u-blox receiver also reports when its UTC time is fully resolved, which is checked in any case.':
       '0 bis 3600 s. Nach einem Kaltstart (keine Pufferbatterie oder lange ausgeschaltet) kann ein GNSS-Empfänger UTC um ganze Sekunden falsch melden, bis er die Schaltsekunden empfangen hat, die die Satelliten alle 12,5 Minuten aussenden. Mit einem Wert antwortet der Server nach jedem Start mit Stratum 16, bis die GNSS-Zeit so lange ohne eine Lücke von mehr als 30 s gültig war; dann wird die Zeit noch einmal mit dem GNSS verglichen (eine falsche Sekunde wird korrigiert), und Stratum 1 ist bis zum nächsten Start erlaubt. Empfohlen: 750 s (12,5 min) für einen Empfänger ohne Pufferbatterie. Wirkt sofort mit Übernehmen, solange der Server wartet; nachdem Stratum 1 erreicht wurde, gilt eine Änderung ab dem nächsten Start. Ein u-blox-Empfänger meldet zusätzlich, wann seine UTC-Zeit vollständig aufgelöst ist; das wird in jedem Fall geprüft.',
@@ -195,6 +200,7 @@
     'PPS pin': 'PPS-Pin',
     'PTP PPS loopback pin': 'PTP-PPS-Loopback-Pin',
     'Minimum GNSS fix age: 0 to 3600 s': 'Mindestalter des GNSS-Fix: 0 bis 3600 s',
+    'Minimum satellites in use: 0 to 50': 'Mindestzahl verwendeter Satelliten: 0 bis 50',
     'PPS holdover: 0 to 600 s': 'PPS-Holdover: 0 bis 600 s',
     'Keep answering after the PPS loss: 0 to 1440 min': 'Weiter antworten nach dem PPS-Ausfall: 0 bis 1440 min',
     'Stratum after the holdover: 2 to 16': 'Stratum nach dem Holdover: 2 bis 16',
@@ -564,6 +570,7 @@
     ['NTP keys: at most %u', 'NTP-Schlüssel: höchstens {1}'],
     ['Rate limit per client: 0 (no limit) to %u requests per second', 'Rate-Limit pro Client: 0 (unbegrenzt) bis {1} Anfragen pro Sekunde'],
     ['Minimum GNSS fix age: 0 (off) to %u seconds', 'Mindestalter des GNSS-Fix: 0 (aus) bis {1} Sekunden'],
+    ['Minimum satellites in use: 0 (off) to %u', 'Mindestzahl verwendeter Satelliten: 0 (aus) bis {1}'],
     ['PPS holdover: 0 to %u seconds', 'PPS-Holdover: 0 bis {1} Sekunden'],
     ['Serving time after the PPS loss: 0 (no limit) to %u minutes', 'Antwortzeit nach dem PPS-Ausfall: 0 (unbegrenzt) bis {1} Minuten'],
     ['Stratum after the holdover: 2 to 16', 'Stratum nach dem Holdover: 2 bis 16'],

@@ -170,12 +170,17 @@
           </label>
         </div>
 
-        <h3 class="sub-heading">After a start</h3>
+        <h3 class="sub-heading">Validity of the GNSS time</h3>
         <div class="grid">
           <label class="span2"><span class="lt">Minimum GNSS fix age before stratum 1 (s, 0 = off)</span>
             <input type="number" name="gnss_min_fix_age" min="0" max="3600">
             <small class="note">0 to 3600 s. After a cold start (no backup battery, or switched off for a long time) a GNSS receiver may report UTC off by whole seconds until it has received the leap seconds, which the satellites broadcast every 12.5 minutes. With a value the server answers at stratum 16 after each start until the GNSS time has been valid for this long without a gap of more than 30 s; then the time is checked against the GNSS once more (a wrong second is corrected) and stratum 1 is allowed until the next start. Recommended: 750 s (12.5 min) for a receiver without backup battery. Takes effect at once with Apply while the server waits; once stratum 1 was reached, a change applies from the next start. A u-blox receiver also reports when its UTC time is fully resolved, which is checked in any case.</small>
             <small class="def" data-for="gnss_min_fix_age"></small>
+          </label>
+          <label class="span2"><span class="lt">Minimum satellites in use before stratum 1 (0 = off)</span>
+            <input type="number" name="gnss_min_satellites" min="0" max="50">
+            <small class="note">0 to 50. The GNSS time only counts while the receiver's position solution uses at least this many satellites; with fewer the server answers at stratum 16 after a few seconds (a 3D fix needs 4; a higher value such as 6 excludes weak fixes). NMEA protocol: needs GGA sentences in addition to RMC, the receiver has to be set to send them; while this is on and no GGA arrives, the server stays at stratum 16. U-Blox UBX protocol: the satellites of the navigation solution. Takes effect at once with Apply.</small>
+            <small class="def" data-for="gnss_min_satellites"></small>
           </label>
         </div>
 

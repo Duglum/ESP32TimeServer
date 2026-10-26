@@ -417,6 +417,7 @@
       gnss_baud: String(s.gnss_baud),
       ptp_loopback_pin: s.ptp_loopback_pin < 0 ? '' : String(s.ptp_loopback_pin),
       gnss_min_fix_age: String(s.gnss_min_fix_age),
+      gnss_min_satellites: String(s.gnss_min_satellites),
       pps_holdover: String(s.pps_holdover),
       pps_lost_serve: s.pps_lost_serve,
       pps_lost_serve_min: String(s.pps_lost_serve_min),
@@ -501,6 +502,7 @@
       if (name === 'led_brightness') text += ' %';
       if (name === 'mqtt_report_period') text += ' s';
       if (name === 'pps_holdover' || name === 'gnss_min_fix_age') text = value === '0' ? t('off') : text + ' s';
+      if (name === 'gnss_min_satellites' && value === '0') text = t('off');
       if (name === 'pps_lost_serve_min') text = value === '0' ? t('no limit') : text + ' min';
       if (name === 'ntp_client_rate_limit') text = value === '0' ? t('off') : t('{n} per second', { n: value });
       if (name === 'pps_dispersion') text = (lang === 'de' ? text.replace('.', ',') : text) + ' ms/s';
@@ -612,6 +614,7 @@
       gnss_baud: Number(f.gnss_baud.value),
       ptp_loopback_pin: pin('ptp_loopback_pin', 'PTP PPS loopback pin', true),
       gnss_min_fix_age: Number(f.gnss_min_fix_age.value),
+      gnss_min_satellites: Number(f.gnss_min_satellites.value),
       pps_holdover: Number(f.pps_holdover.value),
       pps_lost_serve: f.pps_lost_serve.checked,
       pps_lost_serve_min: Number(f.pps_lost_serve_min.value),
@@ -690,6 +693,10 @@
     if (f.ntp_client_rate_limit.value.trim() === '' || !Number.isInteger(body.ntp_client_rate_limit) ||
         body.ntp_client_rate_limit < 0 || body.ntp_client_rate_limit > 10000) {
       throw new Error(t('Rate limit per client: 0 to 10000 requests per second'));
+    }
+    if (f.gnss_min_satellites.value.trim() === '' || !Number.isInteger(body.gnss_min_satellites) ||
+        body.gnss_min_satellites < 0 || body.gnss_min_satellites > 50) {
+      throw new Error(t('Minimum satellites in use: 0 to 50'));
     }
     if (f.gnss_min_fix_age.value.trim() === '' || !Number.isInteger(body.gnss_min_fix_age) ||
         body.gnss_min_fix_age < 0 || body.gnss_min_fix_age > 3600) {
@@ -785,6 +792,12 @@
     const gnss = [st.ublox_receiver ? t('U-Blox UBX protocol') : t('NMEA standard protocol')];
     if (st.gnss_baud_in_use) gnss.push(t('{baud} baud', { baud: st.gnss_baud_in_use }));
     if (st.ublox_receiver) gnss.push(st.gnss_dynamic_model ? t('{model} mode', { model: st.gnss_dynamic_model }) : t('dynamic model not known'));
+    // NMEA protocol: GGA (optional) and the reception of the RMC after the PPS edge
+    if (st.gnss_satellites_used >= 0) gnss.push(t('{n} satellites in use, fix quality {q} (GGA)', { n: st.gnss_satellites_used, q: st.gnss_fix_quality }));
+    if (st.gnss_rmc_after_pps_ms >= 0) {
+      gnss.push(t('RMC {ms} ms after the PPS ({min} to {max} ms since the start)',
+        { ms: st.gnss_rmc_after_pps_ms, min: st.gnss_rmc_after_pps_min_ms, max: st.gnss_rmc_after_pps_max_ms }));
+    }
     fillList('st-gnss', gnss, '', false);
     const keys = st.ntp_auth_keys_in_use;
     $('st-auth').textContent = st.ntp_auth_available

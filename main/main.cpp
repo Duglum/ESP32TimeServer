@@ -90,6 +90,7 @@
 #undef MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED
 #define MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED 1
 
+#include "custom/gnss_nmea.h"
 #include "custom/ntp_auth.h"
 #include "custom/ntp_cache.h"
 
@@ -283,6 +284,7 @@ static constexpr size_t MQTT_Service_Task_Stack_Size = 3512;
 static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2222;
 static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
 static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
+static constexpr size_t GNSS_NMEA_Reader_Task_Stack_Size = 3072; // new (NMEA reader, custom/gnss_nmea): measure
 static constexpr size_t PPS_Discipline_Task_Stack_Size = 3584; // was 3135: the PTP servo runs in this task (measure again)
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
@@ -304,6 +306,7 @@ typedef enum
 {
     Ethernet_Transport_Recovery,
     GNSS_Recovery,
+    GNSS_NMEA_Reader,
     GNSS_Time_Sync,
     Hardware_NTP_Server,
     LED_LCD_Button,
@@ -316,6 +319,7 @@ typedef enum
 
 static size_t Highest_Ethernet_Transport_Recovery_Task_Stack_Size = 0;
 static size_t Highest_GNSS_Recovery_Task_Stack_Size = 0;
+static size_t Highest_GNSS_NMEA_Reader_Task_Stack_Size = 0;
 static size_t Highest_GNSS_Time_Sync_Task_Stack_Size = 0;
 static size_t Highest_Hardware_NTP_Server_Task_Stack_Size = 0;
 static size_t Highest_LED_LCD_Button_Task_Stack_Size = 0;
@@ -346,6 +350,10 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
     case GNSS_Recovery:
         task_name = "gnss_recovery_task";
         allocated_bytes = GNSS_Recovery_Task_Stack_Size;
+        break;
+    case GNSS_NMEA_Reader:
+        task_name = "gnss_nmea";
+        allocated_bytes = GNSS_NMEA_Reader_Task_Stack_Size;
         break;
     case GNSS_Time_Sync:
         task_name = "gnss_time_sync_task";
@@ -418,6 +426,13 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
         if (curent_suggestion > Highest_GNSS_Recovery_Task_Stack_Size)
         {
             Highest_GNSS_Recovery_Task_Stack_Size = curent_suggestion;
+            highest_value_changed = true;
+        }
+        break;
+    case GNSS_NMEA_Reader:
+        if (curent_suggestion > Highest_GNSS_NMEA_Reader_Task_Stack_Size)
+        {
+            Highest_GNSS_NMEA_Reader_Task_Stack_Size = curent_suggestion;
             highest_value_changed = true;
         }
         break;
@@ -499,6 +514,11 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
             ESP_LOGW(TAG, "static constexpr size_t GNSS_Recovery_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_Recovery_Task_Stack_Size), static_cast<unsigned int>(GNSS_Recovery_Task_Stack_Size));
         else
             ESP_LOGI(TAG, "static constexpr size_t GNSS_Recovery_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_Recovery_Task_Stack_Size), static_cast<unsigned int>(GNSS_Recovery_Task_Stack_Size));
+
+        if (Highest_GNSS_NMEA_Reader_Task_Stack_Size > GNSS_NMEA_Reader_Task_Stack_Size)
+            ESP_LOGW(TAG, "static constexpr size_t GNSS_NMEA_Reader_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_NMEA_Reader_Task_Stack_Size), static_cast<unsigned int>(GNSS_NMEA_Reader_Task_Stack_Size));
+        else
+            ESP_LOGI(TAG, "static constexpr size_t GNSS_NMEA_Reader_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_NMEA_Reader_Task_Stack_Size), static_cast<unsigned int>(GNSS_NMEA_Reader_Task_Stack_Size));
 
         if (Highest_GNSS_Time_Sync_Task_Stack_Size > GNSS_Time_Sync_Task_Stack_Size)
             ESP_LOGW(TAG, "static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_Time_Sync_Task_Stack_Size), static_cast<unsigned int>(GNSS_Time_Sync_Task_Stack_Size));
@@ -1433,7 +1453,8 @@ static void mqtt_enqueue_ntp_request(const struct sockaddr_storage &source_addre
 
 static void controlled_restart(const char *reason);
 
-static HardwareSerial s_gnss_serial(1);
+static constexpr int GNSS_UART_NUM = 1; // UART of the GNSS receiver (NMEA reader; HardwareSerial(1) of the u-blox library)
+static HardwareSerial s_gnss_serial(GNSS_UART_NUM);
 static SFE_UBLOX_GNSS_SERIAL s_gnss;
 static uint32_t s_detected_gnss_baud = 0;
 static std::atomic<bool> s_saved_gnss_baud_communication_failed{false};
@@ -1513,6 +1534,9 @@ static std::atomic<int64_t> s_gnss_min_fix_age_us{0};
 static std::atomic<int64_t> s_gnss_fix_since_us{0};      // start of the current fix (esp_timer, 0 = none yet)
 static std::atomic<int64_t> s_gnss_fix_last_valid_us{0}; // last valid GNSS reading of the current fix
 static std::atomic<bool> s_gnss_fix_qualified{false};    // the sync check after the minimum fix age was made
+// Minimum satellites in use before stratum 1 (web setting, live, 0 = off). NMEA: custom/gnss_nmea (needs GGA); UBX:
+// numSV of NAV-PVT in the sync candidate and the validity check
+static std::atomic<uint8_t> s_gnss_min_satellites{0};
 static constexpr int64_t Sync_Stale_After_Us = static_cast<int64_t>(periodicGNSSRefreshEveryThisNumberOfMinutes) * 60LL * 1000000LL * 3LL;
 static constexpr int64_t Gnss_Validity_Timeout_Us = 3500000LL;
 static constexpr int64_t Pps_Lost_Coast_Max_Us = 3600LL * 1000000LL; // the model clock keeps the learned rate for one hour
@@ -1561,16 +1585,6 @@ struct gnss_nvs_data_t
 };
 
 static uint32_t s_gnss_target_baud = 0;
-
-struct nmea_rmc_time_t
-{
-    int year = 0;
-    int month = 0;
-    int day = 0;
-    int hour = 0;
-    int minute = 0;
-    int second = 0;
-};
 
 static void refresh_sync_state_locked(sync_state_t *state, int64_t now_us)
 {
@@ -4095,325 +4109,9 @@ static const char *fix_type_to_text(uint8_t fix_type)
 }
 #endif
 
-static bool is_digit_char(char c)
-{
-    return c >= '0' && c <= '9';
-}
-
-static bool parse_two_digits(const char *text, int &value)
-{
-    if (text == nullptr || !is_digit_char(text[0]) || !is_digit_char(text[1]))
-        return false;
-
-    value = (text[0] - '0') * 10 + (text[1] - '0');
-    return true;
-}
-
-static bool get_nmea_field(const char *sentence, int field_index, char *output, size_t output_size)
-{
-    if (sentence == nullptr || output == nullptr || output_size == 0 || field_index < 0)
-        return false;
-
-    const char *cursor = sentence;
-    if (*cursor == '$')
-        cursor++;
-
-    int current_field = 0;
-    const char *field_start = cursor;
-
-    while (true)
-    {
-        char current = *cursor;
-        bool is_delimiter = (current == ',') || (current == '*') || (current == '\0') || (current == '\r') || (current == '\n');
-
-        if (is_delimiter)
-        {
-            if (current_field == field_index)
-            {
-                size_t length = static_cast<size_t>(cursor - field_start);
-                if (length >= output_size)
-                    length = output_size - 1;
-
-                memcpy(output, field_start, length);
-                output[length] = '\0';
-                return true;
-            }
-
-            if (current != ',')
-                break;
-
-            current_field++;
-            cursor++;
-            field_start = cursor;
-            continue;
-        }
-
-        cursor++;
-    }
-
-    output[0] = '\0';
-    return false;
-}
-
-static bool parse_nmea_rmc_sentence(const char *sentence, nmea_rmc_time_t *time_data)
-{
-    if (sentence == nullptr || time_data == nullptr)
-        return false;
-
-    char sentence_type[16] = "";
-    if (!get_nmea_field(sentence, 0, sentence_type, sizeof(sentence_type)))
-        return false;
-
-    size_t sentence_type_len = strlen(sentence_type);
-    if (sentence_type_len < 3 || strcmp(sentence_type + sentence_type_len - 3, "RMC") != 0)
-        return false;
-
-    char status_field[4] = "";
-    if (!get_nmea_field(sentence, 2, status_field, sizeof(status_field)))
-        return false;
-
-    if (status_field[0] != 'A')
-        return false;
-
-    // Mode indicator (field 12, NMEA 2.3 and later): only an autonomous, differential, precise or RTK solution counts.
-    // E (dead reckoning), N (not valid), M (manual input), S (simulator) and unknown letters are refused; a receiver
-    // that sends no mode indicator is judged by the status alone, as before.
-    char mode_field[4] = "";
-    if (get_nmea_field(sentence, 12, mode_field, sizeof(mode_field)) && mode_field[0] != '\0' &&
-        strchr("ADPRF", mode_field[0]) == nullptr)
-        return false;
-
-    char time_field[16] = "";
-    char date_field[16] = "";
-    if (!get_nmea_field(sentence, 1, time_field, sizeof(time_field)) || !get_nmea_field(sentence, 9, date_field, sizeof(date_field)))
-        return false;
-
-    if (strlen(time_field) < 6 || strlen(date_field) < 6)
-        return false;
-
-    int hour = 0;
-    int minute = 0;
-    int second = 0;
-    int day = 0;
-    int month = 0;
-    int year_two_digit = 0;
-
-    if (!parse_two_digits(time_field + 0, hour) ||
-        !parse_two_digits(time_field + 2, minute) ||
-        !parse_two_digits(time_field + 4, second) ||
-        !parse_two_digits(date_field + 0, day) ||
-        !parse_two_digits(date_field + 2, month) ||
-        !parse_two_digits(date_field + 4, year_two_digit))
-    {
-        return false;
-    }
-
-    int year = 2000 + year_two_digit;
-
-    if (year <= 2022 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
-        return false;
-
-    time_data->year = year;
-    time_data->month = month;
-    time_data->day = day;
-    time_data->hour = hour;
-    time_data->minute = minute;
-    time_data->second = second;
-    return true;
-}
-
-// NMEA satellite count (GSV sentences), used with the NMEA standard protocol
-static constexpr size_t NMEA_GSV_GROUP_LIMIT = 8;
-static constexpr uint32_t NMEA_GSV_GROUP_EXPIRY_MS = 10000UL;
-
-struct nmea_gsv_group_t
-{
-    char talker[3] = "";
-    char signal_id[4] = "";
-    uint8_t message_count = 0;
-    uint8_t next_message_number = 0;
-    uint8_t satellites_in_view = 0;
-    uint32_t last_updated_ms = 0;
-    bool published = false;
-};
-
-static nmea_gsv_group_t s_nmea_gsv_groups[NMEA_GSV_GROUP_LIMIT]{};
-
-static bool is_nmea_checksum_valid(const char *sentence)
-{
-    if (sentence == nullptr || sentence[0] != '$')
-        return false;
-
-    const char *checksum_marker = strrchr(sentence, '*');
-    if (checksum_marker == nullptr || checksum_marker[1] == '\0' || checksum_marker[2] == '\0' || checksum_marker[3] != '\0')
-        return false;
-
-    // Two hexadecimal digits (no sscanf: this also runs in the GNSS time sync task, which has a small stack)
-    const auto hex_value = [](char c) -> int
-    {
-        if (c >= '0' && c <= '9')
-            return c - '0';
-        if (c >= 'A' && c <= 'F')
-            return c - 'A' + 10;
-        if (c >= 'a' && c <= 'f')
-            return c - 'a' + 10;
-        return -1;
-    };
-    const int high = hex_value(checksum_marker[1]);
-    const int low = hex_value(checksum_marker[2]);
-    if (high < 0 || low < 0)
-        return false;
-    const unsigned int expected_checksum = static_cast<unsigned int>(high * 16 + low);
-
-    uint8_t actual_checksum = 0;
-    for (const char *cursor = sentence + 1; cursor < checksum_marker; ++cursor)
-        actual_checksum ^= static_cast<uint8_t>(*cursor);
-
-    return actual_checksum == expected_checksum;
-}
-
-static bool parse_nmea_uint8_field(const char *sentence, int field_index, uint8_t *value)
-{
-    if (value == nullptr)
-        return false;
-
-    char field[4] = "";
-    if (!get_nmea_field(sentence, field_index, field, sizeof(field)) || field[0] == '\0')
-        return false;
-
-    unsigned int parsed_value = 0;
-    if (sscanf(field, "%u", &parsed_value) != 1 || parsed_value > UINT8_MAX)
-        return false;
-
-    for (const char *cursor = field; *cursor != '\0'; ++cursor)
-    {
-        if (!is_digit_char(*cursor))
-            return false;
-    }
-
-    *value = static_cast<uint8_t>(parsed_value);
-    return true;
-}
-
-static void publish_nmea_gsv_satellite_count(uint32_t now_ms)
-{
-#if MQTT_ENABLED
-    if (s_mqtt_on)
-    {
-        bool has_constellation_specific_group = false;
-        bool has_reportable_group = false;
-        for (const nmea_gsv_group_t &group : s_nmea_gsv_groups)
-        {
-            if (!group.published || (now_ms - group.last_updated_ms) > NMEA_GSV_GROUP_EXPIRY_MS)
-                continue;
-
-            has_reportable_group = true;
-            if (strcmp(group.talker, "GN") != 0)
-            {
-                has_constellation_specific_group = true;
-                break;
-            }
-        }
-
-        if (!has_reportable_group)
-            return;
-
-        uint16_t total_satellites = 0;
-        for (const nmea_gsv_group_t &group : s_nmea_gsv_groups)
-        {
-            if (group.published && (now_ms - group.last_updated_ms) <= NMEA_GSV_GROUP_EXPIRY_MS &&
-                (!has_constellation_specific_group || strcmp(group.talker, "GN") != 0))
-                total_satellites += group.satellites_in_view;
-        }
-        mqtt_note_satellite_count(static_cast<uint8_t>(std::min<uint16_t>(total_satellites, UINT8_MAX)));
-    }
-#else
-    (void)now_ms;
-#endif
-}
-
-static void expire_nmea_gsv_groups(uint32_t now_ms)
-{
-    bool group_expired = false;
-    for (nmea_gsv_group_t &group : s_nmea_gsv_groups)
-    {
-        if (group.talker[0] != '\0' && (now_ms - group.last_updated_ms) > NMEA_GSV_GROUP_EXPIRY_MS)
-        {
-            group = nmea_gsv_group_t{};
-            group_expired = true;
-        }
-    }
-
-    if (group_expired)
-        publish_nmea_gsv_satellite_count(now_ms);
-}
-
-static void process_nmea_gsv_sentence(const char *sentence)
-{
-    if (!is_nmea_checksum_valid(sentence))
-        return;
-
-    char sentence_type[16] = "";
-    if (!get_nmea_field(sentence, 0, sentence_type, sizeof(sentence_type)) || strlen(sentence_type) != 5 ||
-        strcmp(sentence_type + 2, "GSV") != 0)
-        return;
-
-    uint8_t message_count = 0;
-    uint8_t message_number = 0;
-    uint8_t satellites_in_view = 0;
-    if (!parse_nmea_uint8_field(sentence, 1, &message_count) ||
-        !parse_nmea_uint8_field(sentence, 2, &message_number) ||
-        !parse_nmea_uint8_field(sentence, 3, &satellites_in_view) ||
-        message_count == 0 || message_number == 0 || message_number > message_count)
-        return;
-
-    const uint16_t satellite_offset = static_cast<uint16_t>(message_number - 1) * 4U;
-    const uint8_t satellites_in_message = satellites_in_view > satellite_offset
-                                              ? std::min<uint8_t>(4, static_cast<uint8_t>(satellites_in_view - satellite_offset))
-                                              : 0;
-    char signal_id[4] = "";
-    (void)get_nmea_field(sentence, 4 + satellites_in_message * 4, signal_id, sizeof(signal_id));
-
-    const uint32_t now_ms = millis();
-    expire_nmea_gsv_groups(now_ms);
-
-    nmea_gsv_group_t *group = nullptr;
-    nmea_gsv_group_t *available_group = nullptr;
-    for (nmea_gsv_group_t &candidate : s_nmea_gsv_groups)
-    {
-        if (candidate.talker[0] == '\0')
-        {
-            available_group = &candidate;
-            continue;
-        }
-        if (strncmp(candidate.talker, sentence_type, 2) == 0 && strcmp(candidate.signal_id, signal_id) == 0)
-        {
-            group = &candidate;
-            break;
-        }
-    }
-
-    if (group == nullptr && available_group != nullptr)
-    {
-        group = available_group;
-        snprintf(group->talker, sizeof(group->talker), "%.2s", sentence_type);
-        snprintf(group->signal_id, sizeof(group->signal_id), "%s", signal_id);
-    }
-
-    if (group == nullptr || (message_number != 1 && (group->message_count != message_count || group->next_message_number != message_number)))
-        return;
-
-    group->message_count = message_count;
-    group->next_message_number = static_cast<uint8_t>(message_number + 1);
-    group->satellites_in_view = satellites_in_view;
-    group->last_updated_ms = now_ms;
-    group->published = message_number == message_count;
-
-    if (group->published)
-        publish_nmea_gsv_satellite_count(now_ms);
-}
-
-static bool wait_for_nmea_rmc_time(nmea_rmc_time_t *time_data, uint32_t timeout_ms)
+// NMEA fallback of a u-blox receiver: reads the RMC from the serial port of the u-blox library (the NMEA protocol
+// uses the reader of custom/gnss_nmea instead)
+static bool wait_for_ublox_nmea_rmc_time(nmea_rmc_time_t *time_data, uint32_t timeout_ms)
 {
     if (time_data == nullptr)
         return false;
@@ -4447,13 +4145,8 @@ static bool wait_for_nmea_rmc_time(nmea_rmc_time_t *time_data, uint32_t timeout_
             {
                 sentence[index] = '\0';
                 // Sentences with a wrong or missing checksum are dropped: a corrupted RMC could carry a wrong time
-                if (is_nmea_checksum_valid(sentence))
-                {
-                    if (!s_gnss_ublox)
-                        process_nmea_gsv_sentence(sentence);
-                    if (parse_nmea_rmc_sentence(sentence, time_data))
-                        return true;
-                }
+                if (gnss_nmea_checksum_valid(sentence) && gnss_nmea_parse_rmc(sentence, time_data))
+                    return true;
 
                 collecting = false;
                 index = 0;
@@ -4488,6 +4181,15 @@ struct gnss_probe_result_t
     char sample[33] = "";
 };
 
+// Next valid RMC within timeout_ms: NMEA protocol from the GNSS reader, NMEA fallback of a u-blox receiver from the
+// serial port of the u-blox library
+static bool wait_for_valid_rmc(nmea_rmc_time_t *time_data, uint32_t timeout_ms)
+{
+    if (!s_gnss_ublox)
+        return gnss_nmea_wait_valid_rmc(0, esp_timer_get_time() + static_cast<int64_t>(timeout_ms) * 1000LL, time_data);
+    return wait_for_ublox_nmea_rmc_time(time_data, timeout_ms);
+}
+
 // u-blox, after getPVT(): the UTC time of day is confirmed (NAV-PVT flags2.confirmedTime). Required only when the
 // receiver reports whether it could confirm it (confirmedAvai); otherwise the other validity flags decide.
 static bool ubx_time_confirmed()
@@ -4503,8 +4205,11 @@ static bool current_gnss_timing_is_valid()
 {
     if (s_use_nmea_fallback)
     {
+        // NMEA protocol: the reader keeps the latest RMC (1 Hz), it has to be valid and recent
+        if (!s_gnss_ublox)
+            return gnss_nmea_time_valid(1500000LL);
         nmea_rmc_time_t nmea_time{};
-        return wait_for_nmea_rmc_time(&nmea_time, 1200UL);
+        return wait_for_ublox_nmea_rmc_time(&nmea_time, 1200UL);
     }
 
     // Get the latest Position/Velocity/Time solution and fill all global variables
@@ -4532,6 +4237,8 @@ static bool current_gnss_timing_is_valid()
     // whole seconds until it is fully resolved
     bool fully_resolved = s_gnss.getTimeFullyResolved(status_query_timeout_ms);
     bool time_confirmed = ubx_time_confirmed();
+    const uint8_t min_satellites = s_gnss_min_satellites.load(std::memory_order_relaxed);
+    bool enough_satellites = min_satellites == 0 || s_gnss.getSIV(status_query_timeout_ms) >= min_satellites;
 
 #if DEBUG_ENABLED
 
@@ -4554,9 +4261,12 @@ static bool current_gnss_timing_is_valid()
     if (!time_confirmed)
         ESP_LOGW(TAG, "GNSS time is not confirmed");
 
+    if (!enough_satellites)
+        ESP_LOGW(TAG, "GNSS uses fewer satellites than the minimum of %u", static_cast<unsigned int>(min_satellites));
+
 #endif
 
-    return (fix_type > 2) && gnss_fix_ok && date_valid && time_valid && fully_resolved && time_confirmed;
+    return (fix_type > 2) && gnss_fix_ok && date_valid && time_valid && fully_resolved && time_confirmed && enough_satellites;
 }
 
 static gnss_probe_result_t probe_gnss_uart(uint32_t baud);
@@ -6899,7 +6609,19 @@ static void setup_gnss_ublox_receiver()
     (void)startup_target_baud;
 }
 
-// Receiver with the NMEA standard protocol only: fixed baud rate of the settings, NMEA processing.
+// Satellites reported by the GNSS reader (GGA in use, or GSV in view): MQTT report
+static void gnss_note_satellites(uint8_t count)
+{
+#if MQTT_ENABLED
+    if (s_mqtt_on)
+        mqtt_note_satellite_count(count);
+#else
+    (void)count;
+#endif
+}
+
+// Receiver with the NMEA standard protocol only: fixed baud rate of the settings, NMEA processing by the reader of
+// custom/gnss_nmea on the ESP-IDF UART driver (2 kB receive buffer, own task).
 // Nothing is sent to the receiver: UBX commands (u-blox library) could be misread by other chip sets.
 static void setup_gnss_nmea_receiver()
 {
@@ -6910,9 +6632,21 @@ static void setup_gnss_nmea_receiver()
     s_gnss_required_assume_success = false;
     s_use_nmea_fallback = true;
 
-    s_gnss_serial.end();
-    s_gnss_serial.begin(baud, SERIAL_8N1, s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
-    vTaskDelay(pdMS_TO_TICKS(150));
+    gnss_nmea_config_t config{};
+    config.uart_num = GNSS_UART_NUM;
+    config.rx_pin = s_cfg->gnss_rx_pin;
+    config.tx_pin = s_cfg->gnss_tx_pin;
+    config.baud = baud;
+    config.task_stack = GNSS_NMEA_Reader_Task_Stack_Size;
+    config.task_priority = 10; // below the timing tasks (PPS 14, GNSS time sync 15, NTP 17 / 20)
+    config.task_core = 0;
+    config.last_pps_us = []() -> int64_t { return s_ntp_last_pps_us.load(std::memory_order_relaxed); };
+    config.on_satellites = gnss_note_satellites;
+#if CALCULATE_STACK_SIZES_ENABLED
+    config.loop_hook = []() { report_current_task_stack_usage(GNSS_NMEA_Reader); };
+#endif
+    if (!gnss_nmea_start(config))
+        halt_with_display("GNSS UART failed", "Check RX/TX pins", "See serial log");
 
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "GNSS module profile: generic/fallback (NMEA)");
@@ -7079,7 +6813,7 @@ static void setup_gnss()
         if (!ubx_fix_ready && nmea_fallback_enabled)
         {
             nmea_rmc_time_t nmea_time{};
-            nmea_fix_ready = wait_for_nmea_rmc_time(&nmea_time, 1200UL);
+            nmea_fix_ready = wait_for_valid_rmc(&nmea_time, 1200UL);
         }
 
         if (ubx_fix_ready || nmea_fix_ready)
@@ -9164,14 +8898,20 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
 
     if (s_use_nmea_fallback)
     {
-        // Discard what was received before the edge
-        for (int discarded = 0; discarded < 4096 && s_gnss_serial.available() > 0; ++discarded)
-            (void)s_gnss_serial.read();
+        // Discard what was received before the edge, also a sentence that started before it
+        uint32_t generation = 0;
+        if (!s_gnss_ublox)
+            generation = gnss_nmea_flush();
+        else
+            for (int discarded = 0; discarded < 4096 && s_gnss_serial.available() > 0; ++discarded)
+                (void)s_gnss_serial.read();
 
         nmea_rmc_time_t nmea_time{};
         const int64_t remaining_us = labelDeadlineUs - (esp_timer_get_time() - edge_us);
-        if (remaining_us <= 20000 || !wait_for_nmea_rmc_time(&nmea_time, static_cast<uint32_t>(remaining_us / 1000)) ||
-            (esp_timer_get_time() - edge_us) > labelDeadlineUs)
+        const bool received = remaining_us > 20000 &&
+                              (!s_gnss_ublox ? gnss_nmea_wait_valid_rmc(generation, edge_us + labelDeadlineUs, &nmea_time)
+                                             : wait_for_ublox_nmea_rmc_time(&nmea_time, static_cast<uint32_t>(remaining_us / 1000)));
+        if (!received || (esp_timer_get_time() - edge_us) > labelDeadlineUs)
         {
             candidate->failures.gnss_invalid = true;
 #if DEBUG_ENABLED
@@ -9208,11 +8948,13 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
         }
         // The UTC second is only certain once the time is fully resolved (leap seconds known) and, if the receiver
         // reports it, confirmed
-        if (!s_gnss.getTimeFullyResolved() || !ubx_time_confirmed())
+        const uint8_t min_satellites = s_gnss_min_satellites.load(std::memory_order_relaxed);
+        if (!s_gnss.getTimeFullyResolved() || !ubx_time_confirmed() ||
+            (min_satellites != 0 && s_gnss.getSIV() < min_satellites))
         {
             candidate->failures.gnss_invalid = true;
 #if DEBUG_ENABLED
-            ESP_LOGE(TAG, "GNSS invalid - UTC time not fully resolved or not confirmed.");
+            ESP_LOGE(TAG, "GNSS invalid - UTC time not fully resolved or not confirmed, or too few satellites.");
 #endif
             return false;
         }
@@ -10929,6 +10671,8 @@ void app_apply_live_settings(const web_settings_t &settings)
     s_pps_dispersion_ppm.store(settings.pps_dispersion_ppm, std::memory_order_relaxed);
     ntp_cache_set_rate_limit(settings.ntp_client_rate_limit);
     s_gnss_min_fix_age_us.store(static_cast<int64_t>(settings.gnss_min_fix_age_s) * 1000000LL, std::memory_order_relaxed);
+    s_gnss_min_satellites.store(settings.gnss_min_satellites, std::memory_order_relaxed);
+    gnss_nmea_set_min_satellites(settings.gnss_min_satellites);
     s_lcd_24_hour.store(settings.lcd_24_hour, std::memory_order_relaxed);
     s_lcd_pad_hour.store(settings.lcd_pad_hour, std::memory_order_relaxed);
     s_lcd_show_time_zone.store(settings.lcd_show_time_zone, std::memory_order_relaxed);
@@ -11000,6 +10744,24 @@ void app_get_status(web_app_status_t &status)
     const uint8_t dynamic_model = s_gnss_dynamic_model.load(std::memory_order_relaxed);
     if (s_gnss_ublox && dynamic_model != 255)
         snprintf(status.gnss_dynamic_model, sizeof(status.gnss_dynamic_model), "%s", gnss_dynamic_model_name(dynamic_model));
+    status.gnss_satellites_used = -1;
+    status.gnss_fix_quality = -1;
+    status.gnss_rmc_after_pps_ms = -1;
+    status.gnss_rmc_after_pps_min_ms = -1;
+    status.gnss_rmc_after_pps_max_ms = -1;
+    if (!s_gnss_ublox)
+    {
+        gnss_nmea_status_t nmea{};
+        gnss_nmea_get_status(&nmea);
+        if (nmea.gga_recent)
+        {
+            status.gnss_satellites_used = nmea.satellites_used;
+            status.gnss_fix_quality = nmea.fix_quality;
+        }
+        status.gnss_rmc_after_pps_ms = nmea.rmc_after_pps_ms;
+        status.gnss_rmc_after_pps_min_ms = nmea.rmc_after_pps_min_ms;
+        status.gnss_rmc_after_pps_max_ms = nmea.rmc_after_pps_max_ms;
+    }
     status.lcd_present = s_lcd_ready;
     status.led_active = s_led_type != web_led_type_t::none;
     status.mqtt_connected = s_mqtt_on && s_mqtt_connected.load(std::memory_order_acquire);

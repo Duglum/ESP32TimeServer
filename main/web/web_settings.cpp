@@ -45,14 +45,16 @@ namespace
     //    (a version 5 set is still read: its fields are a prefix of web_settings_t, the new ones get the defaults);
     // 7: root dispersion growth while coasting appended at the end (versions 5 and 6 are still read the same way);
     // 8: NTP client rate limit appended at the end (versions 5 to 7 are still read the same way);
-    // 9: minimum GNSS fix age before stratum 1 appended at the end (versions 5 to 8 are still read the same way).
+    // 9: minimum GNSS fix age before stratum 1 appended at the end (versions 5 to 8 are still read the same way);
+    // 10: minimum satellites in use before stratum 1 appended at the end (versions 5 to 9 are still read the same way).
     // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
     // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
-    constexpr uint32_t BLOB_VERSION = 9;
+    constexpr uint32_t BLOB_VERSION = 10;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
     constexpr uint32_t BLOB_VERSION_7 = 7;
     constexpr uint32_t BLOB_VERSION_8 = 8;
+    constexpr uint32_t BLOB_VERSION_9 = 9;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -63,11 +65,13 @@ namespace
     constexpr size_t SETTINGS_SIZE_6 = settings_size_before(offsetof(web_settings_t, pps_dispersion_ppm));
     constexpr size_t SETTINGS_SIZE_7 = settings_size_before(offsetof(web_settings_t, ntp_client_rate_limit));
     constexpr size_t SETTINGS_SIZE_8 = settings_size_before(offsetof(web_settings_t, gnss_min_fix_age_s));
-    // Version 7 fits into the tail padding of version 6 (same size), and versions 8 and 9 may fit into that of the
+    constexpr size_t SETTINGS_SIZE_9 = settings_size_before(offsetof(web_settings_t, gnss_min_satellites));
+    // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 10 may fit into that of the
     // version before: the version number tells them apart, and an older set always gets the defaults for the newer
     // fields instead of its padding bytes
     static_assert(SETTINGS_SIZE_5 <= SETTINGS_SIZE_6 && SETTINGS_SIZE_6 <= SETTINGS_SIZE_7 &&
-                      SETTINGS_SIZE_7 <= SETTINGS_SIZE_8 && SETTINGS_SIZE_8 <= sizeof(web_settings_t),
+                      SETTINGS_SIZE_7 <= SETTINGS_SIZE_8 && SETTINGS_SIZE_8 <= SETTINGS_SIZE_9 &&
+                      SETTINGS_SIZE_9 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
     // ntpHoldoverDurationUs in whole seconds, within the range of the setting
@@ -95,6 +99,12 @@ namespace
     uint16_t default_gnss_min_fix_age_s()
     {
         return gnssMinimumFixAgeSeconds > WEB_GNSS_MIN_FIX_AGE_MAX_S ? WEB_GNSS_MIN_FIX_AGE_MAX_S : gnssMinimumFixAgeSeconds;
+    }
+
+    // gnssMinimumSatellites within the range of the setting
+    uint8_t default_gnss_min_satellites()
+    {
+        return gnssMinimumSatellites > WEB_GNSS_MIN_SATELLITES_MAX ? WEB_GNSS_MIN_SATELLITES_MAX : gnssMinimumSatellites;
     }
 
     // ntpServeAfterPpsLostMinutes within the range of the setting
@@ -139,7 +149,7 @@ namespace
         return false;
     }
 
-    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 8) and passes the CRC.
+    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 9) and passes the CRC.
     // *had_ote_fields (optional): the stored set still held the former OTE device name or password (zeroed in blob)
     bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob, bool *had_ote_fields = nullptr)
     {
@@ -175,6 +185,7 @@ namespace
         const bool version_6 = header.version == BLOB_VERSION_6 && header.size == SETTINGS_SIZE_6;
         const bool version_7 = header.version == BLOB_VERSION_7 && header.size == SETTINGS_SIZE_7;
         const bool version_8 = header.version == BLOB_VERSION_8 && header.size == SETTINGS_SIZE_8;
+        const bool version_9 = header.version == BLOB_VERSION_9 && header.size == SETTINGS_SIZE_9;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
@@ -183,9 +194,10 @@ namespace
         else if (!readable || (length != sizeof(settings_blob_t) && length != HEADER_SIZE + SETTINGS_SIZE_5 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_6 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_7 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_8 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_8 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_9 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
-        else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8) ||
+        else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -221,10 +233,17 @@ namespace
             {
                 // Appended in version 9
                 blob.settings.gnss_min_fix_age_s = default_gnss_min_fix_age_s();
-                blob.version = BLOB_VERSION;
-                blob.size = sizeof(web_settings_t);
                 if (version_8)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 8 read; the minimum GNSS fix age has its default", key);
+            }
+            if (version_5 || version_6 || version_7 || version_8 || version_9)
+            {
+                // Appended in version 10
+                blob.settings.gnss_min_satellites = default_gnss_min_satellites();
+                blob.version = BLOB_VERSION;
+                blob.size = sizeof(web_settings_t);
+                if (version_9)
+                    ESP_LOGI(TAG, "Stored web settings '%s' of version 9 read; the minimum satellites in use have their default", key);
             }
             // Former OTE device name and OTE password: no longer used
             const bool had_ote = any_byte_set(blob.settings.ote_name_unused, sizeof(blob.settings.ote_name_unused)) ||
@@ -569,6 +588,7 @@ void web_settings_defaults(web_settings_t &out)
     out.pps_lost_serve_min = default_pps_lost_serve_min();
     out.pps_dispersion_ppm = default_pps_dispersion_ppm();
     out.gnss_min_fix_age_s = default_gnss_min_fix_age_s();
+    out.gnss_min_satellites = default_gnss_min_satellites();
 
     out.lcd_enabled = LIQUID_CRYSTAL_DISPLAY_ENABLED != 0;
     copy_text(out.lcd_title, lcdTopLineTitle);
@@ -998,6 +1018,8 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         baud_ok = baud_ok || b == s.gnss_baud;
     if (!baud_ok)
         FAIL("GNSS baud rate is not one of the supported values");
+    if (s.gnss_min_satellites > WEB_GNSS_MIN_SATELLITES_MAX)
+        FAIL("Minimum satellites in use: 0 (off) to %u", static_cast<unsigned>(WEB_GNSS_MIN_SATELLITES_MAX));
     if (s.gnss_min_fix_age_s > WEB_GNSS_MIN_FIX_AGE_MAX_S)
         FAIL("Minimum GNSS fix age: 0 (off) to %u seconds", static_cast<unsigned>(WEB_GNSS_MIN_FIX_AGE_MAX_S));
     if (s.pps_holdover_s > WEB_PPS_HOLDOVER_MAX_S)
@@ -1141,7 +1163,7 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
            a.pps_holdover_s == b.pps_holdover_s && a.pps_lost_stratum == b.pps_lost_stratum &&
            a.pps_lost_serve == b.pps_lost_serve && a.pps_lost_serve_min == b.pps_lost_serve_min &&
            a.pps_dispersion_ppm == b.pps_dispersion_ppm && a.ntp_client_rate_limit == b.ntp_client_rate_limit &&
-           a.gnss_min_fix_age_s == b.gnss_min_fix_age_s &&
+           a.gnss_min_fix_age_s == b.gnss_min_fix_age_s && a.gnss_min_satellites == b.gnss_min_satellites &&
            a.ntp_auth_enabled == b.ntp_auth_enabled &&
            a.ntp_key_override == b.ntp_key_override && a.ntp_key_count == b.ntp_key_count &&
            web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_keys), reinterpret_cast<const uint8_t *>(b.ntp_keys), sizeof(a.ntp_keys));

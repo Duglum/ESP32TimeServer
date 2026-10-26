@@ -30,6 +30,11 @@ struct web_app_status_t
     bool ublox_receiver;          // UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED: the baud rate is detected automatically
     uint32_t gnss_baud_in_use;
     char gnss_dynamic_model[16];  // U-Blox UBX: dynamic platform model read from the receiver ("" = not known)
+    int16_t gnss_satellites_used; // NMEA: satellites in use of the latest GGA (-1 = no GGA)
+    int16_t gnss_fix_quality;     // NMEA: fix quality of the latest GGA (-1 = no GGA)
+    int32_t gnss_rmc_after_pps_ms; // NMEA: reception of the latest RMC after the PPS edge (-1 = not known)
+    int32_t gnss_rmc_after_pps_min_ms;
+    int32_t gnss_rmc_after_pps_max_ms;
     bool lcd_present;
     bool led_active;
     bool mqtt_connected;

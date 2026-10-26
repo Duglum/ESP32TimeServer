@@ -3,6 +3,7 @@
 set(MAIN_SOURCES
         "main.cpp"
         "custom/app_metadata.cpp"
+        "custom/gnss_nmea.cpp"
         "custom/ntp_auth.cpp"
         "custom/ntp_cache.c"
         "web/web_auth.cpp"

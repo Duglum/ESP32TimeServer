@@ -219,6 +219,12 @@ static constexpr uint16_t ntpClientRateLimitPerSecond = 20;
 // receiver reports when its UTC time is fully resolved, which is checked in any case.
 static constexpr uint16_t gnssMinimumFixAgeSeconds = 0;
 
+// Minimum number of satellites in use before stratum 1 (default of the web admin setting "Minimum satellites in use",
+// 0 to 50; 0 = off). The GNSS time only counts while the navigation solution uses at least this many satellites.
+// NMEA protocol: needs GGA sentences in addition to RMC (the receiver has to send them); while the setting is on and no
+// GGA arrives, the server stays at stratum 16. U-Blox UBX protocol: the satellites of the navigation solution (NAV-PVT).
+static constexpr uint8_t gnssMinimumSatellites = 0;
+
 // This project was designed and tested to work with a SparkFun GNSS Receiver Breakout board which uses a u-blox - MAX-M10S module.
 // ( https://www.sparkfun.com/sparkfun-gnss-receiver-breakout-max-m10s-qwiic.html )
 // However, the code has fallback logic for non/cloned/older u-blox gnss modules and has been tested with one such device as well.
