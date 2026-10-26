@@ -524,6 +524,33 @@
       row.input.title = t('Default: {value}', { value: def || '' });
     }
     markPinAreas();
+    markPanels();
+  }
+
+  // Collapsed settings panels: the heading row shows how many visible values inside differ from the compiled default
+  // and whether a warning inside is shown, as the GPIO pin areas do (a note on the state of the device, such as
+  // "updates are off", is no warning about a setting)
+  function markPanels() {
+    document.querySelectorAll('details.panel').forEach((panel) => {
+      const visible = (el) => !el.closest('[hidden]');
+      const changed = [...panel.querySelectorAll('.is-changed')].filter(visible).length;
+      const warning = [...panel.querySelectorAll('small.note.bad:not(.device-state)')].some(visible);
+      const parts = [];
+      if (changed > 0) parts.push(changed === 1 ? t('1 value differs from the default') : t('{n} values differ from the default', { n: changed }));
+      if (warning) parts.push(t('see the warning'));
+      const marker = panel.querySelector('.panel-changed');
+      marker.textContent = parts.join(', ');
+      marker.hidden = parts.length === 0;
+      marker.classList.toggle('bad', warning);
+    });
+  }
+
+  // Opens the panel (and the GPIO pin area) of a form field (name) or element (id), e.g. the one an error names
+  function revealField(name) {
+    const field = $(name) || f[name];
+    const el = field && (field.nodeType ? field : field[0]); // a radio group is a list
+    if (!el) return;
+    for (let d = el.closest('details'); d; d = d.parentElement.closest('details')) d.open = true;
   }
 
   // Collapsed GPIO pin areas: the summary shows how many visible pin values differ from the compiled default and
@@ -573,6 +600,7 @@
       $('ptp-chip-warning').hidden = state.status.ptp_loopback_supported || f.ptp_loopback_pin.value.trim() === '';
     }
     markPinAreas();
+    markPanels();
   }
 
   // xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx (Cisco) or xxxxxxxxxxxx -> lower case with ':'
@@ -592,11 +620,18 @@
     return { address: parts[0].trim(), prefix: prefix };
   }
 
+  // An input error of a field: the message is shown and the panel of the field opened (revealField)
+  function fieldError(field, text) {
+    const err = new Error(text);
+    err.field = field;
+    return err;
+  }
+
   function pin(name, label, allowEmpty) {
     const text = f[name].value.trim();
     if (text === '' && allowEmpty) return -1;
     const value = Number(text);
-    if (text === '' || !Number.isInteger(value)) throw new Error(t('{label}: GPIO number expected', { label: t(label) }));
+    if (text === '' || !Number.isInteger(value)) throw fieldError(name, t('{label}: GPIO number expected', { label: t(label) }));
     return value;
   }
 
@@ -663,19 +698,19 @@
       ntpKeyRows.forEach((row, i) => {
         const id = Number(row.id.value);
         const key = row.key.value.trim();
-        if (!Number.isInteger(id) || id < 1 || id > 65535) throw new Error(t('NTP key {n}: key ID 1 to 65535', { n: i + 1 }));
-        if (!/^[0-9A-Za-z]{32}$/.test(key)) throw new Error(t('NTP key {n}: exactly 32 letters or digits', { n: i + 1 }));
+        if (!Number.isInteger(id) || id < 1 || id > 65535) throw fieldError('ntp-keys', t('NTP key {n}: key ID 1 to 65535', { n: i + 1 }));
+        if (!/^[0-9A-Za-z]{32}$/.test(key)) throw fieldError('ntp-keys', t('NTP key {n}: exactly 32 letters or digits', { n: i + 1 }));
         body.ntp_keys.push({ id: id, key: key });
       });
     }
     for (const [key, name] of ledStates) {
       const hex = normaliseHex(colourRows[key].input.value);
-      if (!hex) throw new Error(t('LED colour "{name}": #RRGGBB expected', { name: t(name) }));
+      if (!hex) throw fieldError('led-colours', t('LED colour "{name}": #RRGGBB expected', { name: t(name) }));
       body.led_colors[key] = hex;
     }
     if (!body.ipv4_dhcp) {
       const v4 = splitCidr(f.ipv4_cidr.value.trim(), NaN);
-      if (!v4) throw new Error(t('IPv4 address: a.b.c.d/prefix length expected'));
+      if (!v4) throw fieldError('ipv4_cidr', t('IPv4 address: a.b.c.d/prefix length expected'));
       body.ipv4_address = v4.address;
       body.ipv4_prefix = v4.prefix;
       body.ipv4_gateway = f.ipv4_gateway.value.trim();
@@ -686,47 +721,47 @@
       body.ipv6_prefix = 64;
     } else {
       const v6 = splitCidr(v6text, 64);
-      if (!v6) throw new Error(t('IPv6 address: address/prefix length expected'));
+      if (!v6) throw fieldError('ipv6_cidr', t('IPv6 address: address/prefix length expected'));
       body.ipv6_address = v6.address;
       body.ipv6_prefix = v6.prefix;
     }
     if (f.ntp_client_rate_limit.value.trim() === '' || !Number.isInteger(body.ntp_client_rate_limit) ||
         body.ntp_client_rate_limit < 0 || body.ntp_client_rate_limit > 10000) {
-      throw new Error(t('Rate limit per client: 0 to 10000 requests per second'));
+      throw fieldError('ntp_client_rate_limit', t('Rate limit per client: 0 to 10000 requests per second'));
     }
     if (f.gnss_min_satellites.value.trim() === '' || !Number.isInteger(body.gnss_min_satellites) ||
         body.gnss_min_satellites < 0 || body.gnss_min_satellites > 50) {
-      throw new Error(t('Minimum satellites in use: 0 to 50'));
+      throw fieldError('gnss_min_satellites', t('Minimum satellites in use: 0 to 50'));
     }
     if (f.gnss_min_fix_age.value.trim() === '' || !Number.isInteger(body.gnss_min_fix_age) ||
         body.gnss_min_fix_age < 0 || body.gnss_min_fix_age > 3600) {
-      throw new Error(t('Minimum GNSS fix age: 0 to 3600 s'));
+      throw fieldError('gnss_min_fix_age', t('Minimum GNSS fix age: 0 to 3600 s'));
     }
     if (!Number.isInteger(body.pps_holdover) || body.pps_holdover < 0 || body.pps_holdover > 600) {
-      throw new Error(t('PPS holdover: 0 to 600 s'));
+      throw fieldError('pps_holdover', t('PPS holdover: 0 to 600 s'));
     }
     if (!Number.isInteger(body.pps_lost_serve_min) || body.pps_lost_serve_min < 0 || body.pps_lost_serve_min > 1440) {
-      throw new Error(t('Keep answering after the PPS loss: 0 to 1440 min'));
+      throw fieldError('pps_lost_serve_min', t('Keep answering after the PPS loss: 0 to 1440 min'));
     }
     if (!Number.isInteger(body.pps_lost_stratum) || body.pps_lost_stratum < 2 || body.pps_lost_stratum > 16) {
-      throw new Error(t('Stratum after the holdover: 2 to 16'));
+      throw fieldError('pps_lost_stratum', t('Stratum after the holdover: 2 to 16'));
     }
     if (f.pps_dispersion.value.trim() === '' || !(body.pps_dispersion_ppm >= 1 && body.pps_dispersion_ppm <= 10000)) {
-      throw new Error(t('Root dispersion growth: 0.001 to 10 ms per second'));
+      throw fieldError('pps_dispersion', t('Root dispersion growth: 0.001 to 10 ms per second'));
     }
     if (!Number.isInteger(body.mqtt_report_period) || body.mqtt_report_period < 30 || body.mqtt_report_period > 86400) {
-      throw new Error(t('MQTT reporting period: 30 to 86400 s'));
+      throw fieldError('mqtt_report_period', t('MQTT reporting period: 30 to 86400 s'));
     }
     if (!Number.isInteger(body.mqtt_tf_client_limit) || body.mqtt_tf_client_limit < 50 || body.mqtt_tf_client_limit > 1000) {
-      throw new Error(t('MQTT client limit with the TF card: 50 to 1000'));
+      throw fieldError('mqtt_tf_client_limit', t('MQTT client limit with the TF card: 50 to 1000'));
     }
     // MAC: lower case with ':'; the hardware MAC is sent as "" (= hardware MAC)
     const mac = normaliseMac(f.mac_address.value);
-    if (mac === null) throw new Error(t('MAC address: xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx or xxxxxxxxxxxx (hexadecimal) expected'));
-    if (mac !== '' && (parseInt(mac.slice(0, 2), 16) & 1) !== 0) throw new Error(t('MAC address: a unicast address is required (the lowest bit of the first byte must be 0)'));
+    if (mac === null) throw fieldError('mac_address', t('MAC address: xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx or xxxxxxxxxxxx (hexadecimal) expected'));
+    if (mac !== '' && (parseInt(mac.slice(0, 2), 16) & 1) !== 0) throw fieldError('mac_address', t('MAC address: a unicast address is required (the lowest bit of the first byte must be 0)'));
     body.mac_address = mac === state.status.mac_hardware ? '' : mac;
     body.dns = f.dns.value.split(/\r?\n/).map((s) => s.trim()).filter((s) => s !== '');
-    if (body.dns.length > 3) throw new Error(t('At most 3 DNS servers'));
+    if (body.dns.length > 3) throw fieldError('dns', t('At most 3 DNS servers'));
     return body;
   }
 
@@ -947,6 +982,7 @@
     try {
       body = collect();
     } catch (err) {
+      if (err.field) revealField(err.field);
       show(err.message, 'error');
       return;
     }
@@ -954,6 +990,9 @@
     const r = await api(path, body);
     setBusy(false);
     if (r.status !== 200) {
+      // Server messages of the form "Field <name>: ..." open the panel of that field
+      const named = /^Field ([a-z0-9_]+):/.exec(String(r.data.error || ''));
+      if (named) revealField(named[1]);
       show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
       return;
     }

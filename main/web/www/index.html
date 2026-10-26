@@ -99,266 +99,278 @@
       <p class="legend">Fields marked <span class="badge restart">restart</span> take effect after a restart: <em>Apply</em> restarts the device once with them. A <span class="def-sample">coloured border</span> marks a value that differs from the compiled default.</p>
 
       <section class="card">
-        <h2>Network</h2>
-        <div class="grid">
-          <label class="span2"><span class="lt">Host name and domain (FQDN) <span class="badge restart">restart</span></span>
-            <input type="text" name="fqdn" maxlength="253" spellcheck="false" autocomplete="off">
-            <small class="def" data-for="fqdn"></small>
-            <small class="note">E.g. ESP32TimeServer.example.com. Without a domain, the domain of the DHCP server applies if DHCP is used. The first part is the host name (DHCP), the full name is used for the certificate.</small>
-          </label>
-          <label class="switch span2"><input type="checkbox" name="ipv4_dhcp"> IPv4 address by DHCP</label>
-          <label><span class="lt">IPv4 address / prefix length</span>
-            <input type="text" name="ipv4_cidr" placeholder="192.168.1.10/24" spellcheck="false" autocomplete="off">
-            <small class="def" data-for="ipv4_cidr"></small>
-          </label>
-          <label><span class="lt">IPv4 gateway</span>
-            <input type="text" name="ipv4_gateway" placeholder="192.168.1.1" spellcheck="false" autocomplete="off">
-            <small class="def" data-for="ipv4_gateway"></small>
-          </label>
-          <label class="switch span2"><input type="checkbox" name="ipv6_slaac"> IPv6 addresses by SLAAC (router advertisements)</label>
-          <label><span class="lt">Additional static IPv6 address / prefix length</span>
-            <input type="text" name="ipv6_cidr" placeholder="2001:db8::10/64 (empty = none)" spellcheck="false" autocomplete="off">
-            <small class="def" data-for="ipv6_cidr"></small>
-          </label>
-          <label><span class="lt">IPv6 gateway</span>
-            <input type="text" name="ipv6_gateway" placeholder="fe80::1 (empty = from router advertisements)" spellcheck="false" autocomplete="off">
-            <small class="def" data-for="ipv6_gateway"></small>
-          </label>
-          <label class="span2"><span class="lt">DNS servers (IPv4 or IPv6, one per line, at most 3)</span>
-            <textarea name="dns" rows="3" spellcheck="false" placeholder="Empty = the servers received by DHCP (IPv4) and router advertisements (IPv6)"></textarea>
-            <small class="note">Empty: the servers received by DHCP (IPv4) and by IPv6 router advertisements (RDNSS) are used, both families mixed. Configured servers replace them.</small>
-            <small class="def" data-for="dns"></small>
-          </label>
-          <label class="span2"><span class="lt">MAC address <span class="badge restart">restart</span></span>
-            <input type="text" name="mac_address" maxlength="17" spellcheck="false" autocomplete="off">
-            <small class="note">Hardware MAC of this board: <span id="mac-hardware" class="mono"></span></small>
-            <small class="note">Allowed Formats (any case): <code>02:1a:2b:3c:4d:5e</code>, <code>02-1A-2B-3C-4D-5E</code>, <code>021a.2b3c.4d5e</code>, <code>021A2B3C4D5E</code></small>
-            <!-- Not shown (the grey placeholder is the default); it only drives the "differs from the default" border -->
-            <small class="def" data-for="mac_address" hidden></small>
-          </label>
-        </div>
-        <p class="hint">Network changes take effect at once (the MAC address after a restart) and have to be confirmed within 120 s, otherwise the previous settings come back. Save them after the confirmation.</p>
-        <p class="hint">MAC address changes: The lowest bit of the first byte must be 0; locally administered addresses have the second bit set, e.g. 02:…</p>
+        <details class="panel">
+          <summary><h2>Network</h2><span class="panel-changed" hidden></span></summary>
+          <div class="grid">
+            <label class="span2"><span class="lt">Host name and domain (FQDN) <span class="badge restart">restart</span></span>
+              <input type="text" name="fqdn" maxlength="253" spellcheck="false" autocomplete="off">
+              <small class="def" data-for="fqdn"></small>
+              <small class="note">E.g. ESP32TimeServer.example.com. Without a domain, the domain of the DHCP server applies if DHCP is used. The first part is the host name (DHCP), the full name is used for the certificate.</small>
+            </label>
+            <label class="switch span2"><input type="checkbox" name="ipv4_dhcp"> IPv4 address by DHCP</label>
+            <label><span class="lt">IPv4 address / prefix length</span>
+              <input type="text" name="ipv4_cidr" placeholder="192.168.1.10/24" spellcheck="false" autocomplete="off">
+              <small class="def" data-for="ipv4_cidr"></small>
+            </label>
+            <label><span class="lt">IPv4 gateway</span>
+              <input type="text" name="ipv4_gateway" placeholder="192.168.1.1" spellcheck="false" autocomplete="off">
+              <small class="def" data-for="ipv4_gateway"></small>
+            </label>
+            <label class="switch span2"><input type="checkbox" name="ipv6_slaac"> IPv6 addresses by SLAAC (router advertisements)</label>
+            <label><span class="lt">Additional static IPv6 address / prefix length</span>
+              <input type="text" name="ipv6_cidr" placeholder="2001:db8::10/64 (empty = none)" spellcheck="false" autocomplete="off">
+              <small class="def" data-for="ipv6_cidr"></small>
+            </label>
+            <label><span class="lt">IPv6 gateway</span>
+              <input type="text" name="ipv6_gateway" placeholder="fe80::1 (empty = from router advertisements)" spellcheck="false" autocomplete="off">
+              <small class="def" data-for="ipv6_gateway"></small>
+            </label>
+            <label class="span2"><span class="lt">DNS servers (IPv4 or IPv6, one per line, at most 3)</span>
+              <textarea name="dns" rows="3" spellcheck="false" placeholder="Empty = the servers received by DHCP (IPv4) and router advertisements (IPv6)"></textarea>
+              <small class="note">Empty: the servers received by DHCP (IPv4) and by IPv6 router advertisements (RDNSS) are used, both families mixed. Configured servers replace them.</small>
+              <small class="def" data-for="dns"></small>
+            </label>
+            <label class="span2"><span class="lt">MAC address <span class="badge restart">restart</span></span>
+              <input type="text" name="mac_address" maxlength="17" spellcheck="false" autocomplete="off">
+              <small class="note">Hardware MAC of this board: <span id="mac-hardware" class="mono"></span></small>
+              <small class="note">Allowed Formats (any case): <code>02:1a:2b:3c:4d:5e</code>, <code>02-1A-2B-3C-4D-5E</code>, <code>021a.2b3c.4d5e</code>, <code>021A2B3C4D5E</code></small>
+              <!-- Not shown (the grey placeholder is the default); it only drives the "differs from the default" border -->
+              <small class="def" data-for="mac_address" hidden></small>
+            </label>
+          </div>
+          <p class="hint">Network changes take effect at once (the MAC address after a restart) and have to be confirmed within 120 s, otherwise the previous settings come back. Save them after the confirmation.</p>
+          <p class="hint">MAC address changes: The lowest bit of the first byte must be 0; locally administered addresses have the second bit set, e.g. 02:…</p>
 
-        <h3 class="sub-heading">NTP clients</h3>
-        <div class="grid">
-          <label class="span2"><span class="lt">Rate limit per client (requests per second, 0 = off)</span>
-            <input type="number" name="ntp_client_rate_limit" min="0" max="10000">
-            <small class="note">0 to 10000. A client is identified by its IP address; its requests beyond this rate are dropped without an answer. Takes effect at once with Apply (no confirmation needed). Default covers a polling rate of up to -4 (16 packets/s) per client plus reserve. Raise it only if a very large number of clients is expected behind a single NAT address: they all count as one client.</small>
-            <small class="def" data-for="ntp_client_rate_limit"></small>
-          </label>
-        </div>
+          <h3 class="sub-heading">NTP clients</h3>
+          <div class="grid">
+            <label class="span2"><span class="lt">Rate limit per client (requests per second, 0 = off)</span>
+              <input type="number" name="ntp_client_rate_limit" min="0" max="10000">
+              <small class="note">0 to 10000. A client is identified by its IP address; its requests beyond this rate are dropped without an answer. Takes effect at once with Apply (no confirmation needed). Default covers a polling rate of up to -4 (16 packets/s) per client plus reserve. Raise it only if a very large number of clients is expected behind a single NAT address: they all count as one client.</small>
+              <small class="def" data-for="ntp_client_rate_limit"></small>
+            </label>
+          </div>
+        </details>
       </section>
 
       <section class="card">
-        <h2>GNSS and PPS</h2>
-        <div class="grid">
-          <label class="span2"><span class="lt">Protocol <span class="badge restart">restart</span></span>
-            <select name="gnss_protocol">
-              <option value="nmea">NMEA Standard Protocol</option>
-              <option value="ubx">U-Blox UBX Protocol</option>
-            </select>
-            <small class="def" data-for="gnss_protocol"></small>
-          </label>
-          <label><span class="lt">GNSS baud rate <span class="badge restart">restart</span></span>
-            <select name="gnss_baud">
-              <option>4800</option><option>9600</option><option>19200</option><option>38400</option><option>57600</option>
-              <option>115200</option><option>230400</option><option>460800</option><option>921600</option>
-            </select>
-            <small class="note" id="baud-note" hidden>With the U-Blox UBX protocol the baud rate is found and configured automatically.</small>
-            <small class="def" data-for="gnss_baud"></small>
-          </label>
-        </div>
-
-        <h3 class="sub-heading">Validity of the GNSS time</h3>
-        <div class="grid">
-          <label class="span2"><span class="lt">Minimum GNSS fix age before stratum 1 (s, 0 = off)</span>
-            <input type="number" name="gnss_min_fix_age" min="0" max="3600">
-            <small class="note">0 to 3600 s. After a cold start (no backup battery, or switched off for a long time) a GNSS receiver may report UTC off by whole seconds until it has received the leap seconds, which the satellites broadcast every 12.5 minutes. With a value the server answers at stratum 16 after each start until the GNSS time has been valid for this long without a gap of more than 30 s; then the time is checked against the GNSS once more (a wrong second is corrected) and stratum 1 is allowed until the next start. Recommended: 750 s (12.5 min) for a receiver without backup battery. Takes effect at once with Apply while the server waits; once stratum 1 was reached, a change applies from the next start. A u-blox receiver also reports when its UTC time is fully resolved, which is checked in any case.</small>
-            <small class="def" data-for="gnss_min_fix_age"></small>
-          </label>
-          <label class="span2"><span class="lt">Minimum satellites in use before stratum 1 (0 = off)</span>
-            <input type="number" name="gnss_min_satellites" min="0" max="50">
-            <small class="note">0 to 50. The GNSS time only counts while the receiver's position solution uses at least this many satellites; with fewer the server answers at stratum 16 after a few seconds (a 3D fix needs 4; a higher value such as 6 excludes weak fixes). NMEA protocol: needs GGA sentences in addition to RMC, the receiver has to be set to send them; while this is on and no GGA arrives, the server stays at stratum 16. U-Blox UBX protocol: the satellites of the navigation solution. Takes effect at once with Apply.</small>
-            <small class="def" data-for="gnss_min_satellites"></small>
-          </label>
-        </div>
-
-        <h3 class="sub-heading">When the PPS is lost</h3>
-        <p class="hint first">The PPS counts as lost after 3.5 s without a pulse. The settings below take effect at once with Apply. When the PPS and the GNSS are back, the server returns to stratum 1 by itself.</p>
-        <div class="grid">
-          <label><span class="lt">PPS holdover (s, 0 = off)</span>
-            <input type="number" name="pps_holdover" min="0" max="600">
-            <small class="note">0 to 600 s. For this long after the PPS is lost the server keeps answering at stratum 1, coasting on the learned rate of its oscillator; the advertised root dispersion grows with the time since the last pulse (see below), so the clients see the growing uncertainty. After the holdover the server answers as set below.</small>
-            <small class="def" data-for="pps_holdover"></small>
-          </label>
-          <label><span class="lt">Root dispersion growth (ms per second)</span>
-            <input type="number" name="pps_dispersion" min="0.001" max="10" step="0.001">
-            <small class="note">0.001 to 10 ms per second since the last pulse (0.1 ms per second = 100 ppm), up to at most 1 s. The advertised uncertainty grows this fast while the server coasts after the PPS loss: in the holdover and with a stratum of 2 to 15 below.</small>
-            <small class="def" data-for="pps_dispersion"></small>
-          </label>
-          <div class="span2 switch-block">
-            <label class="switch"><input type="checkbox" name="pps_lost_serve"> Keep answering NTP requests after the holdover</label>
-            <small class="note">Off: after the holdover the server does not answer at all, so the clients switch to their other servers at once instead of getting stratum 16 answers.</small>
-            <small class="def" data-for="pps_lost_serve"></small>
+        <details class="panel">
+          <summary><h2>GNSS and PPS</h2><span class="panel-changed" hidden></span></summary>
+          <div class="grid">
+            <label class="span2"><span class="lt">Protocol <span class="badge restart">restart</span></span>
+              <select name="gnss_protocol">
+                <option value="nmea">NMEA Standard Protocol</option>
+                <option value="ubx">U-Blox UBX Protocol</option>
+              </select>
+              <small class="def" data-for="gnss_protocol"></small>
+            </label>
+            <label><span class="lt">GNSS baud rate <span class="badge restart">restart</span></span>
+              <select name="gnss_baud">
+                <option>4800</option><option>9600</option><option>19200</option><option>38400</option><option>57600</option>
+                <option>115200</option><option>230400</option><option>460800</option><option>921600</option>
+              </select>
+              <small class="note" id="baud-note" hidden>With the U-Blox UBX protocol the baud rate is found and configured automatically.</small>
+              <small class="def" data-for="gnss_baud"></small>
+            </label>
           </div>
-          <label><span class="lt">Keep answering for (min, 0 = no limit)</span>
-            <input type="number" name="pps_lost_serve_min" min="0" max="1440">
-            <small class="note">0 to 1440 min, counted from the PPS loss (the holdover included). Then the server stops answering.</small>
-            <small class="def" data-for="pps_lost_serve_min"></small>
-          </label>
-          <label><span class="lt">Stratum of these answers</span>
-            <input type="number" name="pps_lost_stratum" min="2" max="16">
-            <small class="note">16 = "not synchronised" (leap indicator alarm): the clients stop using the server. 2 to 15: the answers stay "synchronised" at that stratum, coasting with a growing root dispersion for at most one hour after the last pulse, then 16.</small>
-            <small class="def" data-for="pps_lost_stratum"></small>
-          </label>
-        </div>
-        <p class="hint bad">Relying on time that is no longer synchronised to the GNSS is probably not a good idea: its error grows by an amount nobody measures. Use a stratum below 16 and a long answering time only when the clients absolutely need a time source and have no other one.</p>
-        <details class="pins">
-          <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">GNSS TX, RX, PPS, PTP PPS loopback</span></summary>
-          <div class="grid three">
-          <label><span class="lt">GNSS TX pin (GPIO)</span><input type="number" name="gnss_tx_pin" min="0" max="54"><small class="def" data-for="gnss_tx_pin"></small></label>
-          <label><span class="lt">GNSS RX pin (GPIO)</span><input type="number" name="gnss_rx_pin" min="0" max="54"><small class="def" data-for="gnss_rx_pin"></small></label>
-          <label><span class="lt">PPS pin (GPIO)</span><input type="number" name="gnss_pps_pin" min="0" max="54"><small class="def" data-for="gnss_pps_pin"></small></label>
+
+          <h3 class="sub-heading">Validity of the GNSS time</h3>
+          <div class="grid">
+            <label class="span2"><span class="lt">Minimum GNSS fix age before stratum 1 (s, 0 = off)</span>
+              <input type="number" name="gnss_min_fix_age" min="0" max="3600">
+              <small class="note">0 to 3600 s. After a cold start (no backup battery, or switched off for a long time) a GNSS receiver may report UTC off by whole seconds until it has received the leap seconds, which the satellites broadcast every 12.5 minutes. With a value the server answers at stratum 16 after each start until the GNSS time has been valid for this long without a gap of more than 30 s; then the time is checked against the GNSS once more (a wrong second is corrected) and stratum 1 is allowed until the next start. Recommended: 750 s (12.5 min) for a receiver without backup battery. Takes effect at once with Apply while the server waits; once stratum 1 was reached, a change applies from the next start. A u-blox receiver also reports when its UTC time is fully resolved, which is checked in any case.</small>
+              <small class="def" data-for="gnss_min_fix_age"></small>
+            </label>
+            <label class="span2"><span class="lt">Minimum satellites in use before stratum 1 (0 = off)</span>
+              <input type="number" name="gnss_min_satellites" min="0" max="50">
+              <small class="note">0 to 50. The GNSS time only counts while the receiver's position solution uses at least this many satellites; with fewer the server answers at stratum 16 after a few seconds (a 3D fix needs 4; a higher value such as 6 excludes weak fixes). NMEA protocol: needs GGA sentences in addition to RMC, the receiver has to be set to send them; while this is on and no GGA arrives, the server stays at stratum 16. U-Blox UBX protocol: the satellites of the navigation solution. Takes effect at once with Apply.</small>
+              <small class="def" data-for="gnss_min_satellites"></small>
+            </label>
           </div>
+
+          <h3 class="sub-heading">When the PPS is lost</h3>
+          <p class="hint first">The PPS counts as lost after 3.5 s without a pulse. The settings below take effect at once with Apply. When the PPS and the GNSS are back, the server returns to stratum 1 by itself.</p>
+          <div class="grid">
+            <label><span class="lt">PPS holdover (s, 0 = off)</span>
+              <input type="number" name="pps_holdover" min="0" max="600">
+              <small class="note">0 to 600 s. For this long after the PPS is lost the server keeps answering at stratum 1, coasting on the learned rate of its oscillator; the advertised root dispersion grows with the time since the last pulse (see below), so the clients see the growing uncertainty. After the holdover the server answers as set below.</small>
+              <small class="def" data-for="pps_holdover"></small>
+            </label>
+            <label><span class="lt">Root dispersion growth (ms per second)</span>
+              <input type="number" name="pps_dispersion" min="0.001" max="10" step="0.001">
+              <small class="note">0.001 to 10 ms per second since the last pulse (0.1 ms per second = 100 ppm), up to at most 1 s. The advertised uncertainty grows this fast while the server coasts after the PPS loss: in the holdover and with a stratum of 2 to 15 below.</small>
+              <small class="def" data-for="pps_dispersion"></small>
+            </label>
+            <div class="span2 switch-block">
+              <label class="switch"><input type="checkbox" name="pps_lost_serve"> Keep answering NTP requests after the holdover</label>
+              <small class="note">Off: after the holdover the server does not answer at all, so the clients switch to their other servers at once instead of getting stratum 16 answers.</small>
+              <small class="def" data-for="pps_lost_serve"></small>
+            </div>
+            <label><span class="lt">Keep answering for (min, 0 = no limit)</span>
+              <input type="number" name="pps_lost_serve_min" min="0" max="1440">
+              <small class="note">0 to 1440 min, counted from the PPS loss (the holdover included). Then the server stops answering.</small>
+              <small class="def" data-for="pps_lost_serve_min"></small>
+            </label>
+            <label><span class="lt">Stratum of these answers</span>
+              <input type="number" name="pps_lost_stratum" min="2" max="16">
+              <small class="note">16 = "not synchronised" (leap indicator alarm): the clients stop using the server. 2 to 15: the answers stay "synchronised" at that stratum, coasting with a growing root dispersion for at most one hour after the last pulse, then 16.</small>
+              <small class="def" data-for="pps_lost_stratum"></small>
+            </label>
+          </div>
+          <p class="hint bad">Relying on time that is no longer synchronised to the GNSS is probably not a good idea: its error grows by an amount nobody measures. Use a stratum below 16 and a long answering time only when the clients absolutely need a time source and have no other one.</p>
+          <details class="pins">
+            <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">GNSS TX, RX, PPS, PTP PPS loopback</span></summary>
+            <div class="grid three">
+            <label><span class="lt">GNSS TX pin (GPIO)</span><input type="number" name="gnss_tx_pin" min="0" max="54"><small class="def" data-for="gnss_tx_pin"></small></label>
+            <label><span class="lt">GNSS RX pin (GPIO)</span><input type="number" name="gnss_rx_pin" min="0" max="54"><small class="def" data-for="gnss_rx_pin"></small></label>
+            <label><span class="lt">PPS pin (GPIO)</span><input type="number" name="gnss_pps_pin" min="0" max="54"><small class="def" data-for="gnss_pps_pin"></small></label>
+            </div>
+            <div class="grid section-gap">
+            <label class="span2"><span class="lt">PTP PPS loopback pin (GPIO, empty = off)</span>
+              <input type="number" name="ptp_loopback_pin" min="0" max="54">
+              <small class="note">The pin has to be empty: a free GPIO with nothing connected; it is driven as an output. Needs an ESP32-P4 with chip revision v3.0 or higher (this board: <span id="ptp-chip"></span>).</small>
+              <small class="note bad" id="ptp-chip-warning" hidden>This board's chip revision is below v3.0: the loopback does not work here, leave the field empty.</small>
+              <small class="def" data-for="ptp_loopback_pin"></small>
+            </label>
+            </div>
+          </details>
+        </details>
+      </section>
+
+      <section class="card">
+        <details class="panel">
+          <summary><h2>LCD and time zone</h2><span class="panel-changed" hidden></span></summary>
+          <div class="grid">
+            <div class="span2 switch-block">
+              <label class="switch"><input type="checkbox" name="lcd_enabled"> Enable LCD Display <span class="badge restart">restart</span></label>
+              <small class="note">20 × 4 character LCD (HD44780) with a PCF8574 I2C backpack: SDA on GPIO 8, SCL on GPIO 7, I2C address 0x27 or 0x3F (found automatically).</small>
+            </div>
+            <label><span class="lt">Top line title (at most 17 characters)</span><input type="text" name="lcd_title" maxlength="17"><small class="def" data-for="lcd_title"></small></label>
+            <label><span class="lt">Time zone (POSIX TZ string)</span><input type="text" name="time_zone" maxlength="63" spellcheck="false" placeholder="CET-1CEST,M3.5.0,M10.5.0/3"><small class="def" data-for="time_zone"></small></label>
+            <label class="switch"><input type="checkbox" name="lcd_24_hour"> 24-hour clock</label>
+            <label class="switch"><input type="checkbox" name="lcd_pad_hour"> Hour with leading zero</label>
+            <label class="switch"><input type="checkbox" name="lcd_show_time_zone"> Show the time zone</label>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <details class="panel">
+          <summary><h2>RGB LED</h2><span class="panel-changed" hidden></span></summary>
+          <div class="grid">
+            <label><span class="lt">Module <span class="badge restart">restart</span></span>
+              <select name="led_type">
+                <option value="none">None</option>
+                <option value="ky016">KY-016 (3 pins, PWM)</option>
+                <option value="ws2812">WS2812 (1 data pin)</option>
+              </select>
+              <small class="def" data-for="led_type"></small>
+            </label>
+            <label><span class="lt">Brightness <output id="brightness-out"></output></span>
+              <input type="range" name="led_brightness" min="0" max="100" step="1">
+              <small class="def" data-for="led_brightness"></small>
+            </label>
+          </div>
+          <h3 class="sub-heading">Colours</h3>
+          <p class="hint first">A preset or any colour as <code>#RRGGBB</code>. Takes effect at once.</p>
+          <div class="colour-table" id="led-colours"></div>
+          <details class="pins">
+            <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">KY-016 red, green, blue / WS2812 data</span></summary>
+            <div class="grid three">
+            <label class="led-ky016"><span class="lt">Red pin (GPIO)</span><input type="number" name="led_red_pin" min="0" max="54"><small class="def" data-for="led_red_pin"></small></label>
+            <label class="led-ky016"><span class="lt">Green pin (GPIO)</span><input type="number" name="led_green_pin" min="0" max="54"><small class="def" data-for="led_green_pin"></small></label>
+            <label class="led-ky016"><span class="lt">Blue pin (GPIO)</span><input type="number" name="led_blue_pin" min="0" max="54"><small class="def" data-for="led_blue_pin"></small></label>
+            <label class="led-ws2812"><span class="lt">Data pin (GPIO)</span><input type="number" name="led_ws2812_pin" min="0" max="54"><small class="def" data-for="led_ws2812_pin"></small></label>
+            </div>
+            <p class="hint" id="led-pins-none">No LED module is selected: no pins are used.</p>
+          </details>
+        </details>
+      </section>
+
+      <section class="card">
+        <details class="panel">
+          <summary><h2>MQTT <span class="badge restart">restart</span></h2><span class="panel-changed" hidden></span></summary>
+          <div class="grid">
+            <label class="switch span2"><input type="checkbox" name="mqtt_enabled"> MQTT reporting</label>
+            <label class="span2"><span class="lt">Broker URI</span><input type="text" name="mqtt_uri" maxlength="127" spellcheck="false" placeholder="mqtt://192.168.1.15:1883 or mqtts://broker.example:8883"><small class="def" data-for="mqtt_uri"></small></label>
+            <label><span class="lt">User name</span><input type="text" name="mqtt_username" maxlength="64" autocomplete="off" spellcheck="false"><small class="def" data-for="mqtt_username"></small></label>
+            <label><span class="lt">Password</span>
+              <input type="password" name="mqtt_password" maxlength="64" autocomplete="new-password" placeholder="unchanged">
+              <small class="note" id="mqtt-password-state"></small>
+            </label>
+            <label class="switch span2"><input type="checkbox" name="mqtt_password_clear"> Clear the MQTT password</label>
+          </div>
+          <p class="hint">An empty password field keeps the stored password. Secrets are never sent back to the browser.</p>
           <div class="grid section-gap">
-          <label class="span2"><span class="lt">PTP PPS loopback pin (GPIO, empty = off)</span>
-            <input type="number" name="ptp_loopback_pin" min="0" max="54">
-            <small class="note">The pin has to be empty: a free GPIO with nothing connected; it is driven as an output. Needs an ESP32-P4 with chip revision v3.0 or higher (this board: <span id="ptp-chip"></span>).</small>
-            <small class="note bad" id="ptp-chip-warning" hidden>This board's chip revision is below v3.0: the loopback does not work here, leave the field empty.</small>
-            <small class="def" data-for="ptp_loopback_pin"></small>
-          </label>
+            <label><span class="lt">Topic</span>
+              <input type="text" name="mqtt_topic" maxlength="100" spellcheck="false" autocomplete="off">
+              <small class="note">Reports are published to &lt;topic&gt;/report, online / offline to &lt;topic&gt;/status.</small>
+              <small class="def" data-for="mqtt_topic"></small>
+            </label>
+            <label><span class="lt">Quality of service (QoS)</span>
+              <select name="mqtt_qos">
+                <option value="0">0: at most once, nothing is queued</option>
+                <option value="1">1: at least once, queued while disconnected</option>
+                <option value="2">2: exactly once, queued while disconnected</option>
+              </select>
+              <small class="def" data-for="mqtt_qos"></small>
+            </label>
+            <label><span class="lt">Reporting period (s)</span>
+              <input type="number" name="mqtt_report_period" min="30" max="86400">
+              <small class="note">30 to 86400 s, e.g. 900 = 15 min.</small>
+              <small class="def" data-for="mqtt_report_period"></small>
+            </label>
+            <label class="switch"><input type="checkbox" name="mqtt_retain"> Broker retains the latest report (retain flag)</label>
           </div>
+          <h3 class="sub-heading">Report contents</h3>
+          <p class="hint first">Every report has the status, uptime, satellites and NTP request counts. Additionally:</p>
+          <div class="grid">
+            <label class="switch span2"><input type="checkbox" name="mqtt_client_reporting"> Client activity: requests per client address</label>
+            <label class="switch span2"><input type="checkbox" name="mqtt_memory_reporting"> Memory usage: free heap, minimum free heap, largest free block</label>
+            <label class="switch span2"><input type="checkbox" name="mqtt_historical_reporting"> Historical information: last time synchronised and disciplined, last GNSS and PPS faults</label>
+            <label class="switch span2"><input type="checkbox" name="mqtt_distinguish_auth"> Separate counts for authenticated and unauthenticated NTP requests</label>
+          </div>
+          <h3 class="sub-heading">Report queue on a TF card (QoS 1 and 2)</h3>
+          <p class="hint first">Without a usable TF card (FAT32) only the last 4 reports are queued, in RAM, with at most 50 clients each: they are lost at a power failure or crash, and the oldest report is dropped first. Flash is not used, so it does not wear out. With a TF card the reports are queued on the card (an empty 16 GB card can hold more than 36,000 reports) with up to the client limit below; when the card is full, the oldest reports are dropped first.</p>
+          <div class="grid">
+            <label><span class="lt">Client limit per report with the TF card</span>
+              <input type="number" name="mqtt_tf_client_limit" min="50" max="1000">
+              <small class="note" id="mqtt-buffer-note"></small>
+              <small class="def" data-for="mqtt_tf_client_limit"></small>
+            </label>
+          </div>
+          <details class="pins">
+            <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">TF card CMD, CLK, D0 to D3</span></summary>
+            <p class="callout">Waveshare ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH and ESP32-P4-WIFI-POE-ETH: the TF card slot is wired to these pins. If you use one of these boards, do not change them.</p>
+            <div class="grid three">
+            <label><span class="lt">CMD (GPIO)</span><input type="number" name="tf_cmd_pin" min="0" max="54"><small class="def" data-for="tf_cmd_pin"></small></label>
+            <label><span class="lt">CLK (GPIO)</span><input type="number" name="tf_clk_pin" min="0" max="54"><small class="def" data-for="tf_clk_pin"></small></label>
+            <label><span class="lt">D0 (GPIO)</span><input type="number" name="tf_d0_pin" min="0" max="54"><small class="def" data-for="tf_d0_pin"></small></label>
+            <label><span class="lt">D1 (GPIO)</span><input type="number" name="tf_d1_pin" min="0" max="54"><small class="def" data-for="tf_d1_pin"></small></label>
+            <label><span class="lt">D2 (GPIO)</span><input type="number" name="tf_d2_pin" min="0" max="54"><small class="def" data-for="tf_d2_pin"></small></label>
+            <label><span class="lt">D3 (GPIO)</span><input type="number" name="tf_d3_pin" min="0" max="54"><small class="def" data-for="tf_d3_pin"></small></label>
+            </div>
+            <p class="hint">4-bit SD mode. The pins are always reserved for the card, also while MQTT or QoS 1 / 2 are off.</p>
+          </details>
         </details>
       </section>
 
       <section class="card">
-        <h2>LCD and time zone</h2>
-        <div class="grid">
-          <div class="span2 switch-block">
-            <label class="switch"><input type="checkbox" name="lcd_enabled"> Enable LCD Display <span class="badge restart">restart</span></label>
-            <small class="note">20 × 4 character LCD (HD44780) with a PCF8574 I2C backpack: SDA on GPIO 8, SCL on GPIO 7, I2C address 0x27 or 0x3F (found automatically).</small>
+        <details class="panel">
+          <summary><h2>NTP authentication (symmetric key, SHA-256)</h2><span class="panel-changed" hidden></span></summary>
+          <div class="grid">
+            <label class="switch span2"><input type="checkbox" name="ntp_auth_enabled"> Answer authenticated NTPv4 requests</label>
           </div>
-          <label><span class="lt">Top line title (at most 17 characters)</span><input type="text" name="lcd_title" maxlength="17"><small class="def" data-for="lcd_title"></small></label>
-          <label><span class="lt">Time zone (POSIX TZ string)</span><input type="text" name="time_zone" maxlength="63" spellcheck="false" placeholder="CET-1CEST,M3.5.0,M10.5.0/3"><small class="def" data-for="time_zone"></small></label>
-          <label class="switch"><input type="checkbox" name="lcd_24_hour"> 24-hour clock</label>
-          <label class="switch"><input type="checkbox" name="lcd_pad_hour"> Hour with leading zero</label>
-          <label class="switch"><input type="checkbox" name="lcd_show_time_zone"> Show the time zone</label>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>RGB LED</h2>
-        <div class="grid">
-          <label><span class="lt">Module <span class="badge restart">restart</span></span>
-            <select name="led_type">
-              <option value="none">None</option>
-              <option value="ky016">KY-016 (3 pins, PWM)</option>
-              <option value="ws2812">WS2812 (1 data pin)</option>
-            </select>
-            <small class="def" data-for="led_type"></small>
-          </label>
-          <label><span class="lt">Brightness <output id="brightness-out"></output></span>
-            <input type="range" name="led_brightness" min="0" max="100" step="1">
-            <small class="def" data-for="led_brightness"></small>
-          </label>
-        </div>
-        <h3 class="sub-heading">Colours</h3>
-        <p class="hint first">A preset or any colour as <code>#RRGGBB</code>. Takes effect at once.</p>
-        <div class="colour-table" id="led-colours"></div>
-        <details class="pins">
-          <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">KY-016 red, green, blue / WS2812 data</span></summary>
-          <div class="grid three">
-          <label class="led-ky016"><span class="lt">Red pin (GPIO)</span><input type="number" name="led_red_pin" min="0" max="54"><small class="def" data-for="led_red_pin"></small></label>
-          <label class="led-ky016"><span class="lt">Green pin (GPIO)</span><input type="number" name="led_green_pin" min="0" max="54"><small class="def" data-for="led_green_pin"></small></label>
-          <label class="led-ky016"><span class="lt">Blue pin (GPIO)</span><input type="number" name="led_blue_pin" min="0" max="54"><small class="def" data-for="led_blue_pin"></small></label>
-          <label class="led-ws2812"><span class="lt">Data pin (GPIO)</span><input type="number" name="led_ws2812_pin" min="0" max="54"><small class="def" data-for="led_ws2812_pin"></small></label>
+          <h3 class="sub-heading">Keys</h3>
+          <p class="hint first" id="ntp-key-state"></p>
+          <div class="key-table" id="ntp-keys">
+            <span class="key-head">Key ID</span><span class="key-head">Key (32 letters or digits)</span><span></span><span></span>
           </div>
-          <p class="hint" id="led-pins-none">No LED module is selected: no pins are used.</p>
+          <div class="buttons left key-actions">
+            <button type="button" id="ntp-key-add">Add key</button>
+          </div>
+          <label class="switch"><input type="checkbox" name="ntp_key_clear"> Use the keys compiled into the firmware (ESP32TimeServerSettingsSecrets.h)</label>
+          <p class="hint">Up to 8 keys (SHA-256, truncated to 160 bit). Enter the same key ID and key on the clients, e.g. <code>1 SHA256 ASCII:&lt;key&gt;</code> in chrony.keys. Generate uses the random generator of the browser. Changed keys take effect at once with Apply; Save Settings keeps them.</p>
         </details>
-      </section>
-
-      <section class="card">
-        <h2>MQTT <span class="badge restart">restart</span></h2>
-        <div class="grid">
-          <label class="switch span2"><input type="checkbox" name="mqtt_enabled"> MQTT reporting</label>
-          <label class="span2"><span class="lt">Broker URI</span><input type="text" name="mqtt_uri" maxlength="127" spellcheck="false" placeholder="mqtt://192.168.1.15:1883 or mqtts://broker.example:8883"><small class="def" data-for="mqtt_uri"></small></label>
-          <label><span class="lt">User name</span><input type="text" name="mqtt_username" maxlength="64" autocomplete="off" spellcheck="false"><small class="def" data-for="mqtt_username"></small></label>
-          <label><span class="lt">Password</span>
-            <input type="password" name="mqtt_password" maxlength="64" autocomplete="new-password" placeholder="unchanged">
-            <small class="note" id="mqtt-password-state"></small>
-          </label>
-          <label class="switch span2"><input type="checkbox" name="mqtt_password_clear"> Clear the MQTT password</label>
-        </div>
-        <p class="hint">An empty password field keeps the stored password. Secrets are never sent back to the browser.</p>
-        <div class="grid section-gap">
-          <label><span class="lt">Topic</span>
-            <input type="text" name="mqtt_topic" maxlength="100" spellcheck="false" autocomplete="off">
-            <small class="note">Reports are published to &lt;topic&gt;/report, online / offline to &lt;topic&gt;/status.</small>
-            <small class="def" data-for="mqtt_topic"></small>
-          </label>
-          <label><span class="lt">Quality of service (QoS)</span>
-            <select name="mqtt_qos">
-              <option value="0">0: at most once, nothing is queued</option>
-              <option value="1">1: at least once, queued while disconnected</option>
-              <option value="2">2: exactly once, queued while disconnected</option>
-            </select>
-            <small class="def" data-for="mqtt_qos"></small>
-          </label>
-          <label><span class="lt">Reporting period (s)</span>
-            <input type="number" name="mqtt_report_period" min="30" max="86400">
-            <small class="note">30 to 86400 s, e.g. 900 = 15 min.</small>
-            <small class="def" data-for="mqtt_report_period"></small>
-          </label>
-          <label class="switch"><input type="checkbox" name="mqtt_retain"> Broker retains the latest report (retain flag)</label>
-        </div>
-        <h3 class="sub-heading">Report contents</h3>
-        <p class="hint first">Every report has the status, uptime, satellites and NTP request counts. Additionally:</p>
-        <div class="grid">
-          <label class="switch span2"><input type="checkbox" name="mqtt_client_reporting"> Client activity: requests per client address</label>
-          <label class="switch span2"><input type="checkbox" name="mqtt_memory_reporting"> Memory usage: free heap, minimum free heap, largest free block</label>
-          <label class="switch span2"><input type="checkbox" name="mqtt_historical_reporting"> Historical information: last time synchronised and disciplined, last GNSS and PPS faults</label>
-          <label class="switch span2"><input type="checkbox" name="mqtt_distinguish_auth"> Separate counts for authenticated and unauthenticated NTP requests</label>
-        </div>
-        <h3 class="sub-heading">Report queue on a TF card (QoS 1 and 2)</h3>
-        <p class="hint first">Without a usable TF card (FAT32) only the last 4 reports are queued, in RAM, with at most 50 clients each: they are lost at a power failure or crash, and the oldest report is dropped first. Flash is not used, so it does not wear out. With a TF card the reports are queued on the card (an empty 16 GB card can hold more than 36,000 reports) with up to the client limit below; when the card is full, the oldest reports are dropped first.</p>
-        <div class="grid">
-          <label><span class="lt">Client limit per report with the TF card</span>
-            <input type="number" name="mqtt_tf_client_limit" min="50" max="1000">
-            <small class="note" id="mqtt-buffer-note"></small>
-            <small class="def" data-for="mqtt_tf_client_limit"></small>
-          </label>
-        </div>
-        <details class="pins">
-          <summary><span class="pins-title">GPIO pins</span> <span class="badge restart">restart</span><span class="pins-changed" hidden></span><span class="pins-note">TF card CMD, CLK, D0 to D3</span></summary>
-          <p class="callout">Waveshare ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH and ESP32-P4-WIFI-POE-ETH: the TF card slot is wired to these pins. If you use one of these boards, do not change them.</p>
-          <div class="grid three">
-          <label><span class="lt">CMD (GPIO)</span><input type="number" name="tf_cmd_pin" min="0" max="54"><small class="def" data-for="tf_cmd_pin"></small></label>
-          <label><span class="lt">CLK (GPIO)</span><input type="number" name="tf_clk_pin" min="0" max="54"><small class="def" data-for="tf_clk_pin"></small></label>
-          <label><span class="lt">D0 (GPIO)</span><input type="number" name="tf_d0_pin" min="0" max="54"><small class="def" data-for="tf_d0_pin"></small></label>
-          <label><span class="lt">D1 (GPIO)</span><input type="number" name="tf_d1_pin" min="0" max="54"><small class="def" data-for="tf_d1_pin"></small></label>
-          <label><span class="lt">D2 (GPIO)</span><input type="number" name="tf_d2_pin" min="0" max="54"><small class="def" data-for="tf_d2_pin"></small></label>
-          <label><span class="lt">D3 (GPIO)</span><input type="number" name="tf_d3_pin" min="0" max="54"><small class="def" data-for="tf_d3_pin"></small></label>
-          </div>
-          <p class="hint">4-bit SD mode. The pins are always reserved for the card, also while MQTT or QoS 1 / 2 are off.</p>
-        </details>
-      </section>
-
-      <section class="card">
-        <h2>NTP authentication (symmetric key, SHA-256)</h2>
-        <div class="grid">
-          <label class="switch span2"><input type="checkbox" name="ntp_auth_enabled"> Answer authenticated NTPv4 requests</label>
-        </div>
-        <h3 class="sub-heading">Keys</h3>
-        <p class="hint first" id="ntp-key-state"></p>
-        <div class="key-table" id="ntp-keys">
-          <span class="key-head">Key ID</span><span class="key-head">Key (32 letters or digits)</span><span></span><span></span>
-        </div>
-        <div class="buttons left key-actions">
-          <button type="button" id="ntp-key-add">Add key</button>
-        </div>
-        <label class="switch"><input type="checkbox" name="ntp_key_clear"> Use the keys compiled into the firmware (ESP32TimeServerSettingsSecrets.h)</label>
-        <p class="hint">Up to 8 keys (SHA-256, truncated to 160 bit). Enter the same key ID and key on the clients, e.g. <code>1 SHA256 ASCII:&lt;key&gt;</code> in chrony.keys. Generate uses the random generator of the browser. Changed keys take effect at once with Apply; Save Settings keeps them.</p>
       </section>
 
       <div class="action-bar">
@@ -385,76 +397,80 @@
     </section>
 
     <section class="card" id="ote-card">
-      <h2>Firmware Update</h2>
-      <!-- The only explanation of this card: the fields below only show their default and state -->
-      <div class="help">
-        <p>A new firmware can be installed over the network (Over The Ethernet, OTE). First the device has to accept updates:</p>
-        <ul>
-          <li><strong>Once:</strong> press <em>Restart with updates enabled</em> under <em>Upload</em>. The device restarts and accepts updates until its next restart (the one after an upload included); after that they are off again. Log in again after about a minute.</li>
-          <li><strong>Permanently:</strong> tick <em>Accept firmware updates over the network</em>, press <em>Save Settings</em> and then <em>Reboot</em>.</li>
-        </ul>
-        <p>Then the image can be sent over HTTPS (TCP 443) in two ways:</p>
-        <ol>
-          <li><strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload.</li>
-          <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the factory default password is in use, the device refuses the script.</li>
-        </ol>
-        <p><strong>Which file:</strong> <code>ESP32TimeServer.bin</code> from the build folder, built with the profile for this board's chip revision (<span id="ote-chip"></span>), not the merged flash image. The device refuses images of another project or chip revision.</p>
-        <p><strong>What happens:</strong> the device writes the image into its spare firmware slot, checks the complete image and only then selects it for the next start; until then the running firmware stays untouched. It restarts 5 s after the upload: reload this page after about a minute. During the upload (at most 5 min) this page pauses its other requests.</p>
-        <p><strong>Setting:</strong> <em>Accept firmware updates over the network</em> takes effect with <em>Apply</em>, which restarts the device once, and is kept with <em>Save Settings</em>.</p>
-        <p><strong>Security:</strong> the image is not signed, so anyone who knows the web admin password can install any firmware, with this page or with the script. Use a long random password and switch updates off when you do not need them. Wrong passwords of the script count towards the login lock-out, and the allow-list under <em>Security</em> applies to both ways.</p>
-      </div>
-      <!-- Fields of the settings form (form="settings-form"): Apply and Save Settings above include them -->
-      <h3 class="sub-heading">Settings <span class="badge restart">restart</span></h3>
-      <div class="grid">
-        <label class="switch span2"><input type="checkbox" name="ote_enabled" form="settings-form"> Accept firmware updates over the network</label>
-      </div>
-      <h3 class="sub-heading">Upload</h3>
-      <form id="ote-form" class="stack">
-        <label><span class="lt">Firmware image (.bin)</span>
-          <input type="file" id="ote-file" accept=".bin,application/octet-stream" required>
-        </label>
-        <progress id="ote-progress" max="100" value="0" hidden></progress>
-        <small class="note" id="ote-state"></small>
-        <div class="ote-once" id="ote-off" hidden>
-          <small class="note bad">Updates are off on the device: uploads are not possible.</small>
-          <div class="buttons left">
-            <button type="button" id="ote-once">Restart with updates enabled</button>
+      <details class="panel">
+        <summary><h2>Firmware Update</h2><span class="panel-changed" hidden></span></summary>
+        <!-- The only explanation of this card: the fields below only show their default and state -->
+        <div class="help">
+          <p>A new firmware can be installed over the network (Over The Ethernet, OTE). First the device has to accept updates:</p>
+          <ul>
+            <li><strong>Once:</strong> press <em>Restart with updates enabled</em> under <em>Upload</em>. The device restarts and accepts updates until its next restart (the one after an upload included); after that they are off again. Log in again after about a minute.</li>
+            <li><strong>Permanently:</strong> tick <em>Accept firmware updates over the network</em>, press <em>Save Settings</em> and then <em>Reboot</em>.</li>
+          </ul>
+          <p>Then the image can be sent over HTTPS (TCP 443) in two ways:</p>
+          <ol>
+            <li><strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload.</li>
+            <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the factory default password is in use, the device refuses the script.</li>
+          </ol>
+          <p><strong>Which file:</strong> <code>ESP32TimeServer.bin</code> from the build folder, built with the profile for this board's chip revision (<span id="ote-chip"></span>), not the merged flash image. The device refuses images of another project or chip revision.</p>
+          <p><strong>What happens:</strong> the device writes the image into its spare firmware slot, checks the complete image and only then selects it for the next start; until then the running firmware stays untouched. It restarts 5 s after the upload: reload this page after about a minute. During the upload (at most 5 min) this page pauses its other requests.</p>
+          <p><strong>Setting:</strong> <em>Accept firmware updates over the network</em> takes effect with <em>Apply</em>, which restarts the device once, and is kept with <em>Save Settings</em>.</p>
+          <p><strong>Security:</strong> the image is not signed, so anyone who knows the web admin password can install any firmware, with this page or with the script. Use a long random password and switch updates off when you do not need them. Wrong passwords of the script count towards the login lock-out, and the allow-list under <em>Security</em> applies to both ways.</p>
+        </div>
+        <!-- Fields of the settings form (form="settings-form"): Apply and Save Settings above include them -->
+        <h3 class="sub-heading">Settings <span class="badge restart">restart</span></h3>
+        <div class="grid">
+          <label class="switch span2"><input type="checkbox" name="ote_enabled" form="settings-form"> Accept firmware updates over the network</label>
+        </div>
+        <h3 class="sub-heading">Upload</h3>
+        <form id="ote-form" class="stack">
+          <label><span class="lt">Firmware image (.bin)</span>
+            <input type="file" id="ote-file" accept=".bin,application/octet-stream" required>
+          </label>
+          <progress id="ote-progress" max="100" value="0" hidden></progress>
+          <small class="note" id="ote-state"></small>
+          <div class="ote-once" id="ote-off" hidden>
+            <small class="note bad device-state">Updates are off on the device: uploads are not possible.</small>
+            <div class="buttons left">
+              <button type="button" id="ote-once">Restart with updates enabled</button>
+            </div>
+            <small class="note">Only until the next restart: the restart after the upload switches updates off again.</small>
           </div>
-          <small class="note">Only until the next restart: the restart after the upload switches updates off again.</small>
-        </div>
-        <small class="note" id="ote-once-on" hidden>Updates are on until the next restart (enabled once).</small>
-        <div class="buttons left">
-          <button type="submit" id="ote-upload">Upload and restart</button>
-        </div>
-      </form>
+          <small class="note" id="ote-once-on" hidden>Updates are on until the next restart (enabled once).</small>
+          <div class="buttons left">
+            <button type="submit" id="ote-upload">Upload and restart</button>
+          </div>
+        </form>
+      </details>
     </section>
 
     <section class="card">
-      <h2>Security</h2>
-      <!-- Both forms share three rows (fields, button, explanation), so the two buttons are always at the same height -->
-      <div class="grid security-grid">
-        <form id="password-form" class="security-form">
-          <div class="stack">
-            <h3>Change the password</h3>
-            <input type="text" name="username" value="admin" autocomplete="username" hidden>
-            <label><span class="lt">Current password</span><input type="password" id="pw-current" autocomplete="current-password" maxlength="128" required></label>
-            <label><span class="lt">New password (12 to 128 characters)</span><input type="password" id="pw-new" autocomplete="new-password" minlength="12" maxlength="128" required></label>
-            <label><span class="lt">Repeat the new password</span><input type="password" id="pw-repeat" autocomplete="new-password" minlength="12" maxlength="128" required></label>
-          </div>
-          <button type="submit">Change password</button>
-          <p class="hint">Takes effect and is stored at once. Other sessions are logged out.</p>
-        </form>
-        <form id="allow-form" class="security-form">
-          <div class="stack fill">
-            <h3>Allowed source networks</h3>
-            <label><span class="lt">One address or CIDR network per line, at most 8 (empty = all)</span>
-              <textarea id="allow-list" rows="6" spellcheck="false" placeholder="192.168.1.0/24&#10;fd00::/8"></textarea>
-            </label>
-          </div>
-          <button type="submit">Store allow-list</button>
-          <p class="hint">Takes effect and is stored at once. Connections from other addresses are closed before the TLS handshake. A list that does not contain your own address is refused.</p>
-        </form>
-      </div>
+      <details class="panel">
+        <summary><h2>Security</h2><span class="panel-changed" hidden></span></summary>
+        <!-- Both forms share three rows (fields, button, explanation), so the two buttons are always at the same height -->
+        <div class="grid security-grid">
+          <form id="password-form" class="security-form">
+            <div class="stack">
+              <h3>Change the password</h3>
+              <input type="text" name="username" value="admin" autocomplete="username" hidden>
+              <label><span class="lt">Current password</span><input type="password" id="pw-current" autocomplete="current-password" maxlength="128" required></label>
+              <label><span class="lt">New password (12 to 128 characters)</span><input type="password" id="pw-new" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+              <label><span class="lt">Repeat the new password</span><input type="password" id="pw-repeat" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+            </div>
+            <button type="submit">Change password</button>
+            <p class="hint">Takes effect and is stored at once. Other sessions are logged out.</p>
+          </form>
+          <form id="allow-form" class="security-form">
+            <div class="stack fill">
+              <h3>Allowed source networks</h3>
+              <label><span class="lt">One address or CIDR network per line, at most 8 (empty = all)</span>
+                <textarea id="allow-list" rows="6" spellcheck="false" placeholder="192.168.1.0/24&#10;fd00::/8"></textarea>
+              </label>
+            </div>
+            <button type="submit">Store allow-list</button>
+            <p class="hint">Takes effect and is stored at once. Connections from other addresses are closed before the TLS handshake. A list that does not contain your own address is refused.</p>
+          </form>
+        </div>
+      </details>
     </section>
   </div>
 </main>

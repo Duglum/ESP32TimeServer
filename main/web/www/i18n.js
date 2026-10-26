@@ -65,6 +65,8 @@
     'stratum 1, PPS holdover (PPS lost)': 'Stratum 1, PPS-Holdover (PPS verloren)',
     '{n} satellites in use, fix quality {q} (GGA)': '{n} Satelliten in Verwendung, Fix-Qualität {q} (GGA)',
     'RMC {ms} ms after the PPS ({min} to {max} ms since the start)': 'RMC {ms} ms nach dem PPS ({min} bis {max} ms seit dem Start)',
+    '1 value differs from the default': '1 Wert weicht vom Standard ab',
+    '{n} values differ from the default': '{n} Werte weichen vom Standard ab',
     '{n} satellites in use (NAV-PVT)': '{n} Satelliten in Verwendung (NAV-PVT)',
     'qErr correction: learning the sign': 'qErr-Korrektur: Vorzeichen wird gelernt',
     'qErr correction active (slope {slope})': 'qErr-Korrektur aktiv (Steigung {slope})',

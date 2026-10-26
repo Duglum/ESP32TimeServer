@@ -66,6 +66,7 @@ Contents
 | 37 | **Native NMEA reader** (2026-10-26, review option b, stage 1): the NMEA protocol reads the receiver with the ESP-IDF UART driver in its own task instead of the Arduino serial port; optional GGA (fix quality, satellites in use), web setting *Minimum satellites in use before stratum 1* (default off), RMC phase after the PPS on the status page | 2 kB receive buffer instead of 256 B, continuous validity, a sentence that started before the PPS edge never labels it; nothing is sent to the receiver |
 | 38 | **Native UBX protocol for u-blox M10** (2026-10-26, review option b, stage 2): one UART reader for NMEA and UBX, configuration with CFG-VALSET / CFG-VALGET only, NAV-PVT / NAV-TIMEUTC / TIM-TP sent by the receiver, `validUTC` required, qErr of the time pulse in the PTP servo measurement with a learned sign; the SparkFun library is no longer used | label from the first NAV-PVT after the PPS edge instead of a poll; no UTC second before the UTC parameters are known; with qErr a few ns less noise of the PTP clock against the pulse (simulated: hanging bridges 5.9 to 2.2 ns RMS); NMEA receivers unchanged |
 | 39 | **Arduino core and SparkFun library removed** (2026-10-26, review option b, stage 3): plain ESP-IDF project; `millis()` replaced by esp_timer, no `initArduino()` / `Serial.begin()`, the SparkFun submodule and its component wrapper deleted | 8 instead of 25 managed components, image 105 kB smaller than with stage 1 (35 kB of it in this stage), no third-party warnings in the build, no longer tied to ESP-IDF below 6.2 by arduino-esp32 |
+| 40 | **Settings panels collapsed** (2026-10-26): Network, GNSS and PPS, LCD and time zone, RGB LED, MQTT, NTP authentication, Firmware Update and Security open with an arrow, like the GPIO pin areas | a short page; the heading row shows how many values inside differ from the default, an input error opens its panel |
 
 No memory leak was found in the review (section 4.13).
 
@@ -739,6 +740,18 @@ Option (b) of the review of 2026-10-23, stage 3 (review finding E-02): after 4.3
 - **Stack:** STACK_TEXT
 - **Size:** image 0x174510 (35 kB smaller than with 4.37, 105 kB smaller than with 4.36), DIRAM 173 106 B (2.1 kB less). The build shows no warning at all now (before: 39 lines from arduino-esp32, esp-modbus and SparkFun).
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1` and `DEBUG_ENABLED 1`, stack frames from the disassembly. Not tested on the board yet.
+
+### 4.39 Settings panels collapsed (2026-10-26)
+
+Request of 2026-10-26: the settings panels are collapsed when the page is loaded and open with an arrow, as the *GPIO pins* areas inside them (4.23).
+
+- `index.html`: the panels Network, GNSS and PPS, LCD and time zone, RGB LED, MQTT, NTP authentication, Firmware Update and Security are a `<details class="panel">` inside their card, the heading (`h2`) is the summary. Status, the action bar (Apply, Save Settings, Reboot, Factory reset) and the factory reset dialog stay as they were. A panel stays open while the page is open (the refresh every 10 s does not close it); a reload closes all of them.
+- `app.css`: the arrow, hover and focus ring of the GPIO pin areas, slightly larger; a long heading wraps beside the arrow on a phone.
+- `app.js`:
+  - `markPanels()`: like the GPIO pin areas, the heading row of a panel shows how many visible values inside differ from the compiled default (`1 value differs from the default`, `{n} values differ from the default`) and *see the warning* while a warning inside is shown (the PTP loopback on a chip below v3.0). The note *Updates are off on the device* of the Firmware Update panel is a state, not a warning about a setting (`device-state`), and is not counted.
+  - An input error opens the panel (and the GPIO pin area) of its field, so the field named in the message is not hidden: the checks before Apply / Save Settings now name their field (`fieldError()`), and an error of the device of the form `Field <name>: …` opens the panel of `<name>` (`revealField()`).
+- German texts for the two new markers in `i18n.js`.
+- Verified in the browser against a local mock of the JSON API: all eight panels closed after loading, markers (1 in Network, 3 in GNSS and PPS, none for the OTE state note), arrow turns when opened, an invalid MQTT reporting period, an empty TF card pin and an invalid MAC address each open their panel (and the GPIO area), German headings and markers (`I18N.missing` empty), phone width (375 px, no horizontal scroll) in light and dark mode. The path for errors of the device (`Field <name>:`) is checked by reading only (the mock accepts every request). Firmware build with the embedded page: no warning.
 
 ## 5. Security and open ports
 
