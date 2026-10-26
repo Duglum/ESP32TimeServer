@@ -1017,7 +1017,23 @@
       if (rmc) gnss.push(t('RMC after the PPS: {bins}', { bins: rmc }));
     }
     fillList('dg-gnss', gnss, '', false);
+
+    // Core dump of the last crash (review E-07)
+    const crash = d.crash || {};
+    $('dg-crash').textContent = crash.present
+      ? t('task {task}, PC {pc}{reason} ({kb} kB core dump)',
+        { task: crash.task || '?', pc: crash.pc, reason: crash.reason ? ': ' + crash.reason : '', kb: num(crash.size / 1024, 1) })
+      : t('none recorded');
+    $('dg-crash-actions').hidden = !crash.present;
   }
+
+  $('dg-crash-erase').addEventListener('click', async () => {
+    if (!confirm(t('Delete the stored core dump?'))) return;
+    const r = await api('/api/coredump/erase', {});
+    show(r.status === 200 ? ts(r.data.message) : (ts(r.data.error) || t('Request failed ({status})', { status: r.status })),
+      r.status === 200 ? 'ok' : 'error');
+    loadDiag();
+  });
 
   async function loadDiag() {
     if (!state || !$('diag-panel').open) return;

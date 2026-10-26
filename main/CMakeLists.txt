@@ -3,6 +3,7 @@
 set(MAIN_SOURCES
         "main.cpp"
         "custom/app_metadata.cpp"
+        "custom/crash_dump.cpp"
         "custom/gnss_nmea.cpp"
         "custom/gnss_uart.cpp"
         "custom/gnss_ubx.cpp"
@@ -27,6 +28,9 @@ set(MAIN_REQUIRES
         esp-tls
         app_update
         bootloader_support
+        espcoredump
+        esp_partition
+        spi_flash
         mdns
         nvs_flash
         driver

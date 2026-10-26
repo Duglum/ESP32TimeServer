@@ -49,6 +49,10 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 # Compiler optimization for performance (-O2) instead of debug (-Og): shorter and steadier NTP and PPS code paths
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
+# Review E-07: a crash writes a core dump (ELF) to the "coredump" partition of partitions.csv (128 kB at the end of
+# the flash); the web admin page shows it and offers it for download (idf.py coredump-info reads it over USB)
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+
 # ==============================================================================
 # WEB ADMIN PAGE (HTTPS, TCP 443)
 # ==============================================================================

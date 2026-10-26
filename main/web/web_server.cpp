@@ -8,12 +8,14 @@
 // esp_https_server) so that the source address allow-list is checked before the TLS handshake.
 
 #include "web_server.h"
+#include "custom/crash_dump.h"
 #include "web_auth.h"
 #include "web_net.h"
 #include "web_ote.h"
 #include "web_settings.h"
 #include "web_tls.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -1475,7 +1477,66 @@ namespace
         cJSON_AddNumberToObject(root, "rf_jam_indicator", d->rf_jam_indicator);
         cJSON_AddNumberToObject(root, "uptime_s", static_cast<double>(esp_timer_get_time() / 1000000LL));
         delete d;
+        crash_dump_info_t crash{};
+        crash_dump_get(&crash);
+        cJSON *dump = cJSON_AddObjectToObject(root, "crash");
+        cJSON_AddBoolToObject(dump, "present", crash.present);
+        cJSON_AddStringToObject(dump, "task", crash.task);
+        char pc[12];
+        snprintf(pc, sizeof(pc), "0x%08lx", static_cast<unsigned long>(crash.pc));
+        cJSON_AddStringToObject(dump, "pc", pc);
+        cJSON_AddStringToObject(dump, "reason", crash.reason);
+        cJSON_AddNumberToObject(dump, "size", crash.size);
         return send_json(req, "200 OK", root);
+    }
+
+    // Core dump of the last crash (review E-07): the raw content of the partition (header, ELF core file, checksum),
+    // for "idf.py coredump-info --core coredump.bin --core-format raw". Reading the flash stops the cache for a
+    // moment per block, so it is only read on request.
+    esp_err_t handle_coredump(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, false, token) != gate_t::passed)
+            return ESP_OK;
+        crash_dump_info_t crash{};
+        crash_dump_get(&crash);
+        if (!crash.present)
+            return send_error(req, "404 Not Found", "No core dump stored");
+        static constexpr size_t BLOCK = 2048;
+        uint8_t *block = static_cast<uint8_t *>(malloc(BLOCK));
+        if (block == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        set_security_headers(req, "no-store");
+        httpd_resp_set_type(req, "application/octet-stream");
+        httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"coredump.bin\"");
+        esp_err_t err = ESP_OK;
+        for (size_t offset = 0; offset < crash.size && err == ESP_OK; offset += BLOCK)
+        {
+            const size_t length = std::min<size_t>(BLOCK, crash.size - offset);
+            if (!crash_dump_read(offset, block, length))
+            {
+                err = ESP_FAIL;
+                break;
+            }
+            err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(block), static_cast<ssize_t>(length));
+        }
+        free(block);
+        if (err != ESP_OK)
+        {
+            httpd_resp_send_chunk(req, nullptr, 0);
+            return ESP_FAIL; // the connection is closed: the download is visibly incomplete
+        }
+        return httpd_resp_send_chunk(req, nullptr, 0);
+    }
+
+    esp_err_t handle_coredump_erase(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        if (!crash_dump_erase())
+            return send_error(req, "500 Internal Server Error", "The core dump could not be erased");
+        return send_ok(req, "Core dump erased.");
     }
 
     esp_err_t handle_info(httpd_req_t *req)
@@ -1557,6 +1618,8 @@ namespace
             {"/api/ote/once", HTTP_POST, handle_ote_once},
             {"/api/info", HTTP_GET, handle_info},
             {"/api/diag", HTTP_GET, handle_diag},
+            {"/api/coredump", HTTP_GET, handle_coredump},
+            {"/api/coredump/erase", HTTP_POST, handle_coredump_erase},
         };
         for (const route_t &route : routes)
         {
@@ -1616,7 +1679,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 20; // 19 routes in use
+        config.max_uri_handlers = 22; // 21 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

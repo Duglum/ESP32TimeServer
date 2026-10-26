@@ -57,6 +57,7 @@
 
 #include "ESP32TimeServerSettings.h"
 #include "custom/app_metadata.h"
+#include "custom/crash_dump.h"
 #include "web/web_net.h"
 #include "web/web_server.h"
 #include "web/web_settings.h"
@@ -11343,6 +11344,8 @@ extern "C" void app_main()
     setup_pps_input(); // (keep this at the very beginning of the setup sequence)
 
     write_opening_messages_to_the_console();
+
+    crash_dump_init(); // a core dump of an earlier crash is logged here (review E-07)
 
     write_settings_messages_to_the_console();
 

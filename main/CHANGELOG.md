@@ -73,6 +73,7 @@ Contents
 | 44 | **PPS not followed without valid GNSS time** (2026-10-26, review Z-05): edges are ignored while the GNSS time is not valid, the same holdover as for a lost PPS | a time pulse that keeps running without fix (u-blox) no longer pulls the PTP clock; the replies get the PPS holdover (stratum 1 for the holdover time) instead of stratum 16 at once |
 | 45 | **u-blox time pulse and antenna** (2026-10-26, review G-03): CFG-TP of time pulse 1 read and logged at the setup (warnings for settings that do not fit the PPS input), MON-RF polled every 10 s (antenna, jamming, AGC on the status page; noise and CW indicator in the diagnostics) | a wrong time pulse configuration or an antenna fault shows up without an oscilloscope; nothing is written to the receiver |
 | 46 | **lwIP and UART interrupt in IRAM** (2026-10-26, review E-04): `CONFIG_LWIP_IRAM_OPTIMIZATION`, `CONFIG_UART_ISR_IN_IRAM` | the lwIP RX/TX path runs without flash cache misses; the GNSS UART keeps receiving during flash writes (NVS, OTE); DIRAM about +17 kB |
+| 47 | **Core dump of a crash** (2026-10-26, review E-07): written to a new `coredump` partition (128 kB at the end of the flash), logged at the next start, shown in the diagnostics with download and delete | a crash in the field can be analysed afterwards (`idf.py coredump-info`); **the partition table has to be flashed once over USB** |
 
 No memory leak was found in the review (section 4.13).
 
@@ -832,6 +833,17 @@ Review E-04. `sdkconfig.defaults`:
 - The other part of review E-03 / E-04, `CONFIG_SPI_FLASH_AUTO_SUSPEND`, is **not** switched on: ESP-IDF supports it only for the flash chips XM25xxD, GD25QxxE and FM25Q32 (and a few IDs in the vendor drivers); with another chip `esp_flash_init_default_chip()` fails at the start and the device does not boot. The flash chip of the boards is not known yet (boot log line `spi_flash: detected chip: ...`, or `esptool.py flash_id`).
 - Verified: build (-O2, no warning) with the two options set. Not on the board yet.
 
+### 4.46 Core dump of a crash (2026-10-26)
+
+Review E-07. Until now a panic only printed its register dump on the console and restarted; in the field nothing was left.
+
+- `partitions.csv`: new partition `coredump, data, coredump, 0xC20000, 0x20000` (128 kB) after `ota_1`. The existing partitions do not move (NVS, OTA data and both OTA slots stay as they are). **An OTE update does not write the partition table: flash it once over USB** (`idf.py partition-table-flash` or a full `idf.py flash`). Without the partition the firmware runs as before and logs `No core dump partition: crashes are not recorded`.
+- `sdkconfig.defaults`: `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` (ELF format, the IDF defaults otherwise: checked at the start, at most 64 tasks, summary with 1 kB of the crashed stack). As with 4.45 an existing `sdkconfig` has to be created again.
+- New `main/custom/crash_dump.*`: at the start (`crash_dump_init()` after the opening console messages) the partition is checked once (`esp_core_dump_image_check()`); a stored dump is logged with task, program counter and panic reason (`A core dump of a crash is stored: task ..., PC 0x..., ... (download it on the web admin page or with idf.py coredump-info)`) and its summary is kept. Reading the flash stops the cache for a moment, so the partition is not read again except for a download.
+- Web admin: the diagnostics panel has a row *Last crash* (task, PC, reason, size, or *none recorded*) with *Download* (`GET /api/coredump`, the raw partition content `coredump.bin`, 2 kB blocks) and *Delete* (`POST /api/coredump/erase`, with confirmation). Decode it with `idf.py coredump-info --core coredump.bin --core-format raw` and the ELF of the same build. 21 routes (handler limit 22). German texts added.
+- Memory: image 1 585 536 B, DIRAM 210 088 B (core dump code and buffers). No change of the time path or of task stacks (the summary is read on the heap once at the start).
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, the generated partition table, the page against the mock (dump present, delete). Not on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1143,6 +1155,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - Integer absolute times (4.35): built and modelled, not tested on the board yet. Check: the debug line of the PPS task (`raw_phase`, `resid`, `jitter_excess`, `d_central`) shows the same values as before, the PTP status (offset, innovation, noise) is unchanged, and the stack of the PPS task with `CALCULATE_STACK_SIZES_ENABLED 1`.
 - Arduino core and SparkFun library removed (4.38): built, not tested on the board yet. Check: the console at 115200 baud from the first line on, the uptime / restart button (hold time), the periodic GNSS refresh every `periodicGNSSRefreshEveryThisNumberOfMinutes`, and the stack of the PPS task with `CALCULATE_STACK_SIZES_ENABLED 1`.
 - Native UBX protocol (4.37): built and modelled, not tested on the board yet. Check with the M10: first start (baud rate ladder to 921600, identity stored) and a second start (fast path with the stored identity of the SparkFun firmware), the console warnings of the message configuration (none expected), stratum 1 after `validUTC`, the qErr line on the status page (learning, then active with a slope near +1 or -1 after about 2 minutes; if it stays at *no qErr*, check the debug UBX line: `qErr invalid` counting up means flags bit 4 has the opposite meaning), the stack of the PPS task and of `gnss_uart` with `CALCULATE_STACK_SIZES_ENABLED 1`. With the GT-U16 (NMEA protocol): as before.
+- Core dump (4.46): flash the partition table over USB once, then trigger a crash on purpose only on a test board (e.g. a temporary `abort()`), check the console line at the next start, the row *Last crash*, the download with `idf.py coredump-info --core coredump.bin --core-format raw`, and *Delete*.
 - lwIP and UART interrupt in IRAM (4.45): after deleting `sdkconfig`: build, flash, the UART overflow counter in the diagnostics stays 0 while settings are saved and during an OTE upload.
 - u-blox time pulse and antenna (4.44): built, not on the board yet. Check with the M10: the console line `GNSS time pulse: ...` at the start (rising edge, 1 s, UTC or GPS grid; no warning), the status line `antenna OK, jamming none` (unplug the antenna: *open* or *unknown* depending on the antenna supervisor of the board), the time pulse and RF values in the diagnostics.
 - PPS without valid GNSS time (4.43): built, not on the board yet. Check with the M10 (time pulse also without fix, if it can be set) or by unplugging the GNSS antenna while the PPS keeps running: console `PPS not followed`, stratum 1 for the PPS holdover time, then as set; after the antenna is back `PPS followed again` and a ramp instead of a step in chrony. With the GT-U16 nothing changes in normal operation.
@@ -1174,6 +1187,7 @@ Current files of the changes:
 | `main/custom/ntp_cache.c`, `main/custom/ntp_cache.h` | client cache (unchanged since the earlier work) |
 | `main/custom/gnss_uart.*`, `gnss_nmea.*`, `gnss_ubx.*` | GNSS receiver on the ESP-IDF UART: reader task, NMEA sentences, UBX protocol (4.36 to 4.38) |
 | `main/custom/time_diag.*` | diagnostics of the time keeping: phase series, ADEV / TDEV, innovation RMS, PPS interrupt histogram (4.42) |
+| `main/custom/crash_dump.*`, `partitions.csv` | core dump of the last crash: check at the start, summary, download and erase (4.46) |
 | `CMakeLists.txt` (root) | -O2 warning handling for third-party components |
 | `sdkconfig.defaults`, `sdkconfig` | `CONFIG_COMPILER_OPTIMIZATION_PERF=y` |
 | `main/CHANGELOG.md` | this file |
