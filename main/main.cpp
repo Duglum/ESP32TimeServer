@@ -2677,6 +2677,25 @@ static ntp_reply_status_t get_ntp_reply_status()
     return {};
 }
 
+// The GNSS time was valid within Gnss_Validity_Timeout_Us before now_us: the same test as gnss_synchronized in
+// get_ntp_reply_status (published sync state). Used by the PPS task (review Z-05).
+static bool gnss_recently_valid(int64_t now_us)
+{
+    for (int attempt = 0; attempt < 100; ++attempt)
+    {
+        const uint32_t sequence = s_ntp_sync_state_sequence.load(std::memory_order_acquire);
+        if ((sequence & 1U) != 0)
+            continue;
+        const bool valid = s_ntp_gnss_timing_valid.load(std::memory_order_relaxed);
+        const int64_t last_valid_us = s_ntp_last_gnss_valid_us.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (sequence != s_ntp_sync_state_sequence.load(std::memory_order_relaxed))
+            continue;
+        return valid && last_valid_us > 0 && now_us - last_valid_us <= Gnss_Validity_Timeout_Us;
+    }
+    return true; // the writer did not finish: no change of the state from this reading
+}
+
 static constexpr uint8_t NTP_REPLY_TEMPLATE[NTP_PACKET_SIZE] = {
     0, 0, 4, static_cast<uint8_t>(NTP_PRECISION_EXPONENT),
     0, 0, 0, 0,
@@ -6034,6 +6053,7 @@ static void pps_discipline_task(void *parameter)
     static constexpr double maxPlausiblePpm = 200.0;
     static constexpr double spikeLimitUs = 50.0;              // tolerated deviation of a PPS interval from the expected one
     static constexpr int maxSpikes = 3;                       // after this many spikes in a row the edges are trusted again
+    static constexpr int64_t gnssTrustAfterUs = 5000000;      // review Z-05: the GNSS has to be valid this long again
 
     struct TickSample
     {
@@ -6059,9 +6079,39 @@ static void pps_discipline_task(void *parameter)
     int spike_count = 0;    // PPS edges in a row that were ignored as spikes
     int64_t last_pps_us = 0;
     bool logged_active = false;
+    bool gnss_untrusted = false;   // review Z-05: the edges are ignored, the GNSS time is not valid
+    int64_t gnss_valid_since_us = 0; // start of the current GNSS validity while the edges are ignored
 #if DEBUG_ENABLED
     uint32_t log_counter = 0;
 #endif
+
+    // PPS lost (or not followed, review Z-05): holdover of the PTP clock, the reply status takes the holdover path
+    // (sync state: PPS not active, last pulse = last edge used); the estimators start again with the next edge used
+    const auto enter_pps_holdover = [&](int64_t now_us)
+    {
+        if (logged_active)
+        {
+#if PTP_FREE_RUNNING
+            // Holdover: keep the PTP clock on its estimated rate, stop the offset correction
+            if (xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(20)) == pdTRUE)
+            {
+                ptp_servo_holdover();
+                xSemaphoreGive(s_time_mutex);
+                ptp_diag_publish();
+            }
+#endif
+        }
+        logged_active = false;
+        s_pps_discipline_active.store(false);
+        sync_state_note_pps_timeout(now_us);
+
+        // Restart the estimators but keep ppb as the holdover value;
+        // the compensation keeps running with the last anchor.
+        have_last = false;
+        hist_count = 0;
+        anchor_count = 0;
+        anchor_head = 0;
+    };
 
     for (;;)
     {
@@ -6103,6 +6153,33 @@ static void pps_discipline_task(void *parameter)
                 }
             }
             spike_count = 0;
+
+            // ---- 0b. GNSS validity (review Z-05) ----
+            // A PPS without valid GNSS time (e.g. a u-blox time pulse without fix, which runs on the receiver's own
+            // clock) is not followed: from the first edge with the GNSS time older than Gnss_Validity_Timeout_Us the
+            // edges are ignored as if the PPS were lost (holdover, the same reply status), until the GNSS time is
+            // valid again for gnssTrustAfterUs. Only once the time was set: before that the GNSS validity is not known.
+            if (s_time_has_been_set.load(std::memory_order_acquire))
+            {
+                const bool gnss_valid = gnss_recently_valid(edge_us);
+                if (!gnss_valid)
+                    gnss_valid_since_us = 0;
+                else if (gnss_valid_since_us == 0)
+                    gnss_valid_since_us = edge_us;
+                if (!gnss_untrusted && !gnss_valid)
+                {
+                    gnss_untrusted = true;
+                    ESP_LOGW(TAG, "PPS not followed: GNSS time not valid (holdover)");
+                    enter_pps_holdover(edge_us);
+                }
+                else if (gnss_untrusted && gnss_valid && edge_us - gnss_valid_since_us >= gnssTrustAfterUs)
+                {
+                    gnss_untrusted = false;
+                    ESP_LOGI(TAG, "PPS followed again: GNSS time valid for %lld s", static_cast<long long>(gnssTrustAfterUs / 1000000LL));
+                }
+                if (gnss_untrusted)
+                    continue;
+            }
 
             last_pps_us = edge_us;
             s_pps_discipline_active.store(true);
@@ -6354,28 +6431,7 @@ static void pps_discipline_task(void *parameter)
                 if (logged_active)
                     ESP_LOGW(TAG, "PPS discipline inactive (PPS signal unavailable).");
 #endif
-                if (logged_active)
-                {
-#if PTP_FREE_RUNNING
-                    // Holdover: keep the PTP clock on its estimated rate, stop the offset correction
-                    if (xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(20)) == pdTRUE)
-                    {
-                        ptp_servo_holdover();
-                        xSemaphoreGive(s_time_mutex);
-                        ptp_diag_publish();
-                    }
-#endif
-                }
-                logged_active = false;
-                s_pps_discipline_active.store(false);
-                sync_state_note_pps_timeout(now_us);
-
-                // Restart the estimators but keep ppb as the holdover value;
-                // the compensation keeps running with the last anchor.
-                have_last = false;
-                hist_count = 0;
-                anchor_count = 0;
-                anchor_head = 0;
+                enter_pps_holdover(now_us);
             }
         }
 
