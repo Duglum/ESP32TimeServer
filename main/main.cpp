@@ -277,7 +277,7 @@ reply and doesn’t blindly accept time data that has been changed in transit.
 static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 2522; // also the recovery worker task; was 2405 before the recovery log lines
 static constexpr size_t GNSS_Recovery_Task_Stack_Size = 2798;
 static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = 2642;
-static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2256;
+static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2262;
 static constexpr size_t LED_LCD_Button_Task_Stack_Size = 3217;
 static constexpr size_t Ethernet_Setup_Task_Stack_Size = 4096;
 static constexpr size_t MQTT_Service_Task_Stack_Size = 3512;
