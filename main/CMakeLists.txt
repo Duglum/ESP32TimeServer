@@ -29,7 +29,11 @@ set(MAIN_REQUIRES
         mdns
         nvs_flash
         driver
+        esp_driver_gpio
+        esp_driver_ledc
         esp_driver_mcpwm
+        esp_driver_sdmmc
+        esp_driver_uart
         lwip
         mbedtls
         mqtt
@@ -39,8 +43,6 @@ set(MAIN_REQUIRES
         pcf8574
         led_strip
         cjson
-        arduino-esp32
-        SparkFun_u-blox_GNSS_v3
 )
 
 idf_component_register(

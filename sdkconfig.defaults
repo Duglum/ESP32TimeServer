@@ -1,7 +1,7 @@
 # remove comment below to compile for boards with chip revision older than 3.0. Untested if current release works with them.
 # CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 
-# Required to build on ESP-IDF v5.5.3+
+# 1 ms ticks (the timing code waits in steps of a few ms)
 CONFIG_FREERTOS_HZ=1000
 
 CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
@@ -15,24 +15,17 @@ CONFIG_BOOTLOADER_SIZE_IN_BYTES=0x7000
 CONFIG_IDF_TARGET="esp32p4"
 CONFIG_IDF_TARGET_ESP32P4=y
 
-CONFIG_ARDUINO_VARIANT="esp32p4"
-
 # Required to build on ESP-IDF v6.0.2+
 CONFIG_LIBC_NEWLIB=y
 
 # ==============================================================================
 # COMPILER WARNING CONFIGURATION
 # ==============================================================================
-# CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y is required to ensure compatibility
-# with ESP-IDF v5.5.5+ and v6.0.2 when building the 'arduino-esp32' managed
-# component framework layer.
-#
-# The upstream third-party 'arduino-esp32' code contains legacy structural 
-# properties that trigger strict compiler warnings.Leaving this flag disabled
-# forces the build toolchain to treat these non-fatal vendor library warnings
-# as breaking compilation errors, halting the firmware build pipeline. Leaving
-# this set to 'y' safely isolates our core project logic from external library
-# framework maintenance updates.
+# CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y: ESP-IDF builds with -Werror=all
+# instead of -Werror. It was required for the 'arduino-esp32' managed component
+# (removed with the native GNSS code, CHANGELOG 4.38) and is kept, so a warning
+# in other third-party code does not stop the build; see also the root
+# CMakeLists.txt.
 # ============================================================================
 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
 

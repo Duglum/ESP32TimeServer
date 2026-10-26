@@ -55,7 +55,6 @@
 #include <string>
 #include <vector>
 
-#include "Arduino.h"
 #include "ESP32TimeServerSettings.h"
 #include "custom/app_metadata.h"
 #include "web/web_net.h"
@@ -1454,6 +1453,12 @@ static void mqtt_enqueue_ntp_request(const struct sockaddr_storage &source_addre
 
 static void controlled_restart(const char *reason);
 
+// esp_timer time in milliseconds, 32 bit: differences of two readings stay correct across the wrap after 49.7 days
+static inline uint32_t uptime_ms()
+{
+    return static_cast<uint32_t>(esp_timer_get_time() / 1000);
+}
+
 static constexpr int GNSS_UART_NUM = 1; // UART of the GNSS receiver (custom/gnss_uart)
 static uint32_t s_detected_gnss_baud = 0;
 static std::atomic<bool> s_saved_gnss_baud_communication_failed{false};
@@ -2468,9 +2473,9 @@ static bool check_uptime_request()
     if (!button_was_pressed)
     {
         button_was_pressed = true;
-        button_press_start_ms = millis();
+        button_press_start_ms = uptime_ms();
     }
-    else if (millis() - button_press_start_ms >= holdUpTimeRestartButtonForThisManySecondsToTriggerAReset * 1000UL)
+    else if (uptime_ms() - button_press_start_ms >= holdUpTimeRestartButtonForThisManySecondsToTriggerAReset * 1000UL)
     {
         clear_gnss_nvs_data();
         controlled_restart("manual_restart");
@@ -6710,7 +6715,7 @@ static void setup_gnss()
     static constexpr uint32_t gnssFixEscalationToNmeaFallbackMs = 120000UL;
 
     bool nmea_fallback_enabled = s_use_nmea_fallback;
-    uint32_t wait_start_ms = millis();
+    uint32_t wait_start_ms = uptime_ms();
     uint32_t last_status_log_ms = 0;
     uint32_t last_long_wait_warning_ms = 0;
 
@@ -6756,7 +6761,7 @@ static void setup_gnss()
             }
         }
 
-        uint32_t now_ms = millis();
+        uint32_t now_ms = uptime_ms();
         if (!ubx_fix_ready && !nmea_fallback_enabled && allowFallbackProcessing && (now_ms - wait_start_ms) >= gnssFixEscalationToNmeaFallbackMs)
         {
             nmea_fallback_enabled = true;
@@ -6779,12 +6784,12 @@ static void setup_gnss()
 #if DEBUG_ENABLED
             if (ubx_fix_ready)
                 ESP_LOGI(TAG, "GNSS fix obtained after %lu ms: fix_type=%u (%s)",
-                         static_cast<unsigned long>(millis() - wait_start_ms),
+                         static_cast<unsigned long>(uptime_ms() - wait_start_ms),
                          static_cast<unsigned int>(fix_type),
                          fix_type_to_text(fix_type));
             else
                 ESP_LOGI(TAG, "GNSS fix obtained after %lu ms via NMEA fallback.",
-                         static_cast<unsigned long>(millis() - wait_start_ms));
+                         static_cast<unsigned long>(uptime_ms() - wait_start_ms));
 #endif
 
             if (wait_for_gnss_startup_qualification())
@@ -8185,9 +8190,6 @@ void write_opening_messages_to_the_console()
 
     // Note: the console writes in the routine are purposefully not guarded by a DEBUG_ENABLE check - they should always be written
 
-    Serial.begin(serialMonitorSpeed);
-    vTaskDelay(pdMS_TO_TICKS(100));
-
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "******************* Application Startup *******************");
 
@@ -8279,12 +8281,9 @@ void write_settings_messages_to_the_console()
     ESP_LOGI(TAG, "");
 }
 
-static bool s_nvs_ready = false; // nvs_flash_init() succeeded (see app_main: initArduino() is skipped otherwise)
-
 void setup_NVS_storage(void)
 {
-    s_nvs_ready = initialize_nvs_storage();
-    if (!s_nvs_ready)
+    if (!initialize_nvs_storage())
     {
         ESP_LOGE(TAG, "NVS initialization failed. GNSS module settings persistence is unavailable.");
     }
@@ -9162,11 +9161,11 @@ static void gnss_time_sync_task(void *parameter)
                      step_clock ? "" : " (clock already correct, not stepped)");
 #endif
 
-        uint32_t refresh_start_ms = millis();
+        uint32_t refresh_start_ms = uptime_ms();
         uint32_t refresh_interval_ms = periodicGNSSRefreshEveryThisNumberOfMinutes * 60UL * 1000UL;
         int64_t invalid_started_us = 0;
 
-        while ((millis() - refresh_start_ms) < refresh_interval_ms)
+        while ((uptime_ms() - refresh_start_ms) < refresh_interval_ms)
         {
             bool gnss_valid = current_gnss_timing_is_valid();
 
@@ -10874,15 +10873,6 @@ extern "C" void app_main()
     setup_NVS_storage();
 
     setup_pps_input(); // (keep this at the very beginning of the setup sequence)
-
-    // initArduino() erases the whole NVS partition when nvs_flash_init() fails with "no free pages" or "new version"
-    // (esp32-hal-misc.c): the web admin password, the TLS key and the settings would be lost and the page would fall
-    // back to the compiled password. initialize_nvs_storage() deliberately does not erase, so initArduino() is skipped
-    // then. On the ESP32-P4 it does nothing else this firmware needs (log level, empty init() / initVariant()).
-    if (s_nvs_ready)
-        initArduino();
-    else
-        ESP_LOGW(TAG, "initArduino() skipped: it would erase the NVS partition");
 
     write_opening_messages_to_the_console();
 

@@ -26,7 +26,7 @@
 // (optional) debug support
 // NOTE: setting DEBUG_ENABLED to 1 (Enabled) will degrade accuracy and performance during periods of high volume ntp requests
 #define DEBUG_ENABLED 0 // 0 = Disabled; 1 = Enabled
-static constexpr int serialMonitorSpeed = 115200;
+// The console (ESP-IDF log) runs on UART0 at CONFIG_ESP_CONSOLE_UART_BAUDRATE (sdkconfig, 115200)
 
 // (optional) web admin page: HTTPS settings page on TCP 443 (password in ESP32TimeServerSettingsSecrets.h)
 // 0 = no web server at all (TCP 443 stays closed, no TLS key is created) and only the settings of this file are
