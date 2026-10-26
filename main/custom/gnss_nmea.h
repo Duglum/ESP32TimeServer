@@ -59,7 +59,7 @@ void gnss_nmea_set_min_satellites(uint8_t count);
 // The latest RMC was valid and is at most max_age_us old
 bool gnss_nmea_time_valid(int64_t max_age_us);
 
-static constexpr size_t GNSS_NMEA_RMC_PHASE_BINS = 10; // 0-99 ms, 100-199 ms, ... 900 ms and later
+static constexpr size_t GNSS_NMEA_RMC_PHASE_BINS = 10; // 0-99 ms, 100-199 ms, ... 900-999 ms
 
 struct gnss_nmea_status_t
 {

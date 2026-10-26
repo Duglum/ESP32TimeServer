@@ -60,7 +60,7 @@ struct web_app_status_t
 // (GET /api/diag); the stability (ADEV, TDEV) is computed in the web server task.
 static constexpr size_t WEB_DIAG_TAUS = 11;     // tau = 1, 2, 4, ..., 1024 s
 static constexpr size_t WEB_DIAG_ISR_BINS = 6;  // excess up to 0.25, 0.5, 1, 2, 5 us and above
-static constexpr size_t WEB_DIAG_RMC_BINS = 10; // 100 ms each after the PPS edge, the last one 900 ms and later
+static constexpr size_t WEB_DIAG_RMC_BINS = 10; // 100 ms each within the first second after the PPS edge
 
 struct web_diag_t
 {

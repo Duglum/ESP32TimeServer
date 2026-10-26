@@ -78,6 +78,7 @@ Contents
 | 49 | **`driver` no longer required by main** (2026-10-26, review E-09) | the main component names the `esp_driver_*` components it uses; same image |
 | 50 | **Last holdover in the diagnostics** (2026-10-26): duration and the time error of the served time when the PPS came back, measured by the board against the PPS | the holdover quality is visible with ns resolution; chrony on the DiskStation cannot resolve it |
 | 51 | **No clock step after a GNSS loss while the clocks coast** (2026-10-26, board finding) | after a loss of GNSS and PPS of more than 30 s the PTP clock was set from the system clock (us) instead of re-locking without a phase step; the holdover row of the diagnostics never ended |
+| 52 | **RMC phase only within 1 s of the PPS edge** (2026-10-26, board finding) | an RMC after a missing PPS edge no longer counts as about 1 s late (status page maximum, diagnostics histogram) |
 
 No memory leak was found in the review (section 4.13).
 
@@ -880,6 +881,10 @@ Board test of 4.49: with the GNSS antenna and the PPS disconnected and connected
 - Fix (GNSS time sync task): with the right second the clock is not stepped as long as the model clock is running (its one hour of holdover not over) and either the PPS discipline is active or the PTP mapping is valid (it stays valid through the holdover). The PPS task then re-locks without a phase step once it follows the PPS again. A wrong second, a holdover of more than one hour or an invalid mapping still step the clock as before.
 - Diagnostics: a holdover also ends when the estimate starts again without continuity (new epoch of the PTP clock, e.g. an Ethernet recovery, or a step); the row then says *the time was set instead of ramped*. A re-lock without a valid mapping is shown the same way instead of an error of 0.
 - Stack: PPS task frame 816 -> 800 B, GNSS time sync task 192 B (unchanged). Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet.
+
+### 4.51 RMC phase only within 1 s of the PPS edge (2026-10-26)
+
+Board test of 4.50: the RMC histogram of the diagnostics showed 1.6 % at 900 ms and later. With the PPS lost (or ignored while the GNSS time is not valid, 4.43) the RMC sentences kept coming and were measured against the last edge within the window of 1.5 s, so they counted about 1036 ms late; they also raised the maximum of the RMC phase on the status page. A real phase of more than 1 s cannot occur (the next edge comes first). `gnss_nmea`: the window is 1 s (`RMC_PHASE_WINDOW_US`); the last bin of the histogram is 900-999 ms. Verified: build (-O2, no warning). Not on the board yet.
 
 ## 5. Security and open ports
 

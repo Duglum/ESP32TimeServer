@@ -25,7 +25,9 @@ namespace
 #endif
 
     static constexpr int64_t GGA_MAX_AGE_US = 2000000;   // an older GGA does not count
-    static constexpr int64_t RMC_PHASE_WINDOW_US = 1500000; // the RMC phase is only taken within this after an edge
+    // The RMC phase is only taken within 1 s after the last PPS edge: a later RMC belongs to a second whose edge was
+    // missing (PPS lost, or ignored while the GNSS time is not valid) and would count against the old edge
+    static constexpr int64_t RMC_PHASE_WINDOW_US = 1000000;
     static constexpr int64_t GSV_GROUP_EXPIRY_US = 10000000;
     static constexpr size_t GSV_GROUP_LIMIT = 8;
 

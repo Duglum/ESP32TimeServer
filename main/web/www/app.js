@@ -1025,7 +1025,7 @@
       }
     } else {
       gnss.push(t('sentences {n}, checksum errors {e}, UART overflows {o}', { n: d.nmea_sentences, e: d.nmea_checksum_errors, o: d.uart_overflows }));
-      const rmcLabels = d.rmc_phase_bins.map((n, i) => (i < 9 ? (i * 100) + '-' + (i * 100 + 99) + ' ms' : '≥ 900 ms'));
+      const rmcLabels = d.rmc_phase_bins.map((n, i) => (i * 100) + '-' + (i * 100 + 99) + ' ms');
       const rmc = bins(d.rmc_phase_bins, rmcLabels);
       if (rmc) gnss.push(t('RMC after the PPS: {bins}', { bins: rmc }));
     }
