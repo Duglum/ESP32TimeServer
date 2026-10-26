@@ -270,22 +270,22 @@ reply and doesn’t blindly accept time data that has been changed in transit.
 // Unless you are changing the code associated with options below and need to know the impacts of
 // those changes have on the stack sizes then the conditional compile flags below should be disabled
 
-#define CALCULATE_STACK_SIZES_ENABLED 0 // 0 = Disabled; 1 = Enabled
+#define CALCULATE_STACK_SIZES_ENABLED 1 // 0 = Disabled; 1 = Enabled
 
 // FreeRTOS task stack allocations, in bytes.
 
-static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 3072; // also the recovery worker task; was 2405 before the recovery log lines
-static constexpr size_t GNSS_Recovery_Task_Stack_Size = 12288;
-static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = 2412;
-static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2719;
+static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 2522; // also the recovery worker task; was 2405 before the recovery log lines
+static constexpr size_t GNSS_Recovery_Task_Stack_Size = 2798;
+static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = 2642;
+static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2256;
 static constexpr size_t LED_LCD_Button_Task_Stack_Size = 3217;
 static constexpr size_t Ethernet_Setup_Task_Stack_Size = 4096;
 static constexpr size_t MQTT_Service_Task_Stack_Size = 3512;
-static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2222;
+static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2234;
 static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
 static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
-static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = 3072; // GNSS UART reader (custom/gnss_uart, NMEA and UBX): measure
-static constexpr size_t PPS_Discipline_Task_Stack_Size = 3584; // was 3135: the PTP servo runs in this task (measure again)
+static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = 2314; // GNSS UART reader (custom/gnss_uart, NMEA and UBX): measure
+static constexpr size_t PPS_Discipline_Task_Stack_Size = 3620; // was 3135: the PTP servo runs in this task (measure again)
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
 
