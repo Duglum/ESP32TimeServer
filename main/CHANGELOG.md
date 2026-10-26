@@ -79,6 +79,7 @@ Contents
 | 50 | **Last holdover in the diagnostics** (2026-10-26): duration and the time error of the served time when the PPS came back, measured by the board against the PPS | the holdover quality is visible with ns resolution; chrony on the DiskStation cannot resolve it |
 | 51 | **No clock step after a GNSS loss while the clocks coast** (2026-10-26, board finding) | after a loss of GNSS and PPS of more than 30 s the PTP clock was set from the system clock (us) instead of re-locking without a phase step; the holdover row of the diagnostics never ended |
 | 52 | **RMC phase only within 1 s of the PPS edge** (2026-10-26, board finding) | an RMC after a missing PPS edge no longer counts as about 1 s late (status page maximum, diagnostics histogram) |
+| 53 | **Robust check of the 80 MHz PLL source of the PTP clock** (2026-10-26, board finding) | a reading disturbed at the start no longer drops the 13 ns time stamps for the whole run; the warning names the failed step |
 
 No memory leak was found in the review (section 4.13).
 
@@ -885,6 +886,15 @@ Board test of 4.49: with the GNSS antenna and the PPS disconnected and connected
 ### 4.51 RMC phase only within 1 s of the PPS edge (2026-10-26)
 
 Board test of 4.50: the RMC histogram of the diagnostics showed 1.6 % at 900 ms and later. With the PPS lost (or ignored while the GNSS time is not valid, 4.43) the RMC sentences kept coming and were measured against the last edge within the window of 1.5 s, so they counted about 1036 ms late; they also raised the maximum of the RMC phase on the status page. A real phase of more than 1 s cannot occur (the next edge comes first). `gnss_nmea`: the window is 1 s (`RMC_PHASE_WINDOW_US`); the last bin of the histogram is 900-999 ms. Verified: build (-O2, no warning). Not on the board yet.
+
+### 4.52 Robust check of the 80 MHz PLL source of the PTP clock (2026-10-26)
+
+Board finding: one start logged `PTP clock: the 80 MHz PLL source does not work, using the 40 MHz crystal (40 ns steps)`, where the start before showed the PLL source (13 ns steps). The `sdkconfig` made again from the defaults differs from the earlier one only in the PPP options, so the cause is at run time.
+
+- The source is taken only if the PTP clock runs at its rate: two readings 20 ms apart, compared with the local timebase within 0.1 % (20 us). Each reading was a local time and a PTP reading one after the other; an interrupt, or the cache stopped by a flash access of another task on the other core (NVS at the start), between the two made the check fail, and the crystal was used for the whole run (the source is kept because the frequency command refers to its base value). A PTP reading across the second rollover could do the same.
+- Now each PTP reading is bracketed by two local readings and taken again if the bracket is longer than 5 us (`ptp_clock_reading()`), and the check is tried up to three times. A clock that does not run at its rate fails all tries.
+- The warning names the step that failed: `could not be switched on (<error>)` (clock gate), `the EMAC refused ... (<error>)`, or `does not run at its rate (<n> ns in <m> ns)`.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet: several starts should all log `PTP clock: 80 MHz PLL source, time stamp steps of 13 ns`; if not, the warning shows the step.
 
 ## 5. Security and open ports
 

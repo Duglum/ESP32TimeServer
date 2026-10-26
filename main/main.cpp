@@ -937,22 +937,49 @@ static eth_mac_ptp_config_t ptp_mac_config(bool pll)
     return config;
 }
 
-// true if the PTP clock advances at its nominal rate: checked over 20 ms against the local timebase (within 0.1 %)
-static bool ptp_clock_rate_plausible(esp_eth_mac_t *mac)
+// One reading of the PTP clock with the local time of its middle: the reading is bracketed by two local readings and
+// taken again if the bracket is longer than 5 us (an interrupt, or the cache stopped by a flash access on the other
+// core, came in between)
+static bool ptp_clock_reading(esp_eth_mac_t *mac, int64_t &ptp_ns, int64_t &local_ns)
 {
-    eth_mac_time_t t1{};
-    eth_mac_time_t t2{};
-    const int64_t a = local_now_ns();
-    if (esp_eth_mac_get_ptp_time(mac, &t1) != ESP_OK)
-        return false;
-    vTaskDelay(pdMS_TO_TICKS(20));
-    const int64_t b = local_now_ns();
-    if (esp_eth_mac_get_ptp_time(mac, &t2) != ESP_OK)
-        return false;
-    const int64_t ptp_elapsed = (static_cast<int64_t>(t2.seconds) - static_cast<int64_t>(t1.seconds)) * 1000000000LL +
-                                (static_cast<int64_t>(t2.nanoseconds) - static_cast<int64_t>(t1.nanoseconds));
-    const int64_t local_elapsed = b - a;
-    return local_elapsed > 0 && std::llabs(ptp_elapsed - local_elapsed) < local_elapsed / 1000;
+    for (int attempt = 0; attempt < 10; ++attempt)
+    {
+        eth_mac_time_t t{};
+        const int64_t a = local_now_ns();
+        if (esp_eth_mac_get_ptp_time(mac, &t) != ESP_OK)
+            return false;
+        const int64_t b = local_now_ns();
+        if (b - a <= 5000)
+        {
+            ptp_ns = static_cast<int64_t>(t.seconds) * 1000000000LL + static_cast<int64_t>(t.nanoseconds);
+            local_ns = a + (b - a) / 2;
+            return true;
+        }
+    }
+    return false;
+}
+
+// true if the PTP clock advances at its nominal rate: checked over 20 ms against the local timebase (within 0.1 %).
+// Up to three tries, so that a disturbed reading at the start does not drop the source; a wrong rate fails all of them.
+// measured_ns: PTP time elapsed in the last try (for the warning), local_ns the local time elapsed
+static bool ptp_clock_rate_plausible(esp_eth_mac_t *mac, int64_t &measured_ns, int64_t &local_ns)
+{
+    measured_ns = 0;
+    local_ns = 0;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        int64_t ptp1 = 0, local1 = 0, ptp2 = 0, local2 = 0;
+        if (!ptp_clock_reading(mac, ptp1, local1))
+            continue;
+        vTaskDelay(pdMS_TO_TICKS(20));
+        if (!ptp_clock_reading(mac, ptp2, local2))
+            continue;
+        measured_ns = ptp2 - ptp1;
+        local_ns = local2 - local1;
+        if (local_ns > 0 && std::llabs(measured_ns - local_ns) < local_ns / 1000)
+            return true;
+    }
+    return false;
 }
 
 // Enables the EMAC PTP clock with the configured source. first = initial setup (the source may still fall back to
@@ -963,12 +990,21 @@ static bool ptp_mac_enable(esp_eth_mac_t *mac, bool first)
     static bool pll_requested = false; // the PLL_F80M clock gate is requested once and kept
     if (first || s_ptp_clock_pll.load(std::memory_order_acquire))
     {
-        if (!pll_requested && esp_clk_tree_enable_src(SOC_MOD_CLK_PLL_F80M, true) == ESP_OK)
-            pll_requested = true;
+        esp_err_t err = ESP_OK;
+        if (!pll_requested)
+        {
+            err = esp_clk_tree_enable_src(SOC_MOD_CLK_PLL_F80M, true);
+            pll_requested = err == ESP_OK;
+        }
+        int64_t measured_ns = 0;
+        int64_t local_ns = 0;
+        bool enabled = false;
         if (pll_requested)
         {
             const eth_mac_ptp_config_t config = ptp_mac_config(true);
-            if (esp_eth_mac_ptp_enable(mac, &config) == ESP_OK && ptp_clock_rate_plausible(mac))
+            err = esp_eth_mac_ptp_enable(mac, &config);
+            enabled = err == ESP_OK;
+            if (enabled && ptp_clock_rate_plausible(mac, measured_ns, local_ns))
             {
                 s_ptp_clock_pll.store(true, std::memory_order_release);
                 if (first)
@@ -978,7 +1014,15 @@ static bool ptp_mac_enable(esp_eth_mac_t *mac, bool first)
         }
         if (!first)
             return false; // keep the source of the start: the frequency command refers to its base value
-        ESP_LOGW(TAG, "PTP clock: the 80 MHz PLL source does not work, using the 40 MHz crystal (40 ns steps)");
+        if (!pll_requested)
+            ESP_LOGW(TAG, "PTP clock: the 80 MHz PLL source could not be switched on (%s), using the 40 MHz crystal (40 ns steps)",
+                     esp_err_to_name(err));
+        else if (!enabled)
+            ESP_LOGW(TAG, "PTP clock: the EMAC refused the 80 MHz PLL source (%s), using the 40 MHz crystal (40 ns steps)",
+                     esp_err_to_name(err));
+        else
+            ESP_LOGW(TAG, "PTP clock: the 80 MHz PLL source does not run at its rate (%lld ns in %lld ns), using the 40 MHz crystal (40 ns steps)",
+                     static_cast<long long>(measured_ns), static_cast<long long>(local_ns));
         s_ptp_clock_pll.store(false, std::memory_order_release);
     }
 #else
