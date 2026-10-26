@@ -67,6 +67,7 @@ Contents
 | 38 | **Native UBX protocol for u-blox M10** (2026-10-26, review option b, stage 2): one UART reader for NMEA and UBX, configuration with CFG-VALSET / CFG-VALGET only, NAV-PVT / NAV-TIMEUTC / TIM-TP sent by the receiver, `validUTC` required, qErr of the time pulse in the PTP servo measurement with a learned sign; the SparkFun library is no longer used | label from the first NAV-PVT after the PPS edge instead of a poll; no UTC second before the UTC parameters are known; with qErr a few ns less noise of the PTP clock against the pulse (simulated: hanging bridges 5.9 to 2.2 ns RMS); NMEA receivers unchanged |
 | 39 | **Arduino core and SparkFun library removed** (2026-10-26, review option b, stage 3): plain ESP-IDF project; `millis()` replaced by esp_timer, no `initArduino()` / `Serial.begin()`, the SparkFun submodule and its component wrapper deleted | 8 instead of 25 managed components, image 105 kB smaller than with stage 1 (35 kB of it in this stage), no third-party warnings in the build, no longer tied to ESP-IDF below 6.2 by arduino-esp32 |
 | 40 | **Settings panels collapsed** (2026-10-26): Network, GNSS and PPS, LCD and time zone, RGB LED, MQTT, NTP authentication, Firmware Update and Security open with an arrow, like the GPIO pin areas | a short page; the heading row shows how many values inside differ from the default, an input error opens its panel |
+| 41 | **`NTP_CACHE_MATCH_PORT` removed** (2026-10-26): the compile option to tell clients apart by their source port, and the stored port | nothing changes in operation (the option was 0); the cache API has no port parameter any more, 1 kB less RAM |
 
 No memory leak was found in the review (section 4.13).
 
@@ -224,7 +225,7 @@ This is the mode before the follow-up; it is kept as an option. The default is t
 
 ### 4.12 Interleaved mode and client cache
 
-- Cache key: client IP only (`NTP_CACHE_MATCH_PORT 0` in `ntp_cache.c`). chrony uses a new source port for every request. Correctness is still protected by the comparison `origin timestamp == stored T2`.
+- Cache key: client IP only. chrony uses a new source port for every request. Correctness is still protected by the comparison `origin timestamp == stored T2`. (The option `NTP_CACHE_MATCH_PORT` to compare the source port as well was removed on 2026-10-26, 4.40.)
 - Lifetime 30 minutes (chrony polls up to 1024 s). 128 clients per address family.
 - After a response the cache stores the transmit time of this response: the hardware TX time stamp, otherwise the (compensated) software time. Before, the content of field 40 was stored, which is the previous T3 in an interleaved response, so the cache returned a stale T3 from the third exchange on.
 - Interleaved response: origin = receive timestamp of the request, T3 = cached hardware TX time of the previous response.
@@ -753,6 +754,15 @@ Request of 2026-10-26: the settings panels are collapsed when the page is loaded
 - German texts for the two new markers in `i18n.js`.
 - Verified in the browser against a local mock of the JSON API: all eight panels closed after loading, markers (1 in Network, 3 in GNSS and PPS, none for the OTE state note), arrow turns when opened, an invalid MQTT reporting period, an empty TF card pin and an invalid MAC address each open their panel (and the GPIO area), German headings and markers (`I18N.missing` empty), phone width (375 px, no horizontal scroll) in light and dark mode. The path for errors of the device (`Field <name>:`) is checked by reading only (the mock accepts every request). Firmware build with the embedded page: no warning.
 
+### 4.40 `NTP_CACHE_MATCH_PORT` removed (2026-10-26)
+
+Request of 2026-10-26: with `NTP_CACHE_MATCH_PORT 1` the cache would have told interleaved clients apart by their UDP source port, which makes no sense: chrony and other clients use a new source port for every request, so a record keyed by the port never finds the previous exchange.
+
+- `main/custom/ntp_cache.c`: the option, `port_matches()` and the stored `client_port` of the IPv4 and IPv6 records are removed; a record belongs to an IP address (as with the option at 0, the only value it ever had in this fork).
+- `ntp_cache_find_or_create()`, `ntp_cache_update()` and their IPv6 variants have no `port` parameter any more; the three NTP paths (hardware IPv4 and IPv6, socket path) no longer pass it. The reply is still sent to the source port of the request.
+- Behaviour and time stamps: unchanged. Memory: the IPv6 records are 8 bytes smaller (the port and its padding before the 8-byte fields), DIRAM 1 kB less (172 082 B); the IPv4 records keep their size (the port was in padding).
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -943,7 +953,6 @@ Host simulation (`test/sim_servo.cpp`) with the code of `main.cpp`: crystal -33.
 | `anchorWindow` | PPS task | 64 | edges for the central value of the anchor |
 | `freqCap`, `freqMinSeconds` | PPS task | 17, 4 | frequency window (16 s), first estimate after 4 s |
 | `labelDeadlineUs`, `ubxPollDelayMs` | `acquire_sync_candidate` | 950 ms, 300 ms | label data window after the PPS edge |
-| `NTP_CACHE_MATCH_PORT` | `ntp_cache.c` | 0 | 1 = also compare the client source port |
 | `CACHE_TIMEOUT_MS_IPV4/IPV6` | `ntp_cache.h` | 1800000 | lifetime of a cache entry |
 | `EXCHANGE_MAP_SET_BITS` / `EXCHANGE_MAP_WAYS` | `ntp_cache.c` | 9 / 4 | exchange map of the interleaved mode: 512 sets × 4 entries (32 kB), 4.29 |
 | `ntpClientRateLimitPerSecond` | `ESP32TimeServerSettings.h` | 20 | default of the per-client rate limit (4.26), 0 = off |

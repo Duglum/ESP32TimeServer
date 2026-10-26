@@ -3254,10 +3254,10 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     uint64_t interleaved_t3 = 0; // T3 of the earlier exchange the request refers to, 0 = basic mode
     bool rate_limited = false;
     uint16_t cache_slot = NTP_CACHE_SLOT_NONE; // record of the client, reused by the cache update below
-    const bool cached = ipv6 ? ntp_cache_find_or_create_ipv6(&client_ipv6, client_port, client_origin_timestamp,
-                                                             &interleaved_t3, &rate_limited, &cache_slot)
-                             : ntp_cache_find_or_create(client_ipv4, client_port, client_origin_timestamp,
-                                                        &interleaved_t3, &rate_limited, &cache_slot);
+    const bool cached = ipv6 ? ntp_cache_find_or_create_ipv6(&client_ipv6, client_origin_timestamp, &interleaved_t3,
+                                                             &rate_limited, &cache_slot)
+                             : ntp_cache_find_or_create(client_ipv4, client_origin_timestamp, &interleaved_t3,
+                                                        &rate_limited, &cache_slot);
     if (!cached)
     {
         release_hardware_ntp_request_buffer(frame);
@@ -3431,9 +3431,9 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         // the queueing delay of this frame
         const uint64_t stored_t2 = hardware_transmit_time != 0 ? receive_time : 0;
         if (ipv6)
-            ntp_cache_update_ipv6(&client_ipv6, client_port, cache_slot, stored_t2, hardware_transmit_time);
+            ntp_cache_update_ipv6(&client_ipv6, cache_slot, stored_t2, hardware_transmit_time);
         else
-            ntp_cache_update(client_ipv4, client_port, cache_slot, stored_t2, hardware_transmit_time);
+            ntp_cache_update(client_ipv4, cache_slot, stored_t2, hardware_transmit_time);
         update_tx_delay_estimate(ipv6, authenticated_request, raw_transmit_time, hardware_transmit_time);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
@@ -9548,15 +9548,14 @@ static void ntp_server_task(void *parameter)
                 if (source_addr.ss_family == AF_INET)
                 {
                     source_ipv4 = reinterpret_cast<const struct sockaddr_in *>(&source_addr);
-                    ntp_cache_find_or_create(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port), client_origin_timestamp,
-                                             &interleaved_t3, rate_limit_check, &cache_slot);
+                    ntp_cache_find_or_create(ntohl(source_ipv4->sin_addr.s_addr), client_origin_timestamp, &interleaved_t3,
+                                             rate_limit_check, &cache_slot);
                 }
                 else if (source_addr.ss_family == AF_INET6)
                 {
                     client_ipv6 = &reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_addr;
-                    ntp_cache_find_or_create_ipv6(client_ipv6,
-                                                  ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_port),
-                                                  client_origin_timestamp, &interleaved_t3, rate_limit_check, &cache_slot);
+                    ntp_cache_find_or_create_ipv6(client_ipv6, client_origin_timestamp, &interleaved_t3, rate_limit_check,
+                                                  &cache_slot);
                 }
                 if (rate_limited) // over the per-client rate limit: dropped without an answer
                 {
@@ -9627,14 +9626,11 @@ static void ntp_server_task(void *parameter)
                     }
                     if (source_ipv4 != nullptr)
                     {
-                        ntp_cache_update(ntohl(source_ipv4->sin_addr.s_addr), ntohs(source_ipv4->sin_port), cache_slot,
-                                         receive_time, transmit_time);
+                        ntp_cache_update(ntohl(source_ipv4->sin_addr.s_addr), cache_slot, receive_time, transmit_time);
                     }
                     else if (client_ipv6 != nullptr)
                     {
-                        ntp_cache_update_ipv6(client_ipv6,
-                                              ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_port),
-                                              cache_slot, receive_time, transmit_time);
+                        ntp_cache_update_ipv6(client_ipv6, cache_slot, receive_time, transmit_time);
                     }
                 }
 #if MQTT_ENABLED
