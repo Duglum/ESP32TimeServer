@@ -72,6 +72,7 @@ Contents
 | 43 | **Diagnostics of the time keeping** (2026-10-26, review 4.5): collapsed *Diagnostics* panel on the page (servo, ADEV / TDEV of the PPS, PPS interrupt, NTP paths, GNSS receiver), time quality in the MQTT report | the quality of the time keeping can be judged without an oscilloscope; nothing in the time path changes |
 | 44 | **PPS not followed without valid GNSS time** (2026-10-26, review Z-05): edges are ignored while the GNSS time is not valid, the same holdover as for a lost PPS | a time pulse that keeps running without fix (u-blox) no longer pulls the PTP clock; the replies get the PPS holdover (stratum 1 for the holdover time) instead of stratum 16 at once |
 | 45 | **u-blox time pulse and antenna** (2026-10-26, review G-03): CFG-TP of time pulse 1 read and logged at the setup (warnings for settings that do not fit the PPS input), MON-RF polled every 10 s (antenna, jamming, AGC on the status page; noise and CW indicator in the diagnostics) | a wrong time pulse configuration or an antenna fault shows up without an oscilloscope; nothing is written to the receiver |
+| 46 | **lwIP and UART interrupt in IRAM** (2026-10-26, review E-04): `CONFIG_LWIP_IRAM_OPTIMIZATION`, `CONFIG_UART_ISR_IN_IRAM` | the lwIP RX/TX path runs without flash cache misses; the GNSS UART keeps receiving during flash writes (NVS, OTE); DIRAM about +17 kB |
 
 No memory leak was found in the review (section 4.13).
 
@@ -819,6 +820,18 @@ Review G-03, the part left after 4.37: the time pulse configuration (CFG-TP) and
 - Stack: GNSS time sync task frame 176 -> 192 B; the poll adds 32 + 192 B (`run_command` with the frame buffer) and the UART driver below it, less than the `printf` depth that set the measured size. Measure the task once more with `CALCULATE_STACK_SIZES_ENABLED 1`.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, page against the mock (UBX variant, English and German, `I18N.missing` empty). The key IDs and the MON-RF layout are taken from the interface description, not checked on the M10 yet.
 
+### 4.45 lwIP and UART interrupt in IRAM (2026-10-26)
+
+Review E-04. `sdkconfig.defaults`:
+
+- `CONFIG_LWIP_IRAM_OPTIMIZATION=y`: the RX/TX functions of lwIP in IRAM (about 10 kB). The hardware NTP path does not go through lwIP, but the socket path, DHCP, neighbour discovery, mDNS and the web admin do; they run without flash cache misses now.
+- `CONFIG_UART_ISR_IN_IRAM=y` (selects `CONFIG_VFS_SELECT_IN_RAM`): the UART interrupt stays active while the flash cache is off (NVS commits, OTE). With the own UART reader of 4.36 this is possible; before, a sentence or UBX frame arriving during a flash write could be lost (counted as a UART overflow in the diagnostics).
+- Not taken: `CONFIG_LWIP_EXTRA_IRAM_OPTIMIZATION` (TCP, 17 kB; only the web admin and MQTT use TCP).
+- Memory: DIRAM 208 226 B after this change (190 266 B after 4.42; 4.43 and 4.44 add little), 447 kB free. No stack changes.
+- **The file `sdkconfig` has to be created again** (delete it, or set the two options with `idf.py menuconfig`): a `sdkconfig` that exists keeps its values, the defaults only apply to a new one.
+- The other part of review E-03 / E-04, `CONFIG_SPI_FLASH_AUTO_SUSPEND`, is **not** switched on: ESP-IDF supports it only for the flash chips XM25xxD, GD25QxxE and FM25Q32 (and a few IDs in the vendor drivers); with another chip `esp_flash_init_default_chip()` fails at the start and the device does not boot. The flash chip of the boards is not known yet (boot log line `spi_flash: detected chip: ...`, or `esptool.py flash_id`).
+- Verified: build (-O2, no warning) with the two options set. Not on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1130,6 +1143,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - Integer absolute times (4.35): built and modelled, not tested on the board yet. Check: the debug line of the PPS task (`raw_phase`, `resid`, `jitter_excess`, `d_central`) shows the same values as before, the PTP status (offset, innovation, noise) is unchanged, and the stack of the PPS task with `CALCULATE_STACK_SIZES_ENABLED 1`.
 - Arduino core and SparkFun library removed (4.38): built, not tested on the board yet. Check: the console at 115200 baud from the first line on, the uptime / restart button (hold time), the periodic GNSS refresh every `periodicGNSSRefreshEveryThisNumberOfMinutes`, and the stack of the PPS task with `CALCULATE_STACK_SIZES_ENABLED 1`.
 - Native UBX protocol (4.37): built and modelled, not tested on the board yet. Check with the M10: first start (baud rate ladder to 921600, identity stored) and a second start (fast path with the stored identity of the SparkFun firmware), the console warnings of the message configuration (none expected), stratum 1 after `validUTC`, the qErr line on the status page (learning, then active with a slope near +1 or -1 after about 2 minutes; if it stays at *no qErr*, check the debug UBX line: `qErr invalid` counting up means flags bit 4 has the opposite meaning), the stack of the PPS task and of `gnss_uart` with `CALCULATE_STACK_SIZES_ENABLED 1`. With the GT-U16 (NMEA protocol): as before.
+- lwIP and UART interrupt in IRAM (4.45): after deleting `sdkconfig`: build, flash, the UART overflow counter in the diagnostics stays 0 while settings are saved and during an OTE upload.
 - u-blox time pulse and antenna (4.44): built, not on the board yet. Check with the M10: the console line `GNSS time pulse: ...` at the start (rising edge, 1 s, UTC or GPS grid; no warning), the status line `antenna OK, jamming none` (unplug the antenna: *open* or *unknown* depending on the antenna supervisor of the board), the time pulse and RF values in the diagnostics.
 - PPS without valid GNSS time (4.43): built, not on the board yet. Check with the M10 (time pulse also without fix, if it can be set) or by unplugging the GNSS antenna while the PPS keeps running: console `PPS not followed`, stratum 1 for the PPS holdover time, then as set; after the antenna is back `PPS followed again` and a ramp instead of a step in chrony. With the GT-U16 nothing changes in normal operation.
 - Diagnostics (4.42): built, formulas checked in Python, page tested against a mock, not on the board yet. Check: open the *Diagnostics* panel; with the loopback the measurement says *PTP PPS loopback*, the innovation RMS after a minute is a few ns, ADEV at 1 s some 1e-9 to 1e-8 and falling with tau, TDEV a few ns at 1 s; the hardware path shows nearly 100 % interleaved for the chrony client; MQTT reports carry `time_quality`. Measure the stacks of the PPS task, `ntp_server` and the MQTT task once with `CALCULATE_STACK_SIZES_ENABLED 1` (frames +16, +16 and +112 B).

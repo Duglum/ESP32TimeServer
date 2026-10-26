@@ -35,6 +35,11 @@ CONFIG_ETH_TRANSMIT_MUTEX=y
 CONFIG_ETH_DMA_RX_BUFFER_NUM=30
 CONFIG_ETH_DMA_TX_BUFFER_NUM=30
 CONFIG_ETH_IRAM_OPTIMIZATION=y
+# Review E-04: the RX/TX functions of lwIP in IRAM (about 10 kB): the socket path, DHCP, ND and the web admin run
+# without flash cache misses
+CONFIG_LWIP_IRAM_OPTIMIZATION=y
+# Review E-04: the UART interrupt in IRAM: the GNSS UART keeps receiving while the flash is written (NVS, OTE)
+CONFIG_UART_ISR_IN_IRAM=y
 CONFIG_LWIP_IPV6=y
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
 # The Ethernet and IP event handlers of main.cpp run in the default event loop task (with the Arduino Ethernet
