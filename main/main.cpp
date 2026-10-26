@@ -278,17 +278,17 @@ reply and doesn’t blindly accept time data that has been changed in transit.
 
 // FreeRTOS task stack allocations, in bytes.
 
-static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 2522; // also the recovery worker task; was 2405 before the recovery log lines
-static constexpr size_t GNSS_Recovery_Task_Stack_Size = 2798;
+static constexpr size_t Ethernet_Transport_Recovery_Task_Stack_Size = 2535; // also the recovery worker task; was 2405 before the recovery log lines
+static constexpr size_t GNSS_Recovery_Task_Stack_Size = 2889;
 static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = 2642;
-static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2262;
+static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2281;
 static constexpr size_t LED_LCD_Button_Task_Stack_Size = 3217;
 static constexpr size_t Ethernet_Setup_Task_Stack_Size = 4096;
 static constexpr size_t MQTT_Service_Task_Stack_Size = 3512;
-static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2234;
+static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2244;
 static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
 static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
-static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = 2314; // GNSS UART reader (custom/gnss_uart, NMEA and UBX): measure
+static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = 2343; // GNSS UART reader (custom/gnss_uart, NMEA and UBX): measure
 static constexpr size_t PPS_Discipline_Task_Stack_Size = 3620; // was 3135: the PTP servo runs in this task (measure again)
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
