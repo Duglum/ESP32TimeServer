@@ -35,6 +35,9 @@ struct web_app_status_t
     int32_t gnss_rmc_after_pps_ms; // NMEA: reception of the latest RMC after the PPS edge (-1 = not known)
     int32_t gnss_rmc_after_pps_min_ms;
     int32_t gnss_rmc_after_pps_max_ms;
+    int16_t gnss_pvt_satellites;  // U-Blox UBX: satellites used in the latest NAV-PVT (-1 = none)
+    uint8_t gnss_qerr_state;      // U-Blox UBX: qErr correction 0 no qErr, 1 learning the sign, 2 active, 3 no correlation
+    int32_t gnss_qerr_slope_milli; // regression slope of the qErr correction x 1000 (states 2 and 3)
     bool lcd_present;
     bool led_active;
     bool mqtt_connected;

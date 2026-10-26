@@ -798,6 +798,15 @@
       gnss.push(t('RMC {ms} ms after the PPS ({min} to {max} ms since the start)',
         { ms: st.gnss_rmc_after_pps_ms, min: st.gnss_rmc_after_pps_min_ms, max: st.gnss_rmc_after_pps_max_ms }));
     }
+    // U-Blox UBX protocol: NAV-PVT and the qErr correction of the time pulse (TIM-TP)
+    if (st.gnss_pvt_satellites >= 0) gnss.push(t('{n} satellites in use (NAV-PVT)', { n: st.gnss_pvt_satellites }));
+    if (st.ublox_receiver && st.gnss_pvt_satellites >= 0) {
+      const slope = Number(st.gnss_qerr_slope).toFixed(2);
+      gnss.push(st.gnss_qerr_state === 1 ? t('qErr correction: learning the sign')
+        : st.gnss_qerr_state === 2 ? t('qErr correction active (slope {slope})', { slope })
+          : st.gnss_qerr_state === 3 ? t('qErr correction off: no correlation (slope {slope})', { slope })
+            : t('no qErr (TIM-TP missing or PTP loopback off)'));
+    }
     fillList('st-gnss', gnss, '', false);
     const keys = st.ntp_auth_keys_in_use;
     $('st-auth').textContent = st.ntp_auth_available

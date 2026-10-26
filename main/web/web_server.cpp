@@ -989,6 +989,9 @@ namespace
         cJSON_AddNumberToObject(status, "gnss_rmc_after_pps_ms", sets->app.gnss_rmc_after_pps_ms);
         cJSON_AddNumberToObject(status, "gnss_rmc_after_pps_min_ms", sets->app.gnss_rmc_after_pps_min_ms);
         cJSON_AddNumberToObject(status, "gnss_rmc_after_pps_max_ms", sets->app.gnss_rmc_after_pps_max_ms);
+        cJSON_AddNumberToObject(status, "gnss_pvt_satellites", sets->app.gnss_pvt_satellites);
+        cJSON_AddNumberToObject(status, "gnss_qerr_state", sets->app.gnss_qerr_state);
+        cJSON_AddNumberToObject(status, "gnss_qerr_slope", sets->app.gnss_qerr_slope_milli / 1000.0);
         cJSON_AddBoolToObject(status, "lcd_present", sets->app.lcd_present);
         cJSON_AddBoolToObject(status, "led_active", sets->app.led_active);
         cJSON_AddBoolToObject(status, "mqtt_connected", sets->app.mqtt_connected);

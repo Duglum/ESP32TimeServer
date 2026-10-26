@@ -65,6 +65,11 @@
     'stratum 1, PPS holdover (PPS lost)': 'Stratum 1, PPS-Holdover (PPS verloren)',
     '{n} satellites in use, fix quality {q} (GGA)': '{n} Satelliten in Verwendung, Fix-Qualität {q} (GGA)',
     'RMC {ms} ms after the PPS ({min} to {max} ms since the start)': 'RMC {ms} ms nach dem PPS ({min} bis {max} ms seit dem Start)',
+    '{n} satellites in use (NAV-PVT)': '{n} Satelliten in Verwendung (NAV-PVT)',
+    'qErr correction: learning the sign': 'qErr-Korrektur: Vorzeichen wird gelernt',
+    'qErr correction active (slope {slope})': 'qErr-Korrektur aktiv (Steigung {slope})',
+    'qErr correction off: no correlation (slope {slope})': 'qErr-Korrektur aus: keine Korrelation (Steigung {slope})',
+    'no qErr (TIM-TP missing or PTP loopback off)': 'kein qErr (TIM-TP fehlt oder PTP-Loopback aus)',
     'stratum 1, GNSS and PPS locked': 'Stratum 1, GNSS und PPS synchronisiert',
     'not stratum 1 (PPS {pps}, GNSS {gnss})': 'nicht Stratum 1 (PPS {pps}, GNSS {gnss})',
     'not stratum 1 yet: GNSS fix {age} s old, {min} s required after the start':

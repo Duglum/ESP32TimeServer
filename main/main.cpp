@@ -56,7 +56,6 @@
 #include <vector>
 
 #include "Arduino.h"
-#include "SparkFun_u-blox_GNSS_v3.h"
 #include "ESP32TimeServerSettings.h"
 #include "custom/app_metadata.h"
 #include "web/web_net.h"
@@ -91,6 +90,8 @@
 #define MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED 1
 
 #include "custom/gnss_nmea.h"
+#include "custom/gnss_uart.h"
+#include "custom/gnss_ubx.h"
 #include "custom/ntp_auth.h"
 #include "custom/ntp_cache.h"
 
@@ -284,7 +285,7 @@ static constexpr size_t MQTT_Service_Task_Stack_Size = 3512;
 static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2222;
 static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
 static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
-static constexpr size_t GNSS_NMEA_Reader_Task_Stack_Size = 3072; // new (NMEA reader, custom/gnss_nmea): measure
+static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = 3072; // GNSS UART reader (custom/gnss_uart, NMEA and UBX): measure
 static constexpr size_t PPS_Discipline_Task_Stack_Size = 3584; // was 3135: the PTP servo runs in this task (measure again)
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
@@ -306,7 +307,7 @@ typedef enum
 {
     Ethernet_Transport_Recovery,
     GNSS_Recovery,
-    GNSS_NMEA_Reader,
+    GNSS_UART_Reader,
     GNSS_Time_Sync,
     Hardware_NTP_Server,
     LED_LCD_Button,
@@ -319,7 +320,7 @@ typedef enum
 
 static size_t Highest_Ethernet_Transport_Recovery_Task_Stack_Size = 0;
 static size_t Highest_GNSS_Recovery_Task_Stack_Size = 0;
-static size_t Highest_GNSS_NMEA_Reader_Task_Stack_Size = 0;
+static size_t Highest_GNSS_UART_Reader_Task_Stack_Size = 0;
 static size_t Highest_GNSS_Time_Sync_Task_Stack_Size = 0;
 static size_t Highest_Hardware_NTP_Server_Task_Stack_Size = 0;
 static size_t Highest_LED_LCD_Button_Task_Stack_Size = 0;
@@ -351,9 +352,9 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
         task_name = "gnss_recovery_task";
         allocated_bytes = GNSS_Recovery_Task_Stack_Size;
         break;
-    case GNSS_NMEA_Reader:
+    case GNSS_UART_Reader:
         task_name = "gnss_nmea";
-        allocated_bytes = GNSS_NMEA_Reader_Task_Stack_Size;
+        allocated_bytes = GNSS_UART_Reader_Task_Stack_Size;
         break;
     case GNSS_Time_Sync:
         task_name = "gnss_time_sync_task";
@@ -429,10 +430,10 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
             highest_value_changed = true;
         }
         break;
-    case GNSS_NMEA_Reader:
-        if (curent_suggestion > Highest_GNSS_NMEA_Reader_Task_Stack_Size)
+    case GNSS_UART_Reader:
+        if (curent_suggestion > Highest_GNSS_UART_Reader_Task_Stack_Size)
         {
-            Highest_GNSS_NMEA_Reader_Task_Stack_Size = curent_suggestion;
+            Highest_GNSS_UART_Reader_Task_Stack_Size = curent_suggestion;
             highest_value_changed = true;
         }
         break;
@@ -515,10 +516,10 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
         else
             ESP_LOGI(TAG, "static constexpr size_t GNSS_Recovery_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_Recovery_Task_Stack_Size), static_cast<unsigned int>(GNSS_Recovery_Task_Stack_Size));
 
-        if (Highest_GNSS_NMEA_Reader_Task_Stack_Size > GNSS_NMEA_Reader_Task_Stack_Size)
-            ESP_LOGW(TAG, "static constexpr size_t GNSS_NMEA_Reader_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_NMEA_Reader_Task_Stack_Size), static_cast<unsigned int>(GNSS_NMEA_Reader_Task_Stack_Size));
+        if (Highest_GNSS_UART_Reader_Task_Stack_Size > GNSS_UART_Reader_Task_Stack_Size)
+            ESP_LOGW(TAG, "static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_UART_Reader_Task_Stack_Size), static_cast<unsigned int>(GNSS_UART_Reader_Task_Stack_Size));
         else
-            ESP_LOGI(TAG, "static constexpr size_t GNSS_NMEA_Reader_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_NMEA_Reader_Task_Stack_Size), static_cast<unsigned int>(GNSS_NMEA_Reader_Task_Stack_Size));
+            ESP_LOGI(TAG, "static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_UART_Reader_Task_Stack_Size), static_cast<unsigned int>(GNSS_UART_Reader_Task_Stack_Size));
 
         if (Highest_GNSS_Time_Sync_Task_Stack_Size > GNSS_Time_Sync_Task_Stack_Size)
             ESP_LOGW(TAG, "static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_GNSS_Time_Sync_Task_Stack_Size), static_cast<unsigned int>(GNSS_Time_Sync_Task_Stack_Size));
@@ -1453,9 +1454,7 @@ static void mqtt_enqueue_ntp_request(const struct sockaddr_storage &source_addre
 
 static void controlled_restart(const char *reason);
 
-static constexpr int GNSS_UART_NUM = 1; // UART of the GNSS receiver (NMEA reader; HardwareSerial(1) of the u-blox library)
-static HardwareSerial s_gnss_serial(GNSS_UART_NUM);
-static SFE_UBLOX_GNSS_SERIAL s_gnss;
+static constexpr int GNSS_UART_NUM = 1; // UART of the GNSS receiver (custom/gnss_uart)
 static uint32_t s_detected_gnss_baud = 0;
 static std::atomic<bool> s_saved_gnss_baud_communication_failed{false};
 static bool s_gnss_required_assume_success = false;
@@ -2404,43 +2403,30 @@ static gnss_identity_t query_gnss_identity()
 {
     gnss_identity_t identity{};
 
-    UBX_SEC_UNIQID_data_t unique_chip_data{};
-    if (s_gnss.getUniqueChipId(&unique_chip_data, 2000))
+    char unique_chip_id[16] = "";
+    if (gnss_ubx_query_unique_id(unique_chip_id, sizeof(unique_chip_id), 2000) && unique_chip_id[0] != '\0')
     {
-        const char *unique_chip_id = s_gnss.getUniqueChipIdStr(&unique_chip_data, 2000);
-        if (unique_chip_id != nullptr && unique_chip_id[0] != '\0')
-        {
-            snprintf(identity.type, sizeof(identity.type), "%s", gnss_ID_TYPE_UNIQID);
-            snprintf(identity.value, sizeof(identity.value), "%s", unique_chip_id);
-            identity.valid = true;
-            return identity;
-        }
+        snprintf(identity.type, sizeof(identity.type), "%s", gnss_ID_TYPE_UNIQID);
+        snprintf(identity.value, sizeof(identity.value), "%s", unique_chip_id);
+        identity.valid = true;
+        return identity;
     }
 
-    if (s_gnss.getModuleInfo(2000))
+    gnss_ubx_version_t version{};
+    if (gnss_ubx_query_version(&version, 2000) && version.module[0] != '\0')
     {
-        const char *module_name = s_gnss.getModuleName(2000);
-        const char *firmware_type = s_gnss.getFirmwareType(2000);
-        uint8_t firmware_high = s_gnss.getFirmwareVersionHigh(2000);
-        uint8_t firmware_low = s_gnss.getFirmwareVersionLow(2000);
-        uint8_t protocol_high = s_gnss.getProtocolVersionHigh(2000);
-        uint8_t protocol_low = s_gnss.getProtocolVersionLow(2000);
-
-        if (module_name != nullptr && module_name[0] != '\0')
-        {
-            snprintf(identity.type, sizeof(identity.type), "%s", gnss_ID_TYPE_MODULE_FP);
-            snprintf(identity.value,
-                     sizeof(identity.value),
-                     "%s|%s|FW%u.%u|PR%u.%u",
-                     module_name,
-                     firmware_type == nullptr ? "" : firmware_type,
-                     static_cast<unsigned int>(firmware_high),
-                     static_cast<unsigned int>(firmware_low),
-                     static_cast<unsigned int>(protocol_high),
-                     static_cast<unsigned int>(protocol_low));
-            identity.valid = true;
-            return identity;
-        }
+        snprintf(identity.type, sizeof(identity.type), "%s", gnss_ID_TYPE_MODULE_FP);
+        snprintf(identity.value,
+                 sizeof(identity.value),
+                 "%s|%s|FW%u.%u|PR%u.%u",
+                 version.module,
+                 version.firmware_type,
+                 static_cast<unsigned int>(version.firmware_high),
+                 static_cast<unsigned int>(version.firmware_low),
+                 static_cast<unsigned int>(version.protocol_high),
+                 static_cast<unsigned int>(version.protocol_low));
+        identity.valid = true;
+        return identity;
     }
 
     snprintf(identity.type, sizeof(identity.type), "%s", gnss_ID_TYPE_GENERIC);
@@ -4109,70 +4095,6 @@ static const char *fix_type_to_text(uint8_t fix_type)
 }
 #endif
 
-// NMEA fallback of a u-blox receiver: reads the RMC from the serial port of the u-blox library (the NMEA protocol
-// uses the reader of custom/gnss_nmea instead)
-static bool wait_for_ublox_nmea_rmc_time(nmea_rmc_time_t *time_data, uint32_t timeout_ms)
-{
-    if (time_data == nullptr)
-        return false;
-
-    uint32_t start_ms = millis();
-    char sentence[128] = "";
-    size_t index = 0;
-    bool collecting = false;
-
-    while ((millis() - start_ms) < timeout_ms)
-    {
-        while (s_gnss_serial.available() > 0)
-        {
-            int value = s_gnss_serial.read();
-            if (value < 0)
-                break;
-
-            char ch = static_cast<char>(value);
-            if (ch == '$')
-            {
-                collecting = true;
-                index = 0;
-                sentence[index++] = ch;
-                continue;
-            }
-
-            if (!collecting)
-                continue;
-
-            if (ch == '\r' || ch == '\n')
-            {
-                sentence[index] = '\0';
-                // Sentences with a wrong or missing checksum are dropped: a corrupted RMC could carry a wrong time
-                if (gnss_nmea_checksum_valid(sentence) && gnss_nmea_parse_rmc(sentence, time_data))
-                    return true;
-
-                collecting = false;
-                index = 0;
-                continue;
-            }
-
-            if (ch >= 32 && ch <= 126)
-            {
-                if (index < sizeof(sentence) - 1)
-                {
-                    sentence[index++] = ch;
-                }
-                else
-                {
-                    collecting = false;
-                    index = 0;
-                }
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-
-    return false;
-}
-
 struct gnss_probe_result_t
 {
     bool saw_data = false;
@@ -4181,213 +4103,105 @@ struct gnss_probe_result_t
     char sample[33] = "";
 };
 
-// Next valid RMC within timeout_ms: NMEA protocol from the GNSS reader, NMEA fallback of a u-blox receiver from the
-// serial port of the u-blox library
+// Next valid RMC within timeout_ms (NMEA protocol, or the NMEA output of a u-blox receiver)
 static bool wait_for_valid_rmc(nmea_rmc_time_t *time_data, uint32_t timeout_ms)
 {
-    if (!s_gnss_ublox)
-        return gnss_nmea_wait_valid_rmc(0, esp_timer_get_time() + static_cast<int64_t>(timeout_ms) * 1000LL, time_data);
-    return wait_for_ublox_nmea_rmc_time(time_data, timeout_ms);
+    return gnss_nmea_wait_valid_rmc(0, esp_timer_get_time() + static_cast<int64_t>(timeout_ms) * 1000LL, time_data);
 }
 
-// u-blox, after getPVT(): the UTC time of day is confirmed (NAV-PVT flags2.confirmedTime). Required only when the
-// receiver reports whether it could confirm it (confirmedAvai); otherwise the other validity flags decide.
-static bool ubx_time_confirmed()
+#if DEBUG_ENABLED
+// Debug log: why a NAV-PVT gives no valid UTC time (gnss_ubx_pvt_invalid_reasons)
+static void log_ubx_invalid_reasons(uint32_t reasons, const gnss_ubx_pvt_t &pvt, uint8_t min_satellites)
 {
-    if (s_gnss.packetUBXNAVPVT == nullptr)
-        return false;
-    if (!s_gnss.packetUBXNAVPVT->data.flags2.bits.confirmedAvai)
-        return true;
-    return s_gnss.getConfirmedTime();
+    if ((reasons & GNSS_UBX_INVALID_FIX) != 0)
+        ESP_LOGW(TAG, "GNSS fix type - %s%s", fix_type_to_text(pvt.fix_type), (pvt.flags & 0x01) != 0 ? "" : ", fix not ok");
+    if ((reasons & GNSS_UBX_INVALID_DATE_TIME) != 0)
+        ESP_LOGW(TAG, "GNSS date or time is invalid");
+    if ((reasons & GNSS_UBX_INVALID_NOT_RESOLVED) != 0)
+        ESP_LOGW(TAG, "GNSS time is not fully resolved");
+    if ((reasons & GNSS_UBX_INVALID_NOT_CONFIRMED) != 0)
+        ESP_LOGW(TAG, "GNSS time is not confirmed");
+    if ((reasons & GNSS_UBX_INVALID_SATELLITES) != 0)
+        ESP_LOGW(TAG, "GNSS uses fewer satellites than the minimum of %u", static_cast<unsigned int>(min_satellites));
+    if ((reasons & GNSS_UBX_INVALID_UTC) != 0)
+        ESP_LOGW(TAG, "GNSS UTC parameters are not known (NAV-TIMEUTC validUTC)");
 }
+#endif
 
 static bool current_gnss_timing_is_valid()
 {
     if (s_use_nmea_fallback)
     {
-        // NMEA protocol: the reader keeps the latest RMC (1 Hz), it has to be valid and recent
-        if (!s_gnss_ublox)
-            return gnss_nmea_time_valid(1500000LL);
-        nmea_rmc_time_t nmea_time{};
-        return wait_for_ublox_nmea_rmc_time(&nmea_time, 1200UL);
+        // NMEA (also the NMEA output of a u-blox receiver): the reader keeps the latest RMC (1 Hz), it has to be valid
+        // and recent
+        return gnss_nmea_time_valid(1500000LL);
     }
 
-    // Get the latest Position/Velocity/Time solution and fill all global variables
-    static constexpr uint16_t status_query_timeout_ms = 1500;
-    if (!s_gnss.getPVT(status_query_timeout_ms))
+    // u-blox: the receiver sends NAV-PVT once per navigation epoch; the latest one has to be recent and valid
+    gnss_ubx_pvt_t pvt{};
+    if (!gnss_ubx_latest_pvt(&pvt, 1500000LL))
     {
 #if DEBUG_ENABLED
-        ESP_LOGE(TAG, "getPVT failed");
+        ESP_LOGE(TAG, "No recent NAV-PVT");
 #endif
         return false;
-    };
-
-    uint8_t fix_type = s_gnss.getFixType(status_query_timeout_ms); // 0 - No fix; 1 - Dead reckoning only; 2 - 2D-fix; 3: 3D-fix; 4 - GNSS + dead reckoning combined; 5 - Time only fix
-#if MQTT_ENABLED
-    if (s_mqtt_on)
-    {
-        uint8_t satellites = s_gnss.getSIV(status_query_timeout_ms);
-        mqtt_note_satellite_count(satellites);
     }
-#endif
-    bool gnss_fix_ok = s_gnss.getGnssFixOk(status_query_timeout_ms);
-    bool date_valid = s_gnss.getDateValid(status_query_timeout_ms);
-    bool time_valid = s_gnss.getTimeValid(status_query_timeout_ms);
-    // validTime alone does not mean that the leap seconds are known: after a cold start the UTC time can be off by
-    // whole seconds until it is fully resolved
-    bool fully_resolved = s_gnss.getTimeFullyResolved(status_query_timeout_ms);
-    bool time_confirmed = ubx_time_confirmed();
     const uint8_t min_satellites = s_gnss_min_satellites.load(std::memory_order_relaxed);
-    bool enough_satellites = min_satellites == 0 || s_gnss.getSIV(status_query_timeout_ms) >= min_satellites;
-
+    const uint32_t reasons = gnss_ubx_pvt_invalid_reasons(pvt, min_satellites);
 #if DEBUG_ENABLED
-
-    if (fix_type < 3)
-        ESP_LOGW(TAG, "GNSS fix type - %s", fix_type == 0 ? "No fix" : fix_type == 1 ? "Dead reckoning only"
-                                                                                     : "2D-fix");
-
-    if (!gnss_fix_ok)
-        ESP_LOGW(TAG, "GNSS fix is not ok");
-
-    if (!date_valid)
-        ESP_LOGW(TAG, "GNSS date is invalid");
-
-    if (!time_valid)
-        ESP_LOGW(TAG, "GNSS time is invalid");
-
-    if (!fully_resolved)
-        ESP_LOGW(TAG, "GNSS time is not fully resolved");
-
-    if (!time_confirmed)
-        ESP_LOGW(TAG, "GNSS time is not confirmed");
-
-    if (!enough_satellites)
-        ESP_LOGW(TAG, "GNSS uses fewer satellites than the minimum of %u", static_cast<unsigned int>(min_satellites));
-
+    log_ubx_invalid_reasons(reasons, pvt, min_satellites);
 #endif
-
-    return (fix_type > 2) && gnss_fix_ok && date_valid && time_valid && fully_resolved && time_confirmed && enough_satellites;
+    return reasons == 0;
 }
 
 static gnss_probe_result_t probe_gnss_uart(uint32_t baud);
+static gnss_probe_result_t probe_gnss_uart(uint32_t baud);
 
+// Starts the GNSS UART at this baud rate (or changes the rate of the running one)
+static bool start_gnss_uart(uint32_t baud)
+{
+    if (gnss_uart_running())
+        return gnss_uart_set_baud(baud);
+    gnss_uart_config_t config{};
+    config.uart_num = GNSS_UART_NUM;
+    config.rx_pin = s_cfg->gnss_rx_pin;
+    config.tx_pin = s_cfg->gnss_tx_pin;
+    config.baud = baud;
+    config.task_stack = GNSS_UART_Reader_Task_Stack_Size;
+    config.task_priority = 10; // below the timing tasks (PPS 14, GNSS time sync 15, NTP 17 / 20)
+    config.task_core = 0;
+#if CALCULATE_STACK_SIZES_ENABLED
+    config.loop_hook = []() { report_current_task_stack_usage(GNSS_UART_Reader); };
+#endif
+    return gnss_uart_start(config);
+}
+
+// Listens at this baud rate: bytes, NMEA sentences and UBX frames with a correct checksum
 static gnss_probe_result_t probe_gnss_uart(uint32_t baud)
 {
     static constexpr uint16_t gnssProbeListenTimeMs = 1500;
-    static constexpr uint16_t max_ubx_payload_length = 1024;
     gnss_probe_result_t result{};
-    size_t sample_len = 0;
-    uint8_t nmea_header_length = 0;
-    uint8_t ubx_state = 0;
-    uint16_t ubx_payload_length = 0;
-    uint16_t ubx_payload_received = 0;
-    uint8_t ubx_checksum_a = 0;
-    uint8_t ubx_checksum_b = 0;
-    uint8_t ubx_received_checksum_a = 0;
-
-    s_gnss_serial.end();
-    s_gnss_serial.begin(baud, SERIAL_8N1, s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
+    if (!start_gnss_uart(baud))
+        return result;
     vTaskDelay(pdMS_TO_TICKS(150));
+    gnss_uart_reset_traffic();
+    vTaskDelay(pdMS_TO_TICKS(gnssProbeListenTimeMs));
 
-    uint32_t start_ms = millis();
-    while ((millis() - start_ms) < gnssProbeListenTimeMs)
-    {
-        while (s_gnss_serial.available() > 0)
-        {
-            int value = s_gnss_serial.read();
-            if (value < 0)
-                break;
-
-            uint8_t byte = static_cast<uint8_t>(value);
-            result.saw_data = true;
-            result.bytes_seen++;
-
-            if (sample_len < (sizeof(result.sample) - 1))
-            {
-                char character = static_cast<char>(byte);
-                if (character >= 32 && character <= 126)
-                    result.sample[sample_len++] = character;
-                else if (character == '\r' || character == '\n' || character == '\t')
-                    result.sample[sample_len++] = ' ';
-                else
-                    result.sample[sample_len++] = '.';
-                result.sample[sample_len] = '\0';
-            }
-
-            if (nmea_header_length == 0)
-                nmea_header_length = byte == '$' ? 1 : 0;
-            else if (nmea_header_length == 1)
-                nmea_header_length = byte == 'G' ? 2 : (byte == '$' ? 1 : 0);
-            else if (byte >= 'A' && byte <= 'Z')
-            {
-                nmea_header_length++;
-                if (nmea_header_length == 6)
-                    result.saw_valid_protocol_traffic = true;
-            }
-            else
-                nmea_header_length = byte == '$' ? 1 : 0;
-
-            switch (ubx_state)
-            {
-            case 0:
-                ubx_state = byte == 0xB5 ? 1 : 0;
-                break;
-            case 1:
-                ubx_state = byte == 0x62 ? 2 : (byte == 0xB5 ? 1 : 0);
-                break;
-            case 2:
-            case 3:
-            case 4:
-            case 5:
-                if (ubx_state == 2)
-                {
-                    ubx_checksum_a = byte;
-                    ubx_checksum_b = byte;
-                }
-                else
-                {
-                    ubx_checksum_a += byte;
-                    ubx_checksum_b += ubx_checksum_a;
-                }
-
-                if (ubx_state == 4)
-                    ubx_payload_length = byte;
-                else if (ubx_state == 5)
-                {
-                    ubx_payload_length |= static_cast<uint16_t>(byte) << 8;
-                    ubx_payload_received = 0;
-                    ubx_state = ubx_payload_length == 0 ? 7 : (ubx_payload_length <= max_ubx_payload_length ? 6 : 0);
-                    break;
-                }
-                ubx_state++;
-                break;
-            case 6:
-                ubx_checksum_a += byte;
-                ubx_checksum_b += ubx_checksum_a;
-                if (++ubx_payload_received >= ubx_payload_length)
-                    ubx_state = 7;
-                break;
-            case 7:
-                ubx_received_checksum_a = byte;
-                ubx_state = 8;
-                break;
-            default:
-                if (ubx_received_checksum_a == ubx_checksum_a && byte == ubx_checksum_b)
-                    result.saw_valid_protocol_traffic = true;
-                ubx_state = byte == 0xB5 ? 1 : 0;
-                break;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
+    gnss_uart_traffic_t traffic{};
+    gnss_uart_get_traffic(&traffic);
+    result.saw_data = traffic.bytes > 0;
+    result.saw_valid_protocol_traffic = traffic.nmea_sentences > 0 || traffic.ubx_frames > 0;
+    result.bytes_seen = traffic.bytes;
+    snprintf(result.sample, sizeof(result.sample), "%s", traffic.sample);
     return result;
 }
 
-static bool try_gnss_begin(uint32_t baud, bool assume_success, bool *saw_serial_data)
+// u-blox receiver at this baud rate: it answers CFG-VALGET of CFG-UART1INPROT-UBX (the connection test of the SparkFun
+// library, up to three tries), or it at least sends valid NMEA or UBX traffic (*assumed = true: the receiver does not
+// answer UBX commands, the NMEA fallback is used)
+static bool try_gnss_begin(uint32_t baud, bool *assumed, bool *saw_serial_data)
 {
-
-    static constexpr uint16_t gnssBeginMaxWaitMs = 2500;
+    static constexpr uint32_t gnssCommandTimeoutMs = 1100;
 
     gnss_probe_result_t probe_result = probe_gnss_uart(baud);
     if (probe_result.saw_data && saw_serial_data != nullptr)
@@ -4402,21 +4216,31 @@ static bool try_gnss_begin(uint32_t baud, bool assume_success, bool *saw_serial_
              probe_result.saw_data ? probe_result.sample : "<none>");
 #endif
 
-    s_gnss_serial.end();
-    s_gnss_serial.begin(baud, SERIAL_8N1, s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
-    vTaskDelay(pdMS_TO_TICKS(150));
-
-    bool begin_result = s_gnss.begin(s_gnss_serial, gnssBeginMaxWaitMs, assume_success);
-    bool communication_confirmed = begin_result || (assume_success && probe_result.saw_valid_protocol_traffic);
+    bool answered = false;
+    for (int attempt = 0; attempt < 3 && !answered; ++attempt)
+    {
+        uint32_t value = 0;
+        answered = gnss_ubx_val_get(GNSS_UBX_CFG_UART1INPROT_UBX, GNSS_UBX_LAYER_RAM, &value, gnssCommandTimeoutMs);
+    }
+    const bool communication_confirmed = answered || probe_result.saw_valid_protocol_traffic;
+    if (assumed != nullptr)
+        *assumed = communication_confirmed && !answered;
 #if DEBUG_ENABLED
     ESP_LOGI(TAG,
-             "GNSS begin at %lu baud with assume_success=%s -> %s",
+             "GNSS begin at %lu baud -> %s",
              static_cast<unsigned long>(baud),
-             assume_success ? "true" : "false",
-             communication_confirmed ? "success" : "failed");
+             answered ? "success" : (communication_confirmed ? "assumed (traffic, no answer to UBX)" : "failed"));
 #endif
 
     return communication_confirmed;
+}
+
+// CFG-VALSET of CFG-UART1-BAUDRATE (RAM and battery backed RAM). The receiver may switch before its ACK goes out, so
+// the result is only reported; the new rate is confirmed by a connection test.
+static bool set_receiver_baud_rate(uint32_t baud)
+{
+    const gnss_ubx_cfg_item_t item{GNSS_UBX_CFG_UART1_BAUDRATE, baud};
+    return gnss_ubx_val_set(&item, 1, GNSS_UBX_LAYER_RAM | GNSS_UBX_LAYER_BBR, 1100);
 }
 
 static bool confirm_saved_gnss_baud_rate(uint32_t baud)
@@ -4428,15 +4252,11 @@ static bool confirm_saved_gnss_baud_rate(uint32_t baud)
 
     for (int attempt = 0; attempt < 2; ++attempt)
     {
-        bool begin_without_assume = try_gnss_begin(baud, false, &saw_serial_data);
-        bool begin_with_assume = false;
-        if (!begin_without_assume)
-            begin_with_assume = try_gnss_begin(baud, true, &saw_serial_data);
-
-        if (begin_without_assume || begin_with_assume)
+        bool assumed = false;
+        if (try_gnss_begin(baud, &assumed, &saw_serial_data))
         {
             s_detected_gnss_baud = baud;
-            s_gnss_required_assume_success = begin_with_assume;
+            s_gnss_required_assume_success = assumed;
             return true;
         }
     }
@@ -4460,15 +4280,11 @@ static bool find_initial_gnss_baud_rate(int max_attempts, gnss_identity_t *worki
 #endif
         for (uint32_t candidate_baud : candidate_baud_rates)
         {
-            bool begin_without_assume = try_gnss_begin(candidate_baud, false, &saw_any_serial_data);
-            bool begin_with_assume = false;
-            if (!begin_without_assume)
-                begin_with_assume = try_gnss_begin(candidate_baud, true, &saw_any_serial_data);
-
-            if (begin_without_assume || begin_with_assume)
+            bool assumed = false;
+            if (try_gnss_begin(candidate_baud, &assumed, &saw_any_serial_data))
             {
                 s_detected_gnss_baud = candidate_baud;
-                s_gnss_required_assume_success = begin_with_assume;
+                s_gnss_required_assume_success = assumed;
                 if (working_baud_identity != nullptr)
                     *working_baud_identity = query_gnss_identity();
                 return true;
@@ -4493,7 +4309,7 @@ static bool change_gnss_baud_rate(uint32_t from_baud, uint32_t to_baud)
              static_cast<unsigned long>(to_baud));
 #endif
 
-    bool baud_change_command_reported_success = s_gnss.setSerialRate(to_baud, COM_PORT_UART1, VAL_LAYER_RAM_BBR);
+    bool baud_change_command_reported_success = set_receiver_baud_rate(to_baud);
     (void)baud_change_command_reported_success; // only read by the debug log
     vTaskDelay(pdMS_TO_TICKS(200));
     if (!confirm_saved_gnss_baud_rate(to_baud))
@@ -4534,15 +4350,11 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
             snprintf(baud_line, sizeof(baud_line), "Baud: %lu %s", static_cast<unsigned long>(candidate_baud), dots);
             display_line(2, baud_line);
 
-            bool begin_without_assume = try_gnss_begin(candidate_baud, false, &saw_any_serial_data);
-            bool begin_with_assume = false;
-            if (!begin_without_assume)
-                begin_with_assume = try_gnss_begin(candidate_baud, true, &saw_any_serial_data);
-
-            if (begin_without_assume || begin_with_assume)
+            bool assumed = false;
+            if (try_gnss_begin(candidate_baud, &assumed, &saw_any_serial_data))
             {
                 s_detected_gnss_baud = candidate_baud;
-                s_gnss_required_assume_success = begin_with_assume;
+                s_gnss_required_assume_success = assumed;
                 if (initial_baud != nullptr)
                     *initial_baud = candidate_baud;
 
@@ -4563,7 +4375,7 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
                              static_cast<unsigned long>(higher_baud));
 #endif
 
-                    bool baud_change_command_reported_success = s_gnss.setSerialRate(higher_baud, COM_PORT_UART1, VAL_LAYER_RAM_BBR);
+                    bool baud_change_command_reported_success = set_receiver_baud_rate(higher_baud);
                     (void)baud_change_command_reported_success; // only read by the debug log
                     vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -4593,7 +4405,7 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
                 if (s_gnss_required_assume_success)
                 {
                     ESP_LOGW(TAG,
-                             "GNSS communication was established only with assume_success=true at %lu baud. The attached module may have limited u-blox compatibility.",
+                             "GNSS communication was established only by its traffic at %lu baud (no answer to UBX commands). The attached module may have limited u-blox compatibility.",
                              static_cast<unsigned long>(s_detected_gnss_baud));
                 };
 
@@ -4608,7 +4420,7 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
 
 #if DEBUG_ENABLED
     if (saw_any_serial_data)
-        ESP_LOGW(TAG, "GNSS serial data was detected, but SparkFun u-blox GNSS v3 could not initialize the module. The module may be an older NEO-6/7/M8 variant.");
+        ESP_LOGW(TAG, "GNSS serial data was detected, but the module does not answer UBX configuration commands (CFG-VALGET). The module may be an older NEO-6/7/M8 variant.");
     else
         ESP_LOGW(TAG, "No GNSS serial data was detected on GPIO%d/GPIO%d at any tested baud rate. Check power, TX/RX wiring, and signal levels.", s_cfg->gnss_rx_pin, s_cfg->gnss_tx_pin);
 #endif
@@ -4616,15 +4428,22 @@ static bool set_gnss_baud_rate(int max_attempts, gnss_identity_t *working_baud_i
     return false;
 }
 
-// u-blox receivers only (UBX commands, see setup_gnss)
+// u-blox receivers only (UBX commands, see setup_gnss): I2C and UART2 output off, UART1 sends UBX and NMEA. RAM and
+// battery backed RAM, as the SparkFun library did (the flash of the receiver is not written).
 static bool configure_gnss_outputs(bool *uart1_output_set_result)
 {
-    const bool i2c_output_disabled = s_gnss.setI2COutput(0);
-    const bool uart2_output_disabled = s_gnss.setUART2Output(0);
+    static constexpr uint32_t timeout_ms = 1100;
+    static constexpr uint8_t layers = GNSS_UBX_LAYER_RAM | GNSS_UBX_LAYER_BBR;
+    const gnss_ubx_cfg_item_t i2c_off[] = {{GNSS_UBX_CFG_I2COUTPROT_UBX, 0}, {GNSS_UBX_CFG_I2COUTPROT_NMEA, 0}};
+    const gnss_ubx_cfg_item_t uart2_off[] = {{GNSS_UBX_CFG_UART2OUTPROT_UBX, 0}, {GNSS_UBX_CFG_UART2OUTPROT_NMEA, 0}};
+    const gnss_ubx_cfg_item_t uart1_on[] = {{GNSS_UBX_CFG_UART1OUTPROT_UBX, 1}, {GNSS_UBX_CFG_UART1OUTPROT_NMEA, 1}};
+
+    const bool i2c_output_disabled = gnss_ubx_val_set(i2c_off, 2, layers, timeout_ms);
+    const bool uart2_output_disabled = gnss_ubx_val_set(uart2_off, 2, layers, timeout_ms);
     (void)i2c_output_disabled; // only read by the debug log
     (void)uart2_output_disabled;
 
-    bool uart1_output_set = s_gnss.setUART1Output(COM_TYPE_UBX | COM_TYPE_NMEA);
+    bool uart1_output_set = gnss_ubx_val_set(uart1_on, 2, layers, timeout_ms);
 
     if (uart1_output_set_result != nullptr)
         *uart1_output_set_result = uart1_output_set;
@@ -4645,6 +4464,29 @@ static bool configure_gnss_outputs(bool *uart1_output_set_result)
 #endif
 
     return uart1_output_set;
+}
+
+// u-blox: the receiver sends NAV-PVT (time label and validity), NAV-TIMEUTC (validUTC) and TIM-TP (qErr of the next
+// time pulse) once per navigation epoch on UART1 (RAM and battery backed RAM). One command per message, so a message
+// the receiver does not know does not stop the others. Returns false if NAV-PVT could not be switched on.
+static bool configure_gnss_messages()
+{
+    static constexpr uint32_t timeout_ms = 1100;
+    static constexpr uint8_t layers = GNSS_UBX_LAYER_RAM | GNSS_UBX_LAYER_BBR;
+    const gnss_ubx_cfg_item_t pvt{GNSS_UBX_CFG_MSGOUT_NAV_PVT_UART1, 1};
+    const gnss_ubx_cfg_item_t timeutc{GNSS_UBX_CFG_MSGOUT_NAV_TIMEUTC_UART1, 1};
+    const gnss_ubx_cfg_item_t time_pulse{GNSS_UBX_CFG_MSGOUT_TIM_TP_UART1, 1};
+
+    const bool pvt_on = gnss_ubx_val_set(&pvt, 1, layers, timeout_ms);
+    const bool timeutc_on = gnss_ubx_val_set(&timeutc, 1, layers, timeout_ms);
+    const bool time_pulse_on = gnss_ubx_val_set(&time_pulse, 1, layers, timeout_ms);
+    // validUTC is required from now on, if the receiver sends NAV-TIMEUTC
+    gnss_ubx_set_timeutc_required(timeutc_on);
+
+    if (!pvt_on || !timeutc_on || !time_pulse_on)
+        ESP_LOGW(TAG, "GNSS messages: NAV-PVT %s, NAV-TIMEUTC %s, TIM-TP %s", pvt_on ? "on" : "failed",
+                 timeutc_on ? "on" : "failed (validUTC not checked)", time_pulse_on ? "on" : "failed (no qErr correction)");
+    return pvt_on;
 }
 
 static void halt_with_display(const char *line1, const char *line2, const char *line3)
@@ -5467,6 +5309,13 @@ static constexpr double ptp_relock_max_slew_ppb = 5000.0;  // the residual chang
 // Both paths go through a pad and the GPIO matrix, so the difference is a few ns at most; 0 is fine.
 static constexpr int64_t PTP_PPS_LOOPBACK_DELAY_NS = 0;
 static constexpr int ptp_sw_reads_max = 16;
+// qErr of a u-blox time pulse (TIM-TP), see ptp_qerr_learn
+static constexpr double ptp_qerr_window = 600.0;            // samples of the exponential regression window
+static constexpr uint32_t ptp_qerr_min_samples = 120;       // before the sign is judged
+static constexpr double ptp_qerr_min_variance_ns2 = 4.0;    // qErr has to vary by a few ns to judge the slope
+static constexpr double ptp_qerr_on_tolerance = 0.3;        // |slope - sign| below this switches the correction on
+static constexpr double ptp_qerr_off_tolerance = 0.5;       // |slope - sign| above this switches it off
+static constexpr int64_t ptp_qerr_gap_restart_s = 60;       // without qErr for longer: learn again
 
 struct ptp_servo_state_t
 {
@@ -5489,6 +5338,14 @@ struct ptp_servo_state_t
     double relock_residual_ns = 0.0;   // mapping offset - estimated offset at the last reference point
     double relock_rate_ppb = 0.0;      // rate of the residual after that reference point
     int64_t relock_ref_true_ns = 0;    // true time of that reference point
+    // qErr correction of a u-blox time pulse (see ptp_qerr_learn)
+    int8_t qerr_sign = 0;              // loopback measurement - qerr_sign * qErr (0 = no correction)
+    uint32_t qerr_samples = 0;
+    double qerr_mean_q_ns = 0.0;       // exponential means and covariances: qErr and innovation without correction
+    double qerr_mean_i_ns = 0.0;
+    double qerr_cov_qq = 0.0;
+    double qerr_cov_qi = 0.0;
+    int64_t qerr_last_sec = 0;         // edge of the last sample
     // statistics for the debug output
     double last_measurement_ns = 0.0;
     double last_innovation_ns = 0.0;
@@ -5501,6 +5358,10 @@ struct ptp_servo_state_t
     uint32_t command_failures = 0;
 };
 static ptp_servo_state_t s_ptp_servo; // the PPS task is the only user
+// qErr correction for the status: 0 no qErr, 1 learning, 2 active, 3 no correlation (see ptp_qerr_learn)
+static std::atomic<uint8_t> s_ptp_qerr_state{0};
+static std::atomic<int32_t> s_ptp_qerr_slope_milli{0};  // regression slope x 1000
+static std::atomic<int64_t> s_ptp_qerr_last_us{0};      // esp_timer time of the last qErr sample
 
 // Raw PTP time in ns (directly from the MAC, shorter than clock_gettime)
 static bool ptp_read_raw_ns(int64_t &raw_ns)
@@ -5682,6 +5543,62 @@ static double ptp_relock_residual(int64_t ref_true_ns, double ref_offset_ns, boo
     return st.relock_residual_ns;
 }
 
+// qErr correction of a u-blox time pulse (TIM-TP, review G-03). The receiver puts the pulse on the grid of its own
+// clock, off the exact second by the quantization error qErr (some ns), which TIM-TP announces before the pulse. The
+// sources disagree on its sign (pulse = second + qErr or second - qErr), so the sign is learned from the data: the
+// innovation of the loopback measurement without correction is regressed on qErr (exponential window of
+// ptp_qerr_window samples). A slope near +1 or -1 switches the correction on with that sign; a slope away from it (no
+// correlation, e.g. TIM-TP assigned to the wrong pulse) switches it off. Only normal filter updates are samples.
+// NMEA receivers send no TIM-TP: their measurements are not touched.
+static void ptp_qerr_learn(int64_t edge_sec, double qerr_ns, double raw_innovation_ns)
+{
+    ptp_servo_state_t &st = s_ptp_servo;
+    if (st.qerr_samples > 0 && (edge_sec - st.qerr_last_sec > ptp_qerr_gap_restart_s || edge_sec <= st.qerr_last_sec))
+    {
+        st.qerr_sign = 0;
+        st.qerr_samples = 0;
+    }
+    if (st.qerr_samples == 0)
+    {
+        st.qerr_mean_q_ns = 0.0;
+        st.qerr_mean_i_ns = 0.0;
+        st.qerr_cov_qq = 0.0;
+        st.qerr_cov_qi = 0.0;
+    }
+    st.qerr_last_sec = edge_sec;
+
+    // Exponentially weighted means and covariances (weight 1/n at the start, then 1/window)
+    const double k = 1.0 / std::min(static_cast<double>(st.qerr_samples) + 1.0, ptp_qerr_window);
+    const double dq = qerr_ns - st.qerr_mean_q_ns;
+    st.qerr_mean_q_ns += k * dq;
+    st.qerr_mean_i_ns += k * (raw_innovation_ns - st.qerr_mean_i_ns);
+    st.qerr_cov_qq += k * (dq * (qerr_ns - st.qerr_mean_q_ns) - st.qerr_cov_qq);
+    st.qerr_cov_qi += k * (dq * (raw_innovation_ns - st.qerr_mean_i_ns) - st.qerr_cov_qi);
+    if (st.qerr_samples < UINT32_MAX)
+        ++st.qerr_samples;
+
+    uint8_t state = 1; // learning
+    if (st.qerr_samples >= ptp_qerr_min_samples && st.qerr_cov_qq >= ptp_qerr_min_variance_ns2)
+    {
+        const double slope = st.qerr_cov_qi / st.qerr_cov_qq;
+        if (st.qerr_sign == 0)
+        {
+            if (fabs(slope - 1.0) <= ptp_qerr_on_tolerance)
+                st.qerr_sign = 1;
+            else if (fabs(slope + 1.0) <= ptp_qerr_on_tolerance)
+                st.qerr_sign = -1;
+        }
+        else if (fabs(slope - static_cast<double>(st.qerr_sign)) > ptp_qerr_off_tolerance)
+            st.qerr_sign = 0;
+        state = st.qerr_sign != 0 ? 2 : 3;
+        s_ptp_qerr_slope_milli.store(static_cast<int32_t>(lround(std::clamp(slope, -1000.0, 1000.0) * 1000.0)), std::memory_order_relaxed);
+    }
+    else if (st.qerr_sign != 0)
+        state = 2; // qErr varies too little to judge the slope: the sign stays
+    s_ptp_qerr_state.store(state, std::memory_order_relaxed);
+    s_ptp_qerr_last_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+}
+
 // Sets the PTP clock to true time (for large offsets only); the filter starts again in the new epoch
 static void ptp_servo_step(int64_t edge_sec, const local_instant_t &edge_local, double offset_ns)
 {
@@ -5747,6 +5664,10 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
     const double sw_corrected_ns = sw_offset_ns - st.sw_bias_ns; // sw_bias_ns stays 0 without loopback
     double measurement_ns = sw_corrected_ns;
     bool from_loopback = false;
+    double loopback_raw_ns = 0.0; // loopback measurement without qErr correction
+    bool have_qerr = false;
+    double qerr_ns = 0.0;
+    double qerr_applied_ns = 0.0;
     if (loopback)
     {
         int32_t phase_ticks = 0;
@@ -5760,8 +5681,18 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
             if (fabs(hw_ns - sw_corrected_ns) <= ptp_loopback_gate_ns)
             {
                 measurement_ns = hw_ns;
+                loopback_raw_ns = hw_ns;
                 from_loopback = true;
                 ++st.loopback_used;
+                // u-blox: the pulse was off the second by its qErr (TIM-TP); the correction needs the learned sign
+                int32_t qerr_ps = 0;
+                if (s_gnss_ublox && gnss_ubx_qerr_for_edge(edge_sec, &qerr_ps))
+                {
+                    have_qerr = true;
+                    qerr_ns = static_cast<double>(qerr_ps) * 1e-3;
+                    qerr_applied_ns = static_cast<double>(st.qerr_sign) * qerr_ns;
+                    measurement_ns -= qerr_applied_ns;
+                }
             }
             else
                 ++st.loopback_rejected;
@@ -5858,6 +5789,8 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
             st.offset_ns = pred_ns + ptp_filter_alpha * innovation_ns;
             st.free_ppb += ptp_filter_beta * innovation_ns / static_cast<double>(dt);
             st.noise_ns += (fabs(innovation_ns) - st.noise_ns) / 16.0;
+            if (have_qerr)
+                ptp_qerr_learn(edge_sec, qerr_ns, innovation_ns + qerr_applied_ns);
         }
         st.rejects = 0;
 
@@ -5870,7 +5803,7 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
         // Delay error of the software measurement, learned while the loopback works (running mean, weight 1/64)
         if (from_loopback && st.noise_ns < 200.0)
         {
-            const double sample = sw_offset_ns - measurement_ns;
+            const double sample = sw_offset_ns - loopback_raw_ns;
             st.sw_bias_ns = (st.sw_bias_samples < 64)
                                 ? (st.sw_bias_ns * st.sw_bias_samples + sample) / (st.sw_bias_samples + 1)
                                 : st.sw_bias_ns + (sample - st.sw_bias_ns) / 64.0;
@@ -5968,6 +5901,10 @@ static void ptp_servo_log_status()
                  static_cast<unsigned long>(st.loopback_rejected), st.sw_bias_ns, static_cast<unsigned long>(st.sw_bias_samples));
     if (st.relock_residual_ns != 0.0)
         ESP_LOGI(TAG, "PTP re-lock: mapping residual %.1f ns, rate %.1f ppb", st.relock_residual_ns, st.relock_rate_ppb);
+    if (st.qerr_samples > 0)
+        ESP_LOGI(TAG, "PTP qErr: sign %d, slope %.3f (%lu samples, qErr sd %.1f ns)", static_cast<int>(st.qerr_sign),
+                 st.qerr_cov_qq > 0.0 ? st.qerr_cov_qi / st.qerr_cov_qq : 0.0, static_cast<unsigned long>(st.qerr_samples),
+                 sqrt(st.qerr_cov_qq));
 }
 #endif
 #endif
@@ -6609,7 +6546,7 @@ static void setup_gnss_ublox_receiver()
     (void)startup_target_baud;
 }
 
-// Satellites reported by the GNSS reader (GGA in use, or GSV in view): MQTT report
+// Satellites reported by the GNSS reader (GGA in use, GSV in view, or NAV-PVT in use): MQTT report
 static void gnss_note_satellites(uint8_t count)
 {
 #if MQTT_ENABLED
@@ -6620,9 +6557,9 @@ static void gnss_note_satellites(uint8_t count)
 #endif
 }
 
-// Receiver with the NMEA standard protocol only: fixed baud rate of the settings, NMEA processing by the reader of
-// custom/gnss_nmea on the ESP-IDF UART driver (2 kB receive buffer, own task).
-// Nothing is sent to the receiver: UBX commands (u-blox library) could be misread by other chip sets.
+// Receiver with the NMEA standard protocol only: fixed baud rate of the settings, NMEA processing by custom/gnss_nmea,
+// read by custom/gnss_uart on the ESP-IDF UART driver (2 kB receive buffer, own task).
+// Nothing is sent to the receiver: UBX commands could be misread by other chip sets.
 static void setup_gnss_nmea_receiver()
 {
     const uint32_t baud = s_cfg->gnss_baud;
@@ -6632,20 +6569,7 @@ static void setup_gnss_nmea_receiver()
     s_gnss_required_assume_success = false;
     s_use_nmea_fallback = true;
 
-    gnss_nmea_config_t config{};
-    config.uart_num = GNSS_UART_NUM;
-    config.rx_pin = s_cfg->gnss_rx_pin;
-    config.tx_pin = s_cfg->gnss_tx_pin;
-    config.baud = baud;
-    config.task_stack = GNSS_NMEA_Reader_Task_Stack_Size;
-    config.task_priority = 10; // below the timing tasks (PPS 14, GNSS time sync 15, NTP 17 / 20)
-    config.task_core = 0;
-    config.last_pps_us = []() -> int64_t { return s_ntp_last_pps_us.load(std::memory_order_relaxed); };
-    config.on_satellites = gnss_note_satellites;
-#if CALCULATE_STACK_SIZES_ENABLED
-    config.loop_hook = []() { report_current_task_stack_usage(GNSS_NMEA_Reader); };
-#endif
-    if (!gnss_nmea_start(config))
+    if (!start_gnss_uart(baud))
         halt_with_display("GNSS UART failed", "Check RX/TX pins", "See serial log");
 
 #if DEBUG_ENABLED
@@ -6659,31 +6583,31 @@ static const char *gnss_dynamic_model_name(uint8_t model)
 {
     switch (model)
     {
-    case DYN_MODEL_PORTABLE:
+    case GNSS_UBX_DYNMODEL_PORTABLE:
         return "Portable";
-    case DYN_MODEL_STATIONARY:
+    case GNSS_UBX_DYNMODEL_STATIONARY:
         return "Stationary";
-    case DYN_MODEL_PEDESTRIAN:
+    case GNSS_UBX_DYNMODEL_PEDESTRIAN:
         return "Pedestrian";
-    case DYN_MODEL_AUTOMOTIVE:
+    case GNSS_UBX_DYNMODEL_AUTOMOTIVE:
         return "Automotive";
-    case DYN_MODEL_SEA:
+    case GNSS_UBX_DYNMODEL_SEA:
         return "Sea";
-    case DYN_MODEL_AIRBORNE1g:
+    case GNSS_UBX_DYNMODEL_AIRBORNE1G:
         return "Airborne <1g";
-    case DYN_MODEL_AIRBORNE2g:
+    case GNSS_UBX_DYNMODEL_AIRBORNE2G:
         return "Airborne <2g";
-    case DYN_MODEL_AIRBORNE4g:
+    case GNSS_UBX_DYNMODEL_AIRBORNE4G:
         return "Airborne <4g";
-    case DYN_MODEL_WRIST:
+    case GNSS_UBX_DYNMODEL_WRIST:
         return "Wrist";
-    case DYN_MODEL_BIKE:
+    case GNSS_UBX_DYNMODEL_BIKE:
         return "Bike";
-    case DYN_MODEL_MOWER:
+    case GNSS_UBX_DYNMODEL_MOWER:
         return "Mower";
-    case DYN_MODEL_ESCOOTER:
+    case GNSS_UBX_DYNMODEL_ESCOOTER:
         return "E-scooter";
-    case DYN_MODEL_RAIL:
+    case GNSS_UBX_DYNMODEL_RAIL:
         return "Rail";
     default:
         return "unknown";
@@ -6695,9 +6619,15 @@ static const char *gnss_dynamic_model_name(uint8_t model)
 // only if it differs (RAM and battery backed RAM, so the flash of the receiver is not worn) and read back.
 static void configure_gnss_dynamic_model()
 {
-    static constexpr uint16_t timeout_ms = 1100;
-    const uint8_t before = s_gnss.getDynamicModel(VAL_LAYER_RAM, timeout_ms); // 255 = no answer
-    if (before == DYN_MODEL_STATIONARY)
+    static constexpr uint32_t timeout_ms = 1100;
+    // CFG-NAVSPG-DYNMODEL from RAM; 255 = no answer
+    const auto read_model = []() -> uint8_t
+    {
+        uint32_t value = 0;
+        return gnss_ubx_val_get(GNSS_UBX_CFG_NAVSPG_DYNMODEL, GNSS_UBX_LAYER_RAM, &value, timeout_ms) ? static_cast<uint8_t>(value) : 255;
+    };
+    const uint8_t before = read_model();
+    if (before == GNSS_UBX_DYNMODEL_STATIONARY)
     {
         s_gnss_dynamic_model.store(before, std::memory_order_relaxed);
         ESP_LOGI(TAG, "GNSS dynamic model: Stationary");
@@ -6706,10 +6636,11 @@ static void configure_gnss_dynamic_model()
     if (before == 255)
         ESP_LOGW(TAG, "GNSS dynamic model could not be read, trying to set Stationary");
 
-    const bool written = s_gnss.setDynamicModel(DYN_MODEL_STATIONARY, VAL_LAYER_RAM_BBR, timeout_ms);
-    const uint8_t after = s_gnss.getDynamicModel(VAL_LAYER_RAM, timeout_ms);
+    const gnss_ubx_cfg_item_t stationary{GNSS_UBX_CFG_NAVSPG_DYNMODEL, GNSS_UBX_DYNMODEL_STATIONARY};
+    const bool written = gnss_ubx_val_set(&stationary, 1, GNSS_UBX_LAYER_RAM | GNSS_UBX_LAYER_BBR, timeout_ms);
+    const uint8_t after = read_model();
     s_gnss_dynamic_model.store(after, std::memory_order_relaxed);
-    if (after == DYN_MODEL_STATIONARY)
+    if (after == GNSS_UBX_DYNMODEL_STATIONARY)
         ESP_LOGI(TAG, "GNSS dynamic model: Stationary (was %s, set and read back)", before == 255 ? "unknown" : gnss_dynamic_model_name(before));
     else
         ESP_LOGW(TAG, "GNSS dynamic model: setting Stationary %s, the receiver reports %s",
@@ -6719,14 +6650,31 @@ static void configure_gnss_dynamic_model()
 
 static void setup_gnss()
 {
+    // Parsers of the GNSS UART (custom/gnss_uart): NMEA sentences and UBX frames; the received UBX messages of an
+    // earlier setup are forgotten
+    gnss_nmea_config_t nmea_config{};
+    nmea_config.last_pps_us = []() -> int64_t { return s_ntp_last_pps_us.load(std::memory_order_relaxed); };
+    // A u-blox receiver also sends NMEA: then only NAV-PVT counts (unless the NMEA fallback is in use)
+    nmea_config.on_satellites = [](uint8_t count)
+    {
+        if (!s_gnss_ublox || s_use_nmea_fallback)
+            gnss_note_satellites(count);
+    };
+    gnss_nmea_init(nmea_config);
+    gnss_ubx_config_t ubx_config{};
+    ubx_config.on_satellites = gnss_note_satellites;
+    gnss_ubx_init(ubx_config);
+
     // GNSS protocol of the settings (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED is the default)
     if (s_gnss_ublox)
         setup_gnss_ublox_receiver();
     else
         setup_gnss_nmea_receiver();
 
-    // Port configuration (UBX commands) only for u-blox receivers; an NMEA receiver keeps its own output settings
+    // Port and message configuration (UBX commands) only for u-blox receivers; an NMEA receiver keeps its own output
+    // settings
     bool uart1_output_set = false;
+    bool messages_set = false;
     if (s_gnss_ublox)
     {
         configure_gnss_outputs(&uart1_output_set);
@@ -6734,9 +6682,12 @@ static void setup_gnss()
         if (!uart1_output_set)
             ESP_LOGW(TAG, "GNSS UART1 output configuration failed. Continuing with the module's current output settings.");
 #endif
+        if (uart1_output_set)
+            messages_set = configure_gnss_messages();
     }
 
-    s_use_nmea_fallback = s_gnss_ublox ? (s_gnss_required_assume_success || !uart1_output_set) : true;
+    // Without UBX output or NAV-PVT the NMEA output of the u-blox receiver gives the time
+    s_use_nmea_fallback = s_gnss_ublox ? (s_gnss_required_assume_success || !uart1_output_set || !messages_set) : true;
 
     if (s_gnss_ublox && !s_use_nmea_fallback)
         configure_gnss_dynamic_model();
@@ -6775,11 +6726,15 @@ static void setup_gnss()
 
         if (!s_use_nmea_fallback)
         {
-            fix_type = s_gnss.getFixType();
-            gnss_fix_ok = s_gnss.getGnssFixOk();
-            satellites_used = s_gnss.getSIV();
-            date_valid = s_gnss.getDateValid();
-            time_valid = s_gnss.getTimeValid();
+            gnss_ubx_pvt_t pvt{};
+            if (gnss_ubx_latest_pvt(&pvt, 2000000LL))
+            {
+                fix_type = pvt.fix_type;
+                gnss_fix_ok = (pvt.flags & 0x01) != 0;
+                satellites_used = pvt.num_sv;
+                date_valid = (pvt.valid & 0x01) != 0;
+                time_valid = (pvt.valid & 0x02) != 0;
+            }
             ubx_fix_ready = (fix_type == 3 || fix_type == 4 || fix_type == 5) && gnss_fix_ok && date_valid && time_valid;
 
             if ((fix_type == 3 || fix_type == 4) && satellites_used >= 4 && !gnss_fix_ok)
@@ -8874,8 +8829,6 @@ void setup_mdns()
 static bool acquire_sync_candidate(sync_candidate_t *candidate)
 {
     static constexpr int64_t labelDeadlineUs = 950000;
-    static constexpr uint32_t ubxPollDelayMs = 300;
-    static constexpr uint16_t ubxPollTimeoutMs = 600;
 
     if (candidate == nullptr)
         return false;
@@ -8896,21 +8849,14 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
     }
     const int64_t edge_us = capture_event.approximate_edge_us;
 
+    // Discard what was received before the edge, also a sentence or frame that started before it
+    const uint32_t generation = gnss_uart_flush();
     if (s_use_nmea_fallback)
     {
-        // Discard what was received before the edge, also a sentence that started before it
-        uint32_t generation = 0;
-        if (!s_gnss_ublox)
-            generation = gnss_nmea_flush();
-        else
-            for (int discarded = 0; discarded < 4096 && s_gnss_serial.available() > 0; ++discarded)
-                (void)s_gnss_serial.read();
-
+        // The first valid RMC after the edge
         nmea_rmc_time_t nmea_time{};
         const int64_t remaining_us = labelDeadlineUs - (esp_timer_get_time() - edge_us);
-        const bool received = remaining_us > 20000 &&
-                              (!s_gnss_ublox ? gnss_nmea_wait_valid_rmc(generation, edge_us + labelDeadlineUs, &nmea_time)
-                                             : wait_for_ublox_nmea_rmc_time(&nmea_time, static_cast<uint32_t>(remaining_us / 1000)));
+        const bool received = remaining_us > 20000 && gnss_nmea_wait_valid_rmc(generation, edge_us + labelDeadlineUs, &nmea_time);
         if (!received || (esp_timer_get_time() - edge_us) > labelDeadlineUs)
         {
             candidate->failures.gnss_invalid = true;
@@ -8924,47 +8870,37 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
     }
     else
     {
-        const int64_t wait_us = edge_us + static_cast<int64_t>(ubxPollDelayMs) * 1000LL - esp_timer_get_time();
-        if (wait_us > 1000)
-            vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(wait_us / 1000)));
-
-        if (!s_gnss.getPVT(ubxPollTimeoutMs))
+        // u-blox: the first NAV-PVT after the edge. The receiver sends it once per navigation epoch, after the
+        // solution of the epoch of this time pulse.
+        gnss_ubx_pvt_t pvt{};
+        if (!gnss_ubx_wait_pvt(generation, edge_us + labelDeadlineUs, &pvt))
         {
             candidate->failures.gnss_invalid = true;
 #if DEBUG_ENABLED
-            ESP_LOGE(TAG, "GNSS invalid - Position - Velocity - Time");
+            ESP_LOGE(TAG, "GNSS invalid - no NAV-PVT in time after the PPS edge.");
 #endif
             return false;
         }
 
-        uint8_t fix_type = s_gnss.getFixType();
-        if ((fix_type != 3 && fix_type != 4 && fix_type != 5) || !s_gnss.getGnssFixOk() || !s_gnss.getDateValid() || !s_gnss.getTimeValid())
-        {
-            candidate->failures.gnss_invalid = true;
-#if DEBUG_ENABLED
-            ESP_LOGE(TAG, "GNSS invalid - Fix type.");
-#endif
-            return false;
-        }
-        // The UTC second is only certain once the time is fully resolved (leap seconds known) and, if the receiver
-        // reports it, confirmed
+        // Fix, date and time; the UTC second is only certain once the time is fully resolved (leap seconds known),
+        // confirmed if the receiver reports it, and the UTC parameters are valid (NAV-TIMEUTC)
         const uint8_t min_satellites = s_gnss_min_satellites.load(std::memory_order_relaxed);
-        if (!s_gnss.getTimeFullyResolved() || !ubx_time_confirmed() ||
-            (min_satellites != 0 && s_gnss.getSIV() < min_satellites))
+        const uint32_t reasons = gnss_ubx_pvt_invalid_reasons(pvt, min_satellites);
+        if (reasons != 0)
         {
             candidate->failures.gnss_invalid = true;
 #if DEBUG_ENABLED
-            ESP_LOGE(TAG, "GNSS invalid - UTC time not fully resolved or not confirmed, or too few satellites.");
+            log_ubx_invalid_reasons(reasons, pvt, min_satellites);
 #endif
             return false;
         }
 
-        int year = s_gnss.getYear();
-        int month = s_gnss.getMonth();
-        int day = s_gnss.getDay();
-        int hour = s_gnss.getHour();
-        int minute = s_gnss.getMinute();
-        int second = s_gnss.getSecond();
+        int year = pvt.year;
+        int month = pvt.month;
+        int day = pvt.day;
+        int hour = pvt.hour;
+        int minute = pvt.minute;
+        int second = pvt.second;
 
         if (year <= 2025 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
         {
@@ -8984,7 +8920,12 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
             return false;
         }
 
+        // The epoch is the whole UTC second plus nano (a few ns to us off, also negative): rounded to the second
         candidate->candidate_time = epoch_from_utc(year, month, day, hour, minute, second);
+        if (pvt.nano >= 500000000)
+            candidate->candidate_time += 1;
+        else if (pvt.nano < -500000000)
+            candidate->candidate_time -= 1;
     }
 
     candidate->pps_release_time_us = edge_us;
@@ -10749,7 +10690,23 @@ void app_get_status(web_app_status_t &status)
     status.gnss_rmc_after_pps_ms = -1;
     status.gnss_rmc_after_pps_min_ms = -1;
     status.gnss_rmc_after_pps_max_ms = -1;
-    if (!s_gnss_ublox)
+    status.gnss_pvt_satellites = -1;
+    status.gnss_qerr_state = 0;
+    status.gnss_qerr_slope_milli = 0;
+    if (s_gnss_ublox && !s_use_nmea_fallback)
+    {
+        // u-blox: satellites of the latest NAV-PVT; qErr correction of the servo (no qErr for 10 s: state 0)
+        gnss_ubx_pvt_t pvt{};
+        if (gnss_ubx_latest_pvt(&pvt, 2000000LL))
+            status.gnss_pvt_satellites = pvt.num_sv;
+        const int64_t qerr_last_us = s_ptp_qerr_last_us.load(std::memory_order_relaxed);
+        if (qerr_last_us != 0 && esp_timer_get_time() - qerr_last_us <= 10000000LL)
+        {
+            status.gnss_qerr_state = s_ptp_qerr_state.load(std::memory_order_relaxed);
+            status.gnss_qerr_slope_milli = s_ptp_qerr_slope_milli.load(std::memory_order_relaxed);
+        }
+    }
+    else
     {
         gnss_nmea_status_t nmea{};
         gnss_nmea_get_status(&nmea);
