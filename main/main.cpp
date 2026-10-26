@@ -5422,6 +5422,14 @@ struct ptp_servo_state_t
     uint32_t outliers = 0;
     uint32_t steps = 0;
     uint32_t command_failures = 0;
+    // last holdover for the diagnostics: duration and the time error measured at the re-lock
+    int64_t holdover_started_us = 0;   // esp_timer time of the running holdover (0 = none)
+    bool holdover_error_open = false;  // the re-lock may still refine the error (loopback start within 3 s)
+    uint32_t holdovers = 0;            // ended since the start
+    int64_t last_holdover_end_us = 0;
+    double last_holdover_s = 0.0;
+    double last_holdover_error_ns = 0.0; // served time - true time when the PPS came back
+    bool last_holdover_stepped = false;  // more than 100 us: the time was set instead of ramped
 };
 static ptp_servo_state_t s_ptp_servo; // the PPS task is the only user
 // qErr correction for the status: 0 no qErr, 1 learning, 2 active, 3 no correlation (see ptp_qerr_learn)
@@ -5587,6 +5595,22 @@ static double ptp_relock_residual(int64_t ref_true_ns, double ref_offset_ns, boo
                           ptp_map_offset_at(ref_true_ns + llround(ref_offset_ns), published_ns);
         const double residual_ns = have ? static_cast<double>(published_ns) - ref_offset_ns : 0.0;
         st.relock_residual_ns = (fabs(residual_ns) <= ptp_step_threshold_ns) ? residual_ns : 0.0;
+        // Diagnostics: the mapping continued through the holdover, so the residual is its time error (served time -
+        // true time = -residual); a loopback start in the first seconds measures it once more, more precisely
+        if (st.holdover_started_us != 0)
+        {
+            const int64_t now_us = esp_timer_get_time();
+            st.last_holdover_s = static_cast<double>(now_us - st.holdover_started_us) * 1e-6;
+            st.last_holdover_end_us = now_us;
+            st.holdover_started_us = 0;
+            st.holdover_error_open = true;
+            ++st.holdovers;
+        }
+        if (st.holdover_error_open)
+        {
+            st.last_holdover_error_ns = -residual_ns;
+            st.last_holdover_stepped = fabs(residual_ns) > ptp_step_threshold_ns;
+        }
 #if DEBUG_ENABLED
         ESP_LOGI(TAG, "PTP servo: re-lock, mapping residual %.1f ns", st.relock_residual_ns);
 #endif
@@ -5678,6 +5702,18 @@ static void ptp_servo_step(int64_t edge_sec, const local_instant_t &edge_local, 
     st.epoch = s_ptp_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     st.initialized = false;
     ++st.steps;
+    if (st.holdover_started_us != 0)
+    {
+        // Diagnostics: the offset after the holdover was too large for the ramp (the PTP clock is set)
+        const int64_t now_us = esp_timer_get_time();
+        st.last_holdover_s = static_cast<double>(now_us - st.holdover_started_us) * 1e-6;
+        st.last_holdover_end_us = now_us;
+        st.holdover_started_us = 0;
+        st.last_holdover_stepped = true;
+        st.last_holdover_error_ns = 0.0;
+        ++st.holdovers;
+    }
+    st.holdover_error_open = false;
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "PTP clock %s (offset was %.1f us)", written ? "set" : "could not be set", offset_ns / 1000.0);
 #else
@@ -5859,10 +5895,12 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
             st.free_ppb = static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed));
             st.noise_ns = 0.0;
             relock_continuity = st.relock_residual_ns != 0.0;
+            st.holdover_error_open = false;
             time_diag_add_phase(edge_sec, measurement_ns, 0.0, st.free_ppb, diag_source, true);
         }
         else
         {
+            st.holdover_error_open = false;
             time_diag_add_phase(edge_sec, diag_use_prediction ? pred_ns : measurement_ns, commanded_ns, st.free_ppb,
                                 diag_source, false);
             if (!diag_use_prediction)
@@ -5961,6 +5999,8 @@ static void ptp_servo_holdover()
     // re-lock is part of offset_ns
     ptp_relock_reset();
     st.relock_pending = true;
+    if (st.holdover_started_us == 0)
+        st.holdover_started_us = esp_timer_get_time();
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "PTP servo: holdover, offset %.1f ns, rate %.3f ppb, command %d ppb", static_cast<double>(offset_ns),
              st.free_ppb, static_cast<int>(st.cmd_ppb));
@@ -6011,6 +6051,12 @@ struct ptp_diag_snapshot_t
     int8_t qerr_sign = 0;
     uint32_t qerr_samples = 0;
     float qerr_sd_ns = 0.0f;      // standard deviation of qErr (exponential window)
+    int64_t holdover_started_us = 0;  // running holdover (0 = none)
+    uint32_t holdovers = 0;
+    int64_t last_holdover_end_us = 0;
+    float last_holdover_s = 0.0f;
+    float last_holdover_error_ns = 0.0f;
+    bool last_holdover_stepped = false;
 };
 static ptp_diag_snapshot_t s_ptp_diag;
 static SemaphoreHandle_t s_ptp_diag_mutex = nullptr;
@@ -6039,6 +6085,12 @@ static void ptp_diag_publish()
     d.qerr_sign = st.qerr_sign;
     d.qerr_samples = st.qerr_samples;
     d.qerr_sd_ns = static_cast<float>(sqrt(std::max(0.0, st.qerr_cov_qq)));
+    d.holdover_started_us = st.holdover_started_us;
+    d.holdovers = st.holdovers;
+    d.last_holdover_end_us = st.last_holdover_end_us;
+    d.last_holdover_s = static_cast<float>(st.last_holdover_s);
+    d.last_holdover_error_ns = static_cast<float>(st.last_holdover_error_ns);
+    d.last_holdover_stepped = st.last_holdover_stepped;
     xSemaphoreGive(s_ptp_diag_mutex);
 }
 #endif
@@ -11184,6 +11236,13 @@ void app_get_diag(web_diag_t &diag)
         diag.qerr_sign = d.qerr_sign;
         diag.qerr_samples = d.qerr_samples;
         diag.qerr_sd_ns = d.qerr_sd_ns;
+        const int64_t now_us = esp_timer_get_time();
+        diag.holdover_running_s = d.holdover_started_us != 0 ? static_cast<int32_t>((now_us - d.holdover_started_us) / 1000000LL) : -1;
+        diag.holdovers = d.holdovers;
+        diag.last_holdover_end_s = d.holdovers != 0 ? d.last_holdover_end_us / 1000000LL : -1;
+        diag.last_holdover_s = d.last_holdover_s;
+        diag.last_holdover_error_ns = d.last_holdover_error_ns;
+        diag.last_holdover_stepped = d.last_holdover_stepped;
     }
 #endif
     time_diag_innovation_t innovation{};

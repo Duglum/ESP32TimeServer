@@ -82,6 +82,13 @@ struct web_diag_t
     uint32_t outliers;
     uint32_t steps;
     uint32_t command_failures;
+    // PPS holdover: running one, last one ended (duration, time error measured at the re-lock)
+    int32_t holdover_running_s;   // seconds of the running holdover (-1 = none)
+    uint32_t holdovers;           // ended since the start
+    int64_t last_holdover_end_s;  // uptime at the end of the last one (-1 = none)
+    float last_holdover_s;
+    float last_holdover_error_ns; // served time - true time when the PPS came back
+    bool last_holdover_stepped;   // more than 100 us off: the time was set instead of ramped
     // RMS of the innovations (normal filter updates)
     float rms_minute_ns;
     uint32_t rms_minute_samples;

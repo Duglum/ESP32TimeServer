@@ -939,6 +939,18 @@
     let filter = t('outliers {o}, steps {s}, command errors {e}', { o: d.outliers, s: d.steps, e: d.command_failures });
     if (d.relock_residual_ns) filter += '; ' + t('re-lock residual {r} ns', { r: num(d.relock_residual_ns, 1) });
     $('dg-filter').textContent = filter;
+    // PPS holdover: the time error is measured against the PPS when it comes back (the ramp then removes it)
+    diagRow('dg-holdover', d.servo);
+    const holdover = [];
+    if (d.holdover_running_s >= 0) holdover.push(t('running for {d}', { d: duration(d.holdover_running_s) }));
+    if (d.holdovers > 0) {
+      const ended = { d: duration(Math.round(d.last_holdover_s)), t: duration(d.last_holdover_end_s), n: d.holdovers };
+      holdover.push(d.last_holdover_stepped
+        ? t('{d} long, ended at uptime {t}: more than 100 \u00b5s off, the time was set instead of ramped ({n} since the start)', ended)
+        : t('{d} long, ended at uptime {t}: served time {e} ns off when the PPS came back ({n} since the start)',
+          Object.assign(ended, { e: (d.last_holdover_error_ns > 0 ? '+' : '') + num(d.last_holdover_error_ns, 1) })));
+    }
+    $('dg-holdover').textContent = holdover.length ? holdover.join('; ') : t('none since the start');
     $('dg-loopback').textContent = !d.loopback_active ? t('off')
       : t('pulses used {used}, missing {missing}, implausible {rejected}; software minus loopback {bias} ns',
         { used: d.loopback_used, missing: d.loopback_missing, rejected: d.loopback_rejected, bias: num(d.sw_bias_ns, 1) });

@@ -103,6 +103,13 @@
     'Filter': 'Filter',
     'PPS loopback': 'PPS-Loopback',
     'PPS interrupt': 'PPS-Interrupt',
+    'Last holdover': 'Letzter Holdover',
+    'running for {d}': 'läuft seit {d}',
+    '{d} long, ended at uptime {t}: more than 100 \u00b5s off, the time was set instead of ramped ({n} since the start)':
+      '{d} lang, Ende bei Laufzeit {t}: mehr als 100 \u00b5s Abweichung, die Zeit wurde gesetzt statt nachgeführt ({n} seit dem Start)',
+    '{d} long, ended at uptime {t}: served time {e} ns off when the PPS came back ({n} since the start)':
+      '{d} lang, Ende bei Laufzeit {t}: ausgegebene Zeit lag bei Rückkehr des PPS {e} ns daneben ({n} seit dem Start)',
+    'none since the start': 'keiner seit dem Start',
     'Replies': 'Antworten',
     'Interleaved lookup': 'Interleaved-Zuordnung',
     'Basic mode TX delay': 'TX-Verzögerung Basic Mode',

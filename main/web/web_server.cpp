@@ -1409,6 +1409,12 @@ namespace
         cJSON_AddNumberToObject(root, "outliers", d->outliers);
         cJSON_AddNumberToObject(root, "steps", d->steps);
         cJSON_AddNumberToObject(root, "command_failures", d->command_failures);
+        cJSON_AddNumberToObject(root, "holdover_running_s", d->holdover_running_s);
+        cJSON_AddNumberToObject(root, "holdovers", d->holdovers);
+        cJSON_AddNumberToObject(root, "last_holdover_end_s", static_cast<double>(d->last_holdover_end_s));
+        cJSON_AddNumberToObject(root, "last_holdover_s", d->last_holdover_s);
+        cJSON_AddNumberToObject(root, "last_holdover_error_ns", d->last_holdover_error_ns);
+        cJSON_AddBoolToObject(root, "last_holdover_stepped", d->last_holdover_stepped);
         cJSON_AddNumberToObject(root, "rms_minute_ns", d->rms_minute_ns);
         cJSON_AddNumberToObject(root, "rms_minute_samples", d->rms_minute_samples);
         cJSON_AddNumberToObject(root, "rms_hour_ns", d->rms_hour_ns);
