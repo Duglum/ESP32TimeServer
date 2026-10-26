@@ -78,6 +78,7 @@ namespace
         0};
 
     httpd_handle_t s_server = nullptr;
+    std::atomic<bool> s_running{false}; // the HTTPS server answers (web_admin_running)
     esp_tls_cfg_server_t s_tls_config{};
     web_tls_identity_t s_identity{};
 
@@ -964,6 +965,7 @@ namespace
             cJSON_AddItemToArray(dns_v6, cJSON_CreateString(sets->net.dns_received_v6[i]));
         cJSON_AddStringToObject(status, "firmware", sets->app.firmware_version);
         cJSON_AddStringToObject(status, "build", sets->app.build);
+        cJSON_AddBoolToObject(status, "firmware_check_pending", sets->app.firmware_check_pending);
         cJSON_AddStringToObject(status, "chip_revision", sets->app.chip_revision);
         cJSON_AddBoolToObject(status, "ptp_loopback_supported", sets->app.ptp_loopback_supported);
         cJSON_AddNumberToObject(status, "uptime_s", static_cast<double>(esp_timer_get_time() / 1000000LL));
@@ -1696,6 +1698,7 @@ namespace
         }
 
         ESP_LOGI(TAG, "Web admin: https://%s/ (TCP %u, IPv4 and IPv6)", boot.fqdn, static_cast<unsigned int>(HTTPS_PORT));
+        s_running.store(true, std::memory_order_release);
 
         bool network_confirm = false;
         if (web_settings_boot_was_oneshot(&network_confirm) && network_confirm)
@@ -1709,6 +1712,11 @@ namespace
         vTaskDelete(nullptr);
     }
 } // namespace
+
+bool web_admin_running()
+{
+    return s_running.load(std::memory_order_acquire);
+}
 
 void web_admin_start()
 {

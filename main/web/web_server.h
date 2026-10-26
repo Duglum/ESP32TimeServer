@@ -18,6 +18,7 @@ struct web_app_status_t
 {
     char firmware_version[24];
     char build[48];
+    bool firmware_check_pending;  // a new firmware of an update is still being checked (review E-06)
     char chip_revision[8];        // e.g. "v3.2"
     bool ptp_loopback_supported;  // chip revision 3.0 or newer (PTP PPS loopback)
     bool time_set;
@@ -158,6 +159,8 @@ struct web_diag_t
 // interface exists. If the settings of this boot came from a one-shot set that changed the network, the 120 s
 // confirmation starts as well.
 void web_admin_start();
+// The HTTPS server was started (false with WEB_ADMIN_ENABLED 0)
+bool web_admin_running();
 
 // Implemented in main.cpp
 void app_get_status(web_app_status_t &status);

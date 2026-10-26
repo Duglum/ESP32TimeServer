@@ -153,6 +153,9 @@
     'none recorded': 'keiner aufgezeichnet',
     'Delete the stored core dump?': 'Den gespeicherten Core-Dump löschen?',
     'Core dump erased.': 'Core-Dump gelöscht.',
+    'new after an update: being checked (at most 15 min)': 'neu nach einem Update: wird geprüft (höchstens 15 min)',
+    'The running firmware is still being checked after its update (at most 15 minutes): upload again afterwards':
+      'Die laufende Firmware wird nach ihrem Update noch geprüft (höchstens 15 Minuten): danach erneut hochladen',
     'The core dump could not be erased': 'Der Core-Dump konnte nicht gelöscht werden',
     'No core dump stored': 'Kein Core-Dump gespeichert',
     'time pulse: configuration not read': 'Zeitpuls: Konfiguration nicht gelesen',

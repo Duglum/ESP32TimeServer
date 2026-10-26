@@ -862,7 +862,8 @@
     $('st-rate-limit').textContent = limit
       ? t('{limit} per second and client, {n} requests dropped since the start', { limit: limit, n: st.ntp_rate_limited })
       : t('off, {n} requests dropped since the start', { n: st.ntp_rate_limited });
-    $('st-firmware').textContent = st.firmware + ' (' + st.build + ')';
+    $('st-firmware').textContent = st.firmware + ' (' + st.build + ')' +
+      (st.firmware_check_pending ? ', ' + t('new after an update: being checked (at most 15 min)') : '');
     $('st-chip').textContent = 'ESP32-P4 ' + st.chip_revision;
     $('ptp-chip').textContent = st.chip_revision;
     $('st-uptime').textContent = duration(st.uptime_s);

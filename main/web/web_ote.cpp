@@ -133,6 +133,9 @@ namespace
 
         esp_ota_handle_t handle = 0;
         err = esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+        if (err == ESP_ERR_OTA_ROLLBACK_INVALID_STATE)
+            return fail("409 Conflict", "The running firmware is still being checked after its update (at most 15 minutes): upload again afterwards",
+                        "Update check pending", err);
         if (err != ESP_OK)
             return fail("500 Internal Server Error", "The OTA partition could not be prepared", "OTA begin failed", err);
 

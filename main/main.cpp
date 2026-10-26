@@ -58,6 +58,7 @@
 #include "ESP32TimeServerSettings.h"
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
+#include "esp_ota_ops.h"
 #include "web/web_net.h"
 #include "web/web_server.h"
 #include "web/web_settings.h"
@@ -6919,6 +6920,82 @@ static void read_gnss_time_pulse()
         ESP_LOGI(TAG, "GNSS time pulse: also without lock; while the GNSS time is not valid the PPS is not followed");
 }
 
+// ---- Check of a new firmware after an update (review E-06) ----
+// With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE the bootloader starts an image written by an OTE update once in the state
+// "pending verify". This check keeps it (esp_ota_mark_app_valid_cancel_rollback) once the functions of the firmware
+// work for App_Update_Check_Hold_Us: Ethernet connected, NTP server ready (hardware path and sockets), web admin
+// running, data from the GNSS receiver. They do not depend on the sky (no fix or PPS needed). Otherwise, after
+// App_Update_Check_Timeout_Us from the start, the image is marked invalid and the previous one is started; a crash or
+// a reset before the image is kept also starts the previous one (bootloader). Images flashed over USB are not checked.
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+static constexpr int64_t App_Update_Check_Timeout_Us = 15LL * 60LL * 1000000LL;
+static constexpr int64_t App_Update_Check_Hold_Us = 60LL * 1000000LL;
+static constexpr size_t App_Update_Check_Task_Stack_Size = 3072; // only after an update, ends itself; logs only
+
+static void app_update_check_task(void *parameter)
+{
+    (void)parameter;
+    int64_t ok_since_us = 0;
+    for (;;)
+    {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        const int64_t now_us = esp_timer_get_time();
+        gnss_nmea_status_t nmea{};
+        gnss_nmea_get_status(&nmea);
+        gnss_ubx_status_t ubx{};
+        gnss_ubx_get_status(&ubx);
+        const bool network = s_ethernet_connected.load(std::memory_order_acquire);
+        const bool ntp = s_ntp_server_ready.load(std::memory_order_acquire) && s_hardware_ntp_accepting.load(std::memory_order_acquire);
+        const bool web = !WEB_ADMIN_ENABLED || web_admin_running();
+        const bool gnss = nmea.sentences > 0 || ubx.frames > 0;
+        if (network && ntp && web && gnss)
+        {
+            if (ok_since_us == 0)
+                ok_since_us = now_us;
+            if (now_us - ok_since_us >= App_Update_Check_Hold_Us)
+            {
+                const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+                if (err == ESP_OK)
+                    ESP_LOGI(TAG, "Firmware update checked: the new firmware is kept");
+                else
+                    ESP_LOGE(TAG, "Firmware update checked, but it could not be kept (%s)", esp_err_to_name(err));
+                vTaskDelete(nullptr);
+                return;
+            }
+        }
+        else
+        {
+            ok_since_us = 0;
+        }
+        if (now_us >= App_Update_Check_Timeout_Us)
+        {
+            ESP_LOGE(TAG, "Firmware update check failed (Ethernet %s, NTP server %s, web admin %s, GNSS data %s): starting the previous firmware",
+                     network ? "ok" : "missing", ntp ? "ok" : "missing", web ? "ok" : "missing", gnss ? "ok" : "missing");
+            vTaskDelay(pdMS_TO_TICKS(500)); // let the console print the line
+            esp_ota_mark_app_invalid_rollback_and_reboot(); // only returns if there is no previous image
+            ESP_LOGE(TAG, "No previous firmware to start: the new firmware stays");
+            vTaskDelete(nullptr);
+            return;
+        }
+    }
+}
+#endif
+
+// Starts the check of a new firmware if the bootloader started it for the first time after an update
+static void start_app_update_check()
+{
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (running == nullptr || esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY)
+        return;
+    ESP_LOGW(TAG, "New firmware after an update: it is kept once Ethernet, the NTP server, the web admin and the GNSS data work for %lld s; otherwise the previous firmware is started after %lld min",
+             static_cast<long long>(App_Update_Check_Hold_Us / 1000000LL), static_cast<long long>(App_Update_Check_Timeout_Us / 60000000LL));
+    if (xTaskCreatePinnedToCore(app_update_check_task, "update_check", App_Update_Check_Task_Stack_Size, nullptr, 3, nullptr, tskNO_AFFINITY) != pdPASS)
+        ESP_LOGE(TAG, "Firmware update check could not be started: the new firmware is not confirmed (the previous one is started at the next reset)");
+#endif
+}
+
 static void setup_gnss()
 {
     // Parsers of the GNSS UART (custom/gnss_uart): NMEA sentences and UBX frames; the received UBX messages of an
@@ -10949,6 +11026,15 @@ void app_apply_live_settings(const web_settings_t &settings)
 
 void app_controlled_restart(const char *reason)
 {
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    // A restart of the web admin page while a new firmware is still checked (review E-06): the page worked, so the
+    // firmware is kept; otherwise the bootloader would take the restart as a failure and start the previous one
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running != nullptr && esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY &&
+        esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+        ESP_LOGI(TAG, "Firmware update: the new firmware is kept (restart requested on the web admin page)");
+#endif
     controlled_restart(reason);
 }
 
@@ -10985,6 +11071,12 @@ void app_get_status(web_app_status_t &status)
     const app_metadata_t *meta = get_app_metadata();
     snprintf(status.firmware_version, sizeof(status.firmware_version), "v%s", meta->version);
     snprintf(status.build, sizeof(status.build), "%s %s %s", meta->build_date, meta->build_time, meta->git_sha);
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    status.firmware_check_pending = running != nullptr && esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+                                    ota_state == ESP_OTA_IMG_PENDING_VERIFY;
+#endif
     esp_chip_info_t chip_info{};
     esp_chip_info(&chip_info);
     snprintf(status.chip_revision, sizeof(status.chip_revision), "v%u.%u",
@@ -11346,6 +11438,8 @@ extern "C" void app_main()
     write_opening_messages_to_the_console();
 
     crash_dump_init(); // a core dump of an earlier crash is logged here (review E-07)
+
+    start_app_update_check(); // first start of a firmware written by an update (review E-06)
 
     write_settings_messages_to_the_console();
 
