@@ -270,7 +270,7 @@ reply and doesn’t blindly accept time data that has been changed in transit.
 // Unless you are changing the code associated with options below and need to know the impacts of
 // those changes have on the stack sizes then the conditional compile flags below should be disabled
 
-#define CALCULATE_STACK_SIZES_ENABLED 1 // 0 = Disabled; 1 = Enabled
+#define CALCULATE_STACK_SIZES_ENABLED 0 // 0 = Disabled; 1 = Enabled
 
 // FreeRTOS task stack allocations, in bytes.
 
