@@ -1442,6 +1442,9 @@ namespace
         cJSON_AddNumberToObject(root, "qerr_matched", d->qerr_matched);
         cJSON_AddNumberToObject(root, "qerr_unmatched", d->qerr_unmatched);
         cJSON_AddNumberToObject(root, "qerr_invalid", d->qerr_invalid);
+        cJSON_AddNumberToObject(root, "tp_messages", d->tp_messages);
+        cJSON_AddNumberToObject(root, "tp_last_qerr_ps", d->tp_last_qerr_ps);
+        cJSON_AddNumberToObject(root, "tp_last_flags", d->tp_last_flags);
         cJSON_AddNumberToObject(root, "hw_replies", d->hw_replies);
         cJSON_AddNumberToObject(root, "hw_interleaved", d->hw_interleaved);
         cJSON_AddNumberToObject(root, "hw_no_tx_stamp", d->hw_no_tx_stamp);

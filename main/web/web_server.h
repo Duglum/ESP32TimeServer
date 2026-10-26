@@ -37,7 +37,8 @@ struct web_app_status_t
     int32_t gnss_rmc_after_pps_min_ms;
     int32_t gnss_rmc_after_pps_max_ms;
     int16_t gnss_pvt_satellites;  // U-Blox UBX: satellites used in the latest NAV-PVT (-1 = none)
-    uint8_t gnss_qerr_state;      // U-Blox UBX: qErr correction 0 no qErr, 1 learning the sign, 2 active, 3 no correlation
+    uint8_t gnss_qerr_state;      // U-Blox UBX: qErr correction 0 no qErr, 1 learning the sign, 2 active, 3 no correlation,
+                                  // 4 the receiver flags every qErr invalid (TIM-TP qErrInvalid)
     int32_t gnss_qerr_slope_milli; // regression slope of the qErr correction x 1000 (states 2 and 3)
     bool gnss_rf_known;           // U-Blox UBX: MON-RF answered within the last 30 s
     uint8_t gnss_antenna_status;  // 0 starting, 1 unknown, 2 OK, 3 short circuit, 4 open
@@ -115,6 +116,9 @@ struct web_diag_t
     uint32_t qerr_matched;
     uint32_t qerr_unmatched;
     uint32_t qerr_invalid;
+    uint32_t tp_messages;         // TIM-TP received
+    int32_t tp_last_qerr_ps;      // qErr of the latest TIM-TP as received
+    uint8_t tp_last_flags;
     // NTP paths since the start
     uint32_t hw_replies;
     uint32_t hw_interleaved;

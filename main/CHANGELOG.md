@@ -80,6 +80,7 @@ Contents
 | 51 | **No clock step after a GNSS loss while the clocks coast** (2026-10-26, board finding) | after a loss of GNSS and PPS of more than 30 s the PTP clock was set from the system clock (us) instead of re-locking without a phase step; the holdover row of the diagnostics never ended |
 | 52 | **RMC phase only within 1 s of the PPS edge** (2026-10-26, board finding) | an RMC after a missing PPS edge no longer counts as about 1 s late (status page maximum, diagnostics histogram) |
 | 53 | **Robust check of the 80 MHz PLL source of the PTP clock** (2026-10-26, board finding) | a reading disturbed at the start no longer drops the 13 ns time stamps for the whole run; the warning names the failed step |
+| 54 | **qErr flagged invalid by the receiver shown as such** (2026-10-26, board finding with the M10) | the status line no longer says *TIM-TP missing*; the diagnostics show the raw qErr and flags of the latest TIM-TP |
 
 No memory leak was found in the review (section 4.13).
 
@@ -895,6 +896,14 @@ Board finding: one start logged `PTP clock: the 80 MHz PLL source does not work,
 - Now each PTP reading is bracketed by two local readings and taken again if the bracket is longer than 5 us (`ptp_clock_reading()`), and the check is tried up to three times. A clock that does not run at its rate fails all tries.
 - The warning names the step that failed: `could not be switched on (<error>)` (clock gate), `the EMAC refused ... (<error>)`, or `does not run at its rate (<n> ns in <m> ns)`.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet: several starts should all log `PTP clock: 80 MHz PLL source, time stamp steps of 13 ns`; if not, the warning shows the step.
+
+### 4.53 qErr flagged invalid by the receiver shown as such (2026-10-26)
+
+First board test with the u-blox M10 (UBX protocol): stratum 1, NAV-PVT, `fullyResolved` and `validUTC` after 40 s, time pulse 1 s / 100 ms / rising edge / UTC grid / no pulse without lock, cable delay 50 ns. Every TIM-TP (185 of 185) was flagged *qErrInvalid* (flags bit 4), so the qErr correction stayed off as intended, but the status line said `no qErr (TIM-TP missing or PTP loopback off)`.
+
+- Status page: a new qErr state 4, `no qErr: the receiver flags it invalid (TIM-TP)`, when TIM-TP arrives but none had a valid qErr since the start.
+- Diagnostics, qErr row: `latest TIM-TP: qErr <q> ps, flags 0x<f>`, the values as received whatever the flags (`gnss_ubx_status_t::last_tp_qerr_ps`, `last_tp_flags`). They settle the open question of 4.37: if the qErr values vary by some ns while bit 4 is set, the bit has the other meaning on this firmware; if they stay 0, the receiver gives no qErr (then the correction is not available with this module).
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, the page against the mock. Not on the board yet.
 
 ## 5. Security and open ports
 

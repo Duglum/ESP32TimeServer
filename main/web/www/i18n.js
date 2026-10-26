@@ -72,6 +72,8 @@
     'qErr correction active (slope {slope})': 'qErr-Korrektur aktiv (Steigung {slope})',
     'qErr correction off: no correlation (slope {slope})': 'qErr-Korrektur aus: keine Korrelation (Steigung {slope})',
     'no qErr (TIM-TP missing or PTP loopback off)': 'kein qErr (TIM-TP fehlt oder PTP-Loopback aus)',
+    'no qErr: the receiver flags it invalid (TIM-TP)': 'kein qErr: der Empfänger markiert ihn als ungültig (TIM-TP)',
+    'latest TIM-TP: qErr {q} ps, flags 0x{f}': 'letzter TIM-TP: qErr {q} ps, Flags 0x{f}',
     'stratum 1, GNSS and PPS locked': 'Stratum 1, GNSS und PPS synchronisiert',
     'not stratum 1 (PPS {pps}, GNSS {gnss})': 'nicht Stratum 1 (PPS {pps}, GNSS {gnss})',
     'not stratum 1 yet: GNSS fix {age} s old, {min} s required after the start':

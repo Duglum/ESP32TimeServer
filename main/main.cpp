@@ -11231,6 +11231,14 @@ void app_get_status(web_app_status_t &status)
             status.gnss_qerr_state = s_ptp_qerr_state.load(std::memory_order_relaxed);
             status.gnss_qerr_slope_milli = s_ptp_qerr_slope_milli.load(std::memory_order_relaxed);
         }
+        else
+        {
+            // No qErr sample: TIM-TP arrives, but the receiver flags its qErr invalid (state 4)
+            gnss_ubx_status_t ubx{};
+            gnss_ubx_get_status(&ubx);
+            if (ubx.qerr_invalid > 0 && ubx.qerr_matched == 0)
+                status.gnss_qerr_state = 4;
+        }
         // Antenna and jamming (MON-RF), if answered within the last 30 s
         if (s_gnss_info_mutex != nullptr && xSemaphoreTake(s_gnss_info_mutex, pdMS_TO_TICKS(10)) == pdTRUE)
         {
@@ -11371,6 +11379,9 @@ void app_get_diag(web_diag_t &diag)
         diag.qerr_matched = ubx.qerr_matched;
         diag.qerr_unmatched = ubx.qerr_unmatched;
         diag.qerr_invalid = ubx.qerr_invalid;
+        diag.tp_messages = ubx.tp_messages;
+        diag.tp_last_qerr_ps = ubx.last_tp_qerr_ps;
+        diag.tp_last_flags = ubx.last_tp_flags;
         diag.first_resolved_s = ubx.first_resolved_us != 0 ? ubx.first_resolved_us / 1000000LL : -1;
         diag.resolved_losses = ubx.resolved_losses;
         diag.first_valid_utc_s = ubx.first_valid_utc_us != 0 ? ubx.first_valid_utc_us / 1000000LL : -1;

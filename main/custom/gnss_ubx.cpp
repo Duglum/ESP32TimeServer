@@ -112,6 +112,8 @@ namespace
     std::atomic<uint32_t> s_naks{0};
     std::atomic<int32_t> s_last_qerr_ps{0};
     std::atomic<uint8_t> s_tp_time_base{255};
+    std::atomic<int32_t> s_last_tp_qerr_ps{0};   // of the latest TIM-TP, whatever its flags (diagnostics)
+    std::atomic<uint8_t> s_last_tp_flags{0};
     // Diagnostics: esp_timer time when NAV-PVT fullyResolved / NAV-TIMEUTC validUTC were first set, and how often
     // they were lost afterwards (reader task only writes)
     std::atomic<int64_t> s_first_resolved_us{0};
@@ -386,6 +388,8 @@ namespace
         taskEXIT_CRITICAL(&s_lock);
         s_tp_messages.fetch_add(1, std::memory_order_relaxed);
         s_tp_time_base.store(tp.flags & 0x01, std::memory_order_relaxed);
+        s_last_tp_qerr_ps.store(tp.qerr_ps, std::memory_order_relaxed);
+        s_last_tp_flags.store(tp.flags, std::memory_order_relaxed);
     }
 }
 
@@ -720,6 +724,8 @@ void gnss_ubx_get_status(gnss_ubx_status_t *status)
     status->last_qerr_ps = s_last_qerr_ps.load(std::memory_order_relaxed);
     status->leap_seconds = s_leap_seconds.load(std::memory_order_relaxed);
     status->tp_time_base = s_tp_time_base.load(std::memory_order_relaxed);
+    status->last_tp_qerr_ps = s_last_tp_qerr_ps.load(std::memory_order_relaxed);
+    status->last_tp_flags = s_last_tp_flags.load(std::memory_order_relaxed);
     status->first_resolved_us = s_first_resolved_us.load(std::memory_order_relaxed);
     status->resolved_losses = s_resolved_losses.load(std::memory_order_relaxed);
     status->first_valid_utc_us = s_first_valid_utc_us.load(std::memory_order_relaxed);

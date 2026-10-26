@@ -842,7 +842,8 @@
       gnss.push(st.gnss_qerr_state === 1 ? t('qErr correction: learning the sign')
         : st.gnss_qerr_state === 2 ? t('qErr correction active (slope {slope})', { slope })
           : st.gnss_qerr_state === 3 ? t('qErr correction off: no correlation (slope {slope})', { slope })
-            : t('no qErr (TIM-TP missing or PTP loopback off)'));
+            : st.gnss_qerr_state === 4 ? t('no qErr: the receiver flags it invalid (TIM-TP)')
+              : t('no qErr (TIM-TP missing or PTP loopback off)'));
     }
     // U-Blox UBX protocol: antenna supervisor and jamming monitor (MON-RF)
     if (st.ublox_receiver && st.gnss_rf_known) {
@@ -956,7 +957,9 @@
         { used: d.loopback_used, missing: d.loopback_missing, rejected: d.loopback_rejected, bias: num(d.sw_bias_ns, 1) });
     $('dg-qerr').textContent = t('correction sign {sign}, samples {n}, standard deviation {sd} ns; TIM-TP matched {m}, missing {u}, invalid {i}',
       { sign: d.qerr_sign > 0 ? '+1' : d.qerr_sign < 0 ? '-1' : t('none'), n: d.qerr_samples, sd: num(d.qerr_sd_ns, 1),
-        m: d.qerr_matched, u: d.qerr_unmatched, i: d.qerr_invalid });
+        m: d.qerr_matched, u: d.qerr_unmatched, i: d.qerr_invalid }) +
+      (d.tp_messages > 0 ? '; ' + t('latest TIM-TP: qErr {q} ps, flags 0x{f}',
+        { q: d.tp_last_qerr_ps, f: Number(d.tp_last_flags).toString(16).toUpperCase().padStart(2, '0') }) : '');
     const isrLabels = ['0.25', '0.5', '1', '2', '5'].map((v) => '≤ ' + (lang === 'de' ? v.replace('.', ',') : v) + ' µs');
     isrLabels.push('> 5 µs');
     $('dg-isr').textContent = d.isr_total > 0
