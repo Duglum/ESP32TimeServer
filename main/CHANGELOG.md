@@ -832,7 +832,7 @@ Review E-04. `sdkconfig.defaults`:
 - Not taken: `CONFIG_LWIP_EXTRA_IRAM_OPTIMIZATION` (TCP, 17 kB; only the web admin and MQTT use TCP).
 - Memory: DIRAM 208 226 B after this change (190 266 B after 4.42; 4.43 and 4.44 add little), 447 kB free. No stack changes.
 - **The file `sdkconfig` has to be created again** (delete it, or set the two options with `idf.py menuconfig`): a `sdkconfig` that exists keeps its values, the defaults only apply to a new one.
-- The other part of review E-03 / E-04, `CONFIG_SPI_FLASH_AUTO_SUSPEND`, is **not** switched on: ESP-IDF supports it only for the flash chips XM25xxD, GD25QxxE and FM25Q32 (and a few IDs in the vendor drivers); with another chip `esp_flash_init_default_chip()` fails at the start and the device does not boot. The flash chip of the boards is not known yet (boot log line `spi_flash: detected chip: ...`, or `esptool.py flash_id`).
+- The other part of review E-03 / E-04, `CONFIG_SPI_FLASH_AUTO_SUSPEND`, is **not** switched on: ESP-IDF supports it only for the flash chips XM25xxD, GD25QxxE and FM25Q32 (and a few IDs in the vendor drivers); with another chip `esp_flash_init_default_chip()` fails at the start and the device does not boot. The boards have a GigaDevice GD25Q256 (`esptool flash-id`: manufacturer C8, device 4019, 32 MB; boot log `spi_flash: detected chip: gd`, `flash io: dio`); ESP-IDF 6.1 allows suspend only for the GigaDevice IDs C84016, C84017, C84018 and C84319, so auto suspend stays off (review E-03 closed, 2026-10-26).
 - Verified: build (-O2, no warning) with the two options set. Not on the board yet.
 
 ### 4.46 Core dump of a crash (2026-10-26)
