@@ -111,6 +111,7 @@ extern "C"
 #include "esp_mac.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_ipc.h"
 #include "mqtt_client.h"
 #include "esp_netif.h"
 #include "esp_rom_sys.h"
@@ -644,6 +645,9 @@ static QueueHandle_t s_pps_timestamp_queue = nullptr;
 static QueueHandle_t s_pps_sync_timestamp_queue = nullptr;
 static mcpwm_cap_timer_handle_t s_pps_capture_timer = nullptr;
 static mcpwm_cap_channel_handle_t s_pps_capture_channel = nullptr;
+// Core on which the PPS interrupt was allocated (setup_pps_input). The capture channels of MCPWM group 0 share this
+// CPU interrupt, so every further channel interrupt has to be allocated on the same core.
+static BaseType_t s_pps_isr_core = tskNO_AFFINITY;
 static SemaphoreHandle_t s_ote_mutex = nullptr;
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
 static SemaphoreHandle_t s_lcd_mutex = nullptr;
@@ -3985,6 +3989,25 @@ static bool IRAM_ATTR ptp_pps_capture_callback(mcpwm_cap_channel_handle_t,
     return false;
 }
 
+struct ptp_loopback_capture_start_t
+{
+    mcpwm_cap_channel_handle_t channel;
+    esp_err_t result;
+};
+
+// Installs the interrupt of the loopback capture channel and enables the channel. Runs on the core of the PPS
+// interrupt (s_pps_isr_core): the channels of MCPWM group 0 share that CPU interrupt, and esp_intr_alloc refuses it
+// from the other core with ESP_ERR_INVALID_STATE.
+static void ptp_loopback_capture_start(void *arg)
+{
+    ptp_loopback_capture_start_t *start = static_cast<ptp_loopback_capture_start_t *>(arg);
+    mcpwm_capture_event_callbacks_t callbacks{};
+    callbacks.on_cap = ptp_pps_capture_callback;
+    start->result = mcpwm_capture_channel_register_event_callbacks(start->channel, &callbacks, nullptr);
+    if (start->result == ESP_OK)
+        start->result = mcpwm_capture_channel_enable(start->channel);
+}
+
 // PTP PPS loopback: the EMAC outputs its PPS on PTPPPSLoopbackPin, and a second channel of the PPS capture timer
 // reads the same pad back. Nothing has to be wired.
 static void setup_ptp_pps_loopback(esp_eth_mac_t *mac)
@@ -4023,11 +4046,17 @@ static void setup_ptp_pps_loopback(esp_eth_mac_t *mac)
     err = mcpwm_new_capture_channel(s_pps_capture_timer, &channel_config, &channel);
     if (err == ESP_OK)
     {
-        mcpwm_capture_event_callbacks_t callbacks{};
-        callbacks.on_cap = ptp_pps_capture_callback;
-        err = mcpwm_capture_channel_register_event_callbacks(channel, &callbacks, nullptr);
+        // The Ethernet setup task has no core affinity: on the other core the interrupt is installed through the IPC
+        // task of the PPS core (as the IDF GPIO driver does for its ISR service)
+        ptp_loopback_capture_start_t start{channel, ESP_FAIL};
+#if !CONFIG_FREERTOS_UNICORE
+        if (s_pps_isr_core != tskNO_AFFINITY && s_pps_isr_core != static_cast<BaseType_t>(xPortGetCoreID()))
+            err = esp_ipc_call_blocking(static_cast<uint32_t>(s_pps_isr_core), ptp_loopback_capture_start, &start);
+        else
+#endif
+            ptp_loopback_capture_start(&start);
         if (err == ESP_OK)
-            err = mcpwm_capture_channel_enable(channel);
+            err = start.result;
     }
     if (err != ESP_OK)
     {
@@ -4524,7 +4553,6 @@ static constexpr uint32_t PPS_ISR_LATENCY_CODE_VERSION = (LOCAL_TICKS_PER_US > 1
 static std::atomic<uint32_t> s_isr_latency_test_armed{0};
 static std::atomic<uint32_t> s_isr_latency_test_fired{0};
 static volatile int64_t s_isr_latency_test_cb_ns = 0; // local time (ns) of the test callback
-static BaseType_t s_pps_isr_core = tskNO_AFFINITY; // core on which the PPS interrupt was allocated
 static bool s_pps_isr_latency_known = false;        // a stored value for this configuration was loaded
 static std::atomic<uint32_t> s_last_pps_isr_us32{0}; // low 32 bits of the esp_timer time of the last real PPS edge
 #endif
@@ -4605,9 +4633,7 @@ static void setup_pps_input()
     ESP_ERROR_CHECK(mcpwm_capture_channel_enable(s_pps_capture_channel));
     ESP_ERROR_CHECK(mcpwm_capture_timer_enable(s_pps_capture_timer));
     ESP_ERROR_CHECK(mcpwm_capture_timer_start(s_pps_capture_timer));
-#if PPS_ISR_LATENCY_AUTO
     s_pps_isr_core = static_cast<BaseType_t>(xPortGetCoreID());
-#endif
 }
 
 #if PPS_ISR_LATENCY_AUTO || PTP_LATENCY_AUTO

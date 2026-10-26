@@ -68,6 +68,7 @@ Contents
 | 39 | **Arduino core and SparkFun library removed** (2026-10-26, review option b, stage 3): plain ESP-IDF project; `millis()` replaced by esp_timer, no `initArduino()` / `Serial.begin()`, the SparkFun submodule and its component wrapper deleted | 8 instead of 25 managed components, image 105 kB smaller than with stage 1 (35 kB of it in this stage), no third-party warnings in the build, no longer tied to ESP-IDF below 6.2 by arduino-esp32 |
 | 40 | **Settings panels collapsed** (2026-10-26): Network, GNSS and PPS, LCD and time zone, RGB LED, MQTT, NTP authentication, Firmware Update and Security open with an arrow, like the GPIO pin areas | a short page; the heading row shows how many values inside differ from the default, an input error opens its panel |
 | 41 | **`NTP_CACHE_MATCH_PORT` removed** (2026-10-26): the compile option to tell clients apart by their source port, and the stored port | nothing changes in operation (the option was 0); the cache API has no port parameter any more, 1 kB less RAM |
+| 42 | **PTP PPS loopback capture on the core of the PPS interrupt** (2026-10-26): the interrupt of the loopback capture channel is installed on the core that owns the PPS capture interrupt | the loopback no longer fails at boot with `install interrupt service for cap channel failed` (`ESP_ERR_INVALID_STATE`) and falls back to the software measurement when the Ethernet setup task ran on the other core |
 
 No memory leak was found in the review (section 4.13).
 
@@ -762,6 +763,17 @@ Request of 2026-10-26: with `NTP_CACHE_MATCH_PORT 1` the cache would have told i
 - `ntp_cache_find_or_create()`, `ntp_cache_update()` and their IPv6 variants have no `port` parameter any more; the three NTP paths (hardware IPv4 and IPv6, socket path) no longer pass it. The reply is still sent to the source port of the request.
 - Behaviour and time stamps: unchanged. Memory: the IPv6 records are 8 bytes smaller (the port and its padding before the 8-byte fields), DIRAM 1 kB less (172 082 B); the IPv4 records keep their size (the port was in padding).
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`.
+
+### 4.41 PTP PPS loopback capture on the core of the PPS interrupt (2026-10-26)
+
+Seen on the board on 2026-10-26: at boot `mcpwm_capture_channel_register_event_callbacks(402): install interrupt service for cap channel failed`, then `PTP PPS loopback: capture channel on GPIO 23 failed (ESP_ERR_INVALID_STATE), software measurement is used`.
+
+- Cause: the capture channels of MCPWM group 0 share one CPU interrupt (`ESP_INTR_FLAG_SHARED_PRIVATE`, bound by the name of the module). It belongs to the core that allocated it first: `setup_pps_input()` in `app_main` (core 0). `esp_intr_alloc` refuses a further channel of the group from the other core with `ESP_ERR_INVALID_STATE`. The loopback channel is created in `configure_hardware_timestamps()`, called by the Ethernet setup task, which has no core affinity: on core 1 the loopback failed and the PTP clock was measured by the software readings only (about 100 ns noise and a learned constant error instead of the 12.5 ns capture). So the result depended on the core the scheduler picked at boot.
+- `setup_ptp_pps_loopback()`: the callback registration (which installs the interrupt) and the enable of the loopback channel run in `ptp_loopback_capture_start()`. On the core of the PPS interrupt it is called directly, on the other core through `esp_ipc_call_blocking()` on the PPS core, as the IDF GPIO driver installs its ISR service. The channel itself, the PPS output of the EMAC and the error path (the channel is deleted, the interrupt is freed by IDF through IPC as well) are unchanged.
+- `s_pps_isr_core` (core of the PPS interrupt) is now always set by `setup_pps_input()`, not only with `PPS_ISR_LATENCY_AUTO`.
+- Not changed: the core and priority of both capture interrupts (the loopback interrupt was always meant to share the PPS interrupt on core 0), the PPS task, the timing values.
+- Stack: `ptp_loopback_capture_start()` runs on the IPC task (1024 bytes, `CONFIG_ESP_IPC_TASK_STACK_SIZE`); its call chain needs about 0.5 kB (frames 32 + 80 + 144 bytes plus the allocator).
+- Verified: build (-O2, no warning). Not yet on the board: after a restart the console should show `PTP PPS loopback on GPIO 23: the PTP clock is measured against the PPS in hardware` at every boot.
 
 ## 5. Security and open ports
 
