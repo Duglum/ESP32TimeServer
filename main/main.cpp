@@ -6820,6 +6820,104 @@ static void configure_gnss_dynamic_model()
                  after == 255 ? "nothing (no answer)" : gnss_dynamic_model_name(after));
 }
 
+// Time pulse configuration (CFG-TP, read at the setup) and RF status (MON-RF, polled by the GNSS time sync task) of a
+// u-blox receiver, for the log, the status page and the diagnostics (review G-03). s_gnss_info_mutex guards both.
+struct gnss_timepulse_info_t
+{
+    bool known = false;          // all values below were read
+    bool enabled = false;        // CFG-TP-TP1_ENA
+    bool frequency_mode = false; // CFG-TP-PULSE_DEF: period (us) or frequency (Hz) below
+    bool length_mode = true;     // CFG-TP-PULSE_LENGTH_DEF: length (us) or ratio (the ratio is not read)
+    uint32_t period = 0;         // without lock: us or Hz
+    uint32_t period_lock = 0;    // once locked
+    uint32_t length_us = 0;      // without lock (0 = no pulse without lock)
+    uint32_t length_lock_us = 0;
+    bool rising = true;          // CFG-TP-POL_TP1: rising edge at the top of the second
+    bool align_to_tow = true;
+    bool use_locked = true;
+    bool sync_gnss = true;
+    uint8_t time_grid = 0;       // 0 UTC, 1 GPS, 2 GLONASS, 3 BeiDou, 4 Galileo
+    int32_t cable_delay_ns = 0;
+    int32_t user_delay_ns = 0;
+};
+static gnss_timepulse_info_t s_gnss_timepulse;
+static gnss_ubx_rf_t s_gnss_rf{};
+static int64_t s_gnss_rf_us = 0; // esp_timer time of the last MON-RF answer (0 = none)
+static SemaphoreHandle_t s_gnss_info_mutex = nullptr;
+
+static const char *gnss_time_grid_name(uint8_t grid)
+{
+    static const char *const names[] = {"UTC", "GPS", "GLONASS", "BeiDou", "Galileo"};
+    return grid < sizeof(names) / sizeof(names[0]) ? names[grid] : "unknown";
+}
+
+// Reads the configuration of time pulse 1 (nothing is written) and logs it, with warnings for settings that do not
+// fit a PPS input on the rising edge at the top of every second
+static void read_gnss_time_pulse()
+{
+    static constexpr uint32_t timeout_ms = 1100;
+    gnss_timepulse_info_t tp{};
+    bool ok = true;
+    const auto get = [&ok](uint32_t key) -> uint32_t
+    {
+        uint32_t value = 0;
+        if (ok && !gnss_ubx_val_get(key, GNSS_UBX_LAYER_RAM, &value, timeout_ms))
+            ok = false;
+        return value;
+    };
+    tp.enabled = get(GNSS_UBX_CFG_TP_TP1_ENA) != 0;
+    tp.frequency_mode = get(GNSS_UBX_CFG_TP_PULSE_DEF) == 1;
+    tp.length_mode = get(GNSS_UBX_CFG_TP_PULSE_LENGTH_DEF) == 1;
+    tp.period = get(tp.frequency_mode ? GNSS_UBX_CFG_TP_FREQ_TP1 : GNSS_UBX_CFG_TP_PERIOD_TP1);
+    tp.period_lock = get(tp.frequency_mode ? GNSS_UBX_CFG_TP_FREQ_LOCK_TP1 : GNSS_UBX_CFG_TP_PERIOD_LOCK_TP1);
+    if (tp.length_mode)
+    {
+        tp.length_us = get(GNSS_UBX_CFG_TP_LEN_TP1);
+        tp.length_lock_us = get(GNSS_UBX_CFG_TP_LEN_LOCK_TP1);
+    }
+    tp.rising = get(GNSS_UBX_CFG_TP_POL_TP1) != 0;
+    tp.align_to_tow = get(GNSS_UBX_CFG_TP_ALIGN_TO_TOW_TP1) != 0;
+    tp.use_locked = get(GNSS_UBX_CFG_TP_USE_LOCKED_TP1) != 0;
+    tp.sync_gnss = get(GNSS_UBX_CFG_TP_SYNC_GNSS_TP1) != 0;
+    tp.time_grid = static_cast<uint8_t>(get(GNSS_UBX_CFG_TP_TIMEGRID_TP1));
+    tp.cable_delay_ns = static_cast<int16_t>(get(GNSS_UBX_CFG_TP_ANT_CABLEDELAY));
+    tp.user_delay_ns = static_cast<int32_t>(get(GNSS_UBX_CFG_TP_USER_DELAY_TP1));
+    tp.known = ok;
+
+    if (s_gnss_info_mutex != nullptr && xSemaphoreTake(s_gnss_info_mutex, portMAX_DELAY) == pdTRUE)
+    {
+        s_gnss_timepulse = tp;
+        xSemaphoreGive(s_gnss_info_mutex);
+    }
+    if (!ok)
+    {
+        ESP_LOGW(TAG, "GNSS time pulse: configuration could not be read (CFG-TP)");
+        return;
+    }
+    const char *unit = tp.frequency_mode ? "Hz" : "us";
+    if (tp.length_mode)
+        ESP_LOGI(TAG, "GNSS time pulse: %s, period %lu %s (without lock %lu %s), length %lu us (without lock %lu us), %s edge, %s grid, cable delay %ld ns, user delay %ld ns",
+                 tp.enabled ? "on" : "off", static_cast<unsigned long>(tp.period_lock), unit, static_cast<unsigned long>(tp.period), unit,
+                 static_cast<unsigned long>(tp.length_lock_us), static_cast<unsigned long>(tp.length_us), tp.rising ? "rising" : "falling",
+                 gnss_time_grid_name(tp.time_grid), static_cast<long>(tp.cable_delay_ns), static_cast<long>(tp.user_delay_ns));
+    else
+        ESP_LOGI(TAG, "GNSS time pulse: %s, period %lu %s (without lock %lu %s), length as a ratio, %s edge, %s grid, cable delay %ld ns, user delay %ld ns",
+                 tp.enabled ? "on" : "off", static_cast<unsigned long>(tp.period_lock), unit, static_cast<unsigned long>(tp.period), unit,
+                 tp.rising ? "rising" : "falling", gnss_time_grid_name(tp.time_grid), static_cast<long>(tp.cable_delay_ns),
+                 static_cast<long>(tp.user_delay_ns));
+    if (!tp.enabled)
+        ESP_LOGW(TAG, "GNSS time pulse 1 is off: there is no PPS");
+    if (!tp.rising)
+        ESP_LOGW(TAG, "GNSS time pulse: the falling edge marks the second, the PPS input takes the rising edge (the time is off by the pulse length)");
+    if (tp.frequency_mode ? tp.period_lock != 1 : tp.period_lock != 1000000)
+        ESP_LOGW(TAG, "GNSS time pulse: the period once locked is not 1 s");
+    if (!tp.align_to_tow || !tp.sync_gnss || !tp.use_locked)
+        ESP_LOGW(TAG, "GNSS time pulse: not aligned to the second of GNSS time (ALIGN_TO_TOW %d, SYNC_GNSS %d, USE_LOCKED %d)",
+                 tp.align_to_tow ? 1 : 0, tp.sync_gnss ? 1 : 0, tp.use_locked ? 1 : 0);
+    if (tp.enabled && (!tp.length_mode || tp.length_us != 0) && tp.period != 0)
+        ESP_LOGI(TAG, "GNSS time pulse: also without lock; while the GNSS time is not valid the PPS is not followed");
+}
+
 static void setup_gnss()
 {
     // Parsers of the GNSS UART (custom/gnss_uart): NMEA sentences and UBX frames; the received UBX messages of an
@@ -6862,7 +6960,10 @@ static void setup_gnss()
     s_use_nmea_fallback = s_gnss_ublox ? (s_gnss_required_assume_success || !uart1_output_set || !messages_set) : true;
 
     if (s_gnss_ublox && !s_use_nmea_fallback)
+    {
         configure_gnss_dynamic_model();
+        read_gnss_time_pulse();
+    }
     else if (s_gnss_ublox)
         ESP_LOGW(TAG, "GNSS dynamic model not set: the receiver does not answer UBX commands reliably (NMEA fallback)");
 
@@ -8529,6 +8630,7 @@ void setup_mutexes_and_semaphores(void)
 #if PTP_FREE_RUNNING
     s_ptp_diag_mutex = xSemaphoreCreateMutex();
 #endif
+    s_gnss_info_mutex = xSemaphoreCreateMutex();
 
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
     s_lcd_mutex = xSemaphoreCreateMutex();
@@ -9368,10 +9470,24 @@ static void gnss_time_sync_task(void *parameter)
         uint32_t refresh_start_ms = uptime_ms();
         uint32_t refresh_interval_ms = periodicGNSSRefreshEveryThisNumberOfMinutes * 60UL * 1000UL;
         int64_t invalid_started_us = 0;
+        uint32_t rf_poll_count = 0;
 
         while ((uptime_ms() - refresh_start_ms) < refresh_interval_ms)
         {
             bool gnss_valid = current_gnss_timing_is_valid();
+
+            // u-blox: antenna and jamming status every 10 s (MON-RF, review G-03)
+            if (s_gnss_ublox && !s_use_nmea_fallback && (rf_poll_count++ % 10) == 0)
+            {
+                gnss_ubx_rf_t rf{};
+                if (gnss_ubx_query_rf(&rf, 300) && s_gnss_info_mutex != nullptr &&
+                    xSemaphoreTake(s_gnss_info_mutex, pdMS_TO_TICKS(10)) == pdTRUE)
+                {
+                    s_gnss_rf = rf;
+                    s_gnss_rf_us = esp_timer_get_time();
+                    xSemaphoreGive(s_gnss_info_mutex);
+                }
+            }
 
             if (gnss_valid)
             {
@@ -10907,6 +11023,19 @@ void app_get_status(web_app_status_t &status)
             status.gnss_qerr_state = s_ptp_qerr_state.load(std::memory_order_relaxed);
             status.gnss_qerr_slope_milli = s_ptp_qerr_slope_milli.load(std::memory_order_relaxed);
         }
+        // Antenna and jamming (MON-RF), if answered within the last 30 s
+        if (s_gnss_info_mutex != nullptr && xSemaphoreTake(s_gnss_info_mutex, pdMS_TO_TICKS(10)) == pdTRUE)
+        {
+            if (s_gnss_rf_us != 0 && esp_timer_get_time() - s_gnss_rf_us <= 30000000LL)
+            {
+                status.gnss_rf_known = true;
+                status.gnss_antenna_status = s_gnss_rf.antenna_status;
+                status.gnss_antenna_power = s_gnss_rf.antenna_power;
+                status.gnss_jamming_state = s_gnss_rf.jamming_state;
+                status.gnss_agc_percent = static_cast<uint8_t>(std::min<uint32_t>(100, (s_gnss_rf.agc_count * 100u + 4095u) / 8191u));
+            }
+            xSemaphoreGive(s_gnss_info_mutex);
+        }
     }
     else
     {
@@ -11031,6 +11160,31 @@ void app_get_diag(web_diag_t &diag)
         diag.resolved_losses = ubx.resolved_losses;
         diag.first_valid_utc_s = ubx.first_valid_utc_us != 0 ? ubx.first_valid_utc_us / 1000000LL : -1;
         diag.valid_utc_losses = ubx.valid_utc_losses;
+        if (s_gnss_info_mutex != nullptr && xSemaphoreTake(s_gnss_info_mutex, pdMS_TO_TICKS(10)) == pdTRUE)
+        {
+            const gnss_timepulse_info_t &tp = s_gnss_timepulse;
+            diag.tp_known = tp.known;
+            diag.tp_enabled = tp.enabled;
+            diag.tp_frequency_mode = tp.frequency_mode;
+            diag.tp_length_mode = tp.length_mode;
+            diag.tp_period = tp.period;
+            diag.tp_period_lock = tp.period_lock;
+            diag.tp_length_us = tp.length_us;
+            diag.tp_length_lock_us = tp.length_lock_us;
+            diag.tp_rising = tp.rising;
+            diag.tp_aligned = tp.align_to_tow && tp.sync_gnss && tp.use_locked;
+            diag.tp_time_grid = tp.time_grid;
+            diag.tp_cable_delay_ns = tp.cable_delay_ns;
+            diag.tp_user_delay_ns = tp.user_delay_ns;
+            if (s_gnss_rf_us != 0 && esp_timer_get_time() - s_gnss_rf_us <= 30000000LL)
+            {
+                diag.rf_known = true;
+                diag.rf_noise_per_ms = s_gnss_rf.noise_per_ms;
+                diag.rf_agc_count = s_gnss_rf.agc_count;
+                diag.rf_jam_indicator = s_gnss_rf.jam_indicator;
+            }
+            xSemaphoreGive(s_gnss_info_mutex);
+        }
     }
     else
     {

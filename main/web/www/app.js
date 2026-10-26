@@ -844,6 +844,12 @@
           : st.gnss_qerr_state === 3 ? t('qErr correction off: no correlation (slope {slope})', { slope })
             : t('no qErr (TIM-TP missing or PTP loopback off)'));
     }
+    // U-Blox UBX protocol: antenna supervisor and jamming monitor (MON-RF)
+    if (st.ublox_receiver && st.gnss_rf_known) {
+      const antenna = [t('starting'), t('unknown'), t('OK'), t('short circuit'), t('open')][st.gnss_antenna_status] || t('unknown');
+      const jamming = [t('unknown'), t('none'), t('warning'), t('critical')][st.gnss_jamming_state] || t('unknown');
+      gnss.push(t('antenna {antenna}, jamming {jamming}, AGC {agc} % (MON-RF)', { antenna, jamming, agc: st.gnss_agc_percent }));
+    }
     fillList('st-gnss', gnss, '', false);
     const keys = st.ntp_auth_keys_in_use;
     $('st-auth').textContent = st.ntp_auth_available
@@ -985,6 +991,25 @@
         : t('fullyResolved first at uptime {t}, lost since: {n}', { t: duration(d.first_resolved_s), n: d.resolved_losses }));
       gnss.push(d.first_valid_utc_s < 0 ? t('validUTC: not yet')
         : t('validUTC first at uptime {t}, lost since: {n}', { t: duration(d.first_valid_utc_s), n: d.valid_utc_losses }));
+      // Time pulse 1 (CFG-TP, read at the setup)
+      if (!d.tp_known) {
+        gnss.push(t('time pulse: configuration not read'));
+      } else if (!d.tp_enabled) {
+        gnss.push(t('time pulse: off'));
+      } else {
+        const period = (v) => (d.tp_frequency_mode ? v + ' Hz' : num(v / 1e6, v % 1e6 === 0 ? 0 : 3) + ' s');
+        const length = (v) => (d.tp_length_mode ? num(v / 1000, v % 1000 === 0 ? 0 : 3) + ' ms' : t('ratio'));
+        const unlocked = d.tp_length_mode && d.tp_length_us === 0 ? t('no pulse without lock')
+          : t('without lock: period {p}, length {l}', { p: period(d.tp_period), l: length(d.tp_length_us) });
+        gnss.push(t('time pulse: period {p}, length {l}; {unlocked}',
+          { p: period(d.tp_period_lock), l: length(d.tp_length_lock_us), unlocked }));
+        gnss.push(t('time pulse: {edge} edge, {grid} grid{aligned}, cable delay {c} ns, user delay {u} ns',
+          { edge: d.tp_rising ? t('rising') : t('falling'), grid: ['UTC', 'GPS', 'GLONASS', 'BeiDou', 'Galileo'][d.tp_time_grid] || '?',
+            aligned: d.tp_aligned ? '' : ', ' + t('not aligned to the second'), c: d.tp_cable_delay_ns, u: d.tp_user_delay_ns }));
+      }
+      if (d.rf_known) {
+        gnss.push(t('RF: noise {n} per ms, AGC {agc}, CW jamming indicator {j}', { n: d.rf_noise_per_ms, agc: d.rf_agc_count, j: d.rf_jam_indicator }));
+      }
     } else {
       gnss.push(t('sentences {n}, checksum errors {e}, UART overflows {o}', { n: d.nmea_sentences, e: d.nmea_checksum_errors, o: d.uart_overflows }));
       const rmcLabels = d.rmc_phase_bins.map((n, i) => (i < 9 ? (i * 100) + '-' + (i * 100 + 99) + ' ms' : '≥ 900 ms'));

@@ -32,6 +32,23 @@ static constexpr uint32_t GNSS_UBX_CFG_NAVSPG_DYNMODEL = 0x20110021;    // E1
 static constexpr uint32_t GNSS_UBX_CFG_MSGOUT_NAV_PVT_UART1 = 0x20910007;     // U1, rate per navigation epoch
 static constexpr uint32_t GNSS_UBX_CFG_MSGOUT_NAV_TIMEUTC_UART1 = 0x2091005c; // U1
 static constexpr uint32_t GNSS_UBX_CFG_MSGOUT_TIM_TP_UART1 = 0x2091017e;      // U1
+// Time pulse 1 (CFG-TP), only read (review G-03)
+static constexpr uint32_t GNSS_UBX_CFG_TP_PULSE_DEF = 0x20050023;        // E1: 0 period, 1 frequency
+static constexpr uint32_t GNSS_UBX_CFG_TP_PULSE_LENGTH_DEF = 0x20050030; // E1: 0 ratio, 1 length
+static constexpr uint32_t GNSS_UBX_CFG_TP_ANT_CABLEDELAY = 0x30050001;   // I2, ns
+static constexpr uint32_t GNSS_UBX_CFG_TP_PERIOD_TP1 = 0x40050002;       // U4, us (without lock)
+static constexpr uint32_t GNSS_UBX_CFG_TP_PERIOD_LOCK_TP1 = 0x40050003;  // U4, us
+static constexpr uint32_t GNSS_UBX_CFG_TP_LEN_TP1 = 0x40050004;          // U4, us (without lock)
+static constexpr uint32_t GNSS_UBX_CFG_TP_LEN_LOCK_TP1 = 0x40050005;     // U4, us
+static constexpr uint32_t GNSS_UBX_CFG_TP_USER_DELAY_TP1 = 0x40050006;   // I4, ns
+static constexpr uint32_t GNSS_UBX_CFG_TP_TP1_ENA = 0x10050007;          // L
+static constexpr uint32_t GNSS_UBX_CFG_TP_SYNC_GNSS_TP1 = 0x10050008;    // L: synchronised to GNSS time when locked
+static constexpr uint32_t GNSS_UBX_CFG_TP_USE_LOCKED_TP1 = 0x10050009;   // L: the *_LOCK values once locked
+static constexpr uint32_t GNSS_UBX_CFG_TP_ALIGN_TO_TOW_TP1 = 0x1005000a; // L: pulse at the top of the second
+static constexpr uint32_t GNSS_UBX_CFG_TP_POL_TP1 = 0x1005000b;          // L: 1 rising edge at the top of the second
+static constexpr uint32_t GNSS_UBX_CFG_TP_TIMEGRID_TP1 = 0x2005000c;     // E1: 0 UTC, 1 GPS, 2 GLONASS, 3 BeiDou, 4 Galileo
+static constexpr uint32_t GNSS_UBX_CFG_TP_FREQ_TP1 = 0x40050024;         // U4, Hz (without lock)
+static constexpr uint32_t GNSS_UBX_CFG_TP_FREQ_LOCK_TP1 = 0x40050025;    // U4, Hz
 
 // Dynamic platform models (CFG-NAVSPG-DYNMODEL)
 static constexpr uint8_t GNSS_UBX_DYNMODEL_PORTABLE = 0;
@@ -87,6 +104,19 @@ struct gnss_ubx_version_t
 
 // MON-VER: needs FWVER and PROTVER in the extensions (as the SparkFun library did)
 bool gnss_ubx_query_version(gnss_ubx_version_t *version, uint32_t timeout_ms);
+
+// MON-RF, first RF block (L1): antenna supervisor and interference monitor (review G-03)
+struct gnss_ubx_rf_t
+{
+    uint8_t antenna_status; // 0 starting, 1 unknown, 2 OK, 3 short circuit, 4 open
+    uint8_t antenna_power;  // 0 off, 1 on, 2 unknown
+    uint8_t jamming_state;  // 0 unknown or disabled, 1 OK, 2 warning, 3 critical
+    uint8_t jam_indicator;  // CW jamming indicator, 0 (none) to 255 (strong)
+    uint16_t noise_per_ms;  // noise level as measured by the GNSS core
+    uint16_t agc_count;     // AGC monitor, 0 to 8191
+};
+
+bool gnss_ubx_query_rf(gnss_ubx_rf_t *rf, uint32_t timeout_ms);
 
 // ---- Periodic messages ----
 

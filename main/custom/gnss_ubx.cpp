@@ -39,6 +39,7 @@ namespace
     static constexpr uint8_t ID_CFG_VALSET = 0x8A;
     static constexpr uint8_t ID_CFG_VALGET = 0x8B;
     static constexpr uint8_t ID_MON_VER = 0x04;
+    static constexpr uint8_t ID_MON_RF = 0x38;
     static constexpr uint8_t ID_TIM_TP = 0x01;
     static constexpr uint8_t ID_SEC_UNIQID = 0x03;
 
@@ -470,6 +471,29 @@ bool gnss_ubx_val_get(uint32_t key, uint8_t layer, uint32_t *value, uint32_t tim
             *value = v;
             ok = true;
         }
+    }
+    xSemaphoreGive(s_command_mutex);
+    return ok;
+}
+
+bool gnss_ubx_query_rf(gnss_ubx_rf_t *rf, uint32_t timeout_ms)
+{
+    if (rf == nullptr || s_command_mutex == nullptr)
+        return false;
+    bool ok = false;
+    xSemaphoreTake(s_command_mutex, portMAX_DELAY);
+    // version, nBlocks, 2 reserved bytes, then 24 bytes per RF block
+    if (run_command(CLS_MON, ID_MON_RF, nullptr, 0, true, false, timeout_ms) && s_command.length >= 4 + 24 &&
+        s_command.payload[1] >= 1)
+    {
+        const uint8_t *b = s_command.payload + 4;
+        rf->jamming_state = b[1] & 0x03;
+        rf->antenna_status = b[2];
+        rf->antenna_power = b[3];
+        rf->noise_per_ms = get_u2(b + 12);
+        rf->agc_count = get_u2(b + 14);
+        rf->jam_indicator = b[16];
+        ok = true;
     }
     xSemaphoreGive(s_command_mutex);
     return ok;

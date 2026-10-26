@@ -38,6 +38,11 @@ struct web_app_status_t
     int16_t gnss_pvt_satellites;  // U-Blox UBX: satellites used in the latest NAV-PVT (-1 = none)
     uint8_t gnss_qerr_state;      // U-Blox UBX: qErr correction 0 no qErr, 1 learning the sign, 2 active, 3 no correlation
     int32_t gnss_qerr_slope_milli; // regression slope of the qErr correction x 1000 (states 2 and 3)
+    bool gnss_rf_known;           // U-Blox UBX: MON-RF answered within the last 30 s
+    uint8_t gnss_antenna_status;  // 0 starting, 1 unknown, 2 OK, 3 short circuit, 4 open
+    uint8_t gnss_antenna_power;   // 0 off, 1 on, 2 unknown
+    uint8_t gnss_jamming_state;   // 0 unknown, 1 OK, 2 warning, 3 critical
+    uint8_t gnss_agc_percent;     // AGC monitor, 0 to 100 %
     bool lcd_present;
     bool led_active;
     bool mqtt_connected;
@@ -128,6 +133,25 @@ struct web_diag_t
     uint32_t resolved_losses;
     int64_t first_valid_utc_s;    // the same for NAV-TIMEUTC validUTC
     uint32_t valid_utc_losses;
+    // Time pulse 1 of the U-Blox receiver (CFG-TP, read at the setup)
+    bool tp_known;
+    bool tp_enabled;
+    bool tp_frequency_mode;       // period values in Hz instead of us
+    bool tp_length_mode;          // pulse length in us (false: a ratio, not read)
+    uint32_t tp_period;           // without lock
+    uint32_t tp_period_lock;
+    uint32_t tp_length_us;        // without lock (0 = no pulse without lock)
+    uint32_t tp_length_lock_us;
+    bool tp_rising;               // rising edge at the top of the second
+    bool tp_aligned;              // ALIGN_TO_TOW, SYNC_GNSS and USE_LOCKED set
+    uint8_t tp_time_grid;         // 0 UTC, 1 GPS, 2 GLONASS, 3 BeiDou, 4 Galileo
+    int32_t tp_cable_delay_ns;
+    int32_t tp_user_delay_ns;
+    // RF of the U-Blox receiver (MON-RF, within the last 30 s)
+    bool rf_known;
+    uint16_t rf_noise_per_ms;
+    uint16_t rf_agc_count;        // 0 to 8191
+    uint8_t rf_jam_indicator;     // CW jamming indicator, 0 to 255
 };
 
 // Starts the web admin in its own task (TLS identity, password hash, HTTPS server). Call once the Ethernet
