@@ -70,6 +70,10 @@ static ntp_client_record_ipv6_t s_ipv6_records[MAX_TRACKED_CLIENTS_IPV6];
 static exchange_entry_t s_exchanges[EXCHANGE_MAP_SETS][EXCHANGE_MAP_WAYS];
 static SemaphoreHandle_t s_mutex;
 static _Atomic uint32_t s_rate_interval_us; // 1 s / rate limit, 0 = no rate limit
+// Interleaved lookups since the start (diagnostics, see ntp_cache_get_stats)
+static _Atomic uint32_t s_lookup_record_hits;
+static _Atomic uint32_t s_lookup_map_hits;
+static _Atomic uint32_t s_lookup_misses;
 
 static int64_t current_time_ms(void)
 {
@@ -165,6 +169,7 @@ static uint64_t interleaved_t3_locked(uint64_t record_t2, uint64_t record_t3, ui
     }
     if (record_t2 == origin_timestamp)
     {
+        atomic_fetch_add_explicit(&s_lookup_record_hits, 1, memory_order_relaxed);
         return record_t3; // the latest exchange of this address
     }
     const exchange_entry_t *set = s_exchanges[exchange_set(origin_timestamp)];
@@ -172,9 +177,11 @@ static uint64_t interleaved_t3_locked(uint64_t record_t2, uint64_t record_t3, ui
     {
         if (set[way].t2 == origin_timestamp && set[way].address_tag == address_tag)
         {
+            atomic_fetch_add_explicit(&s_lookup_map_hits, 1, memory_order_relaxed);
             return origin_timestamp + set[way].t3_offset;
         }
     }
+    atomic_fetch_add_explicit(&s_lookup_misses, 1, memory_order_relaxed);
     return 0;
 }
 
@@ -299,6 +306,17 @@ void ntp_cache_deinit(void)
         vSemaphoreDelete(s_mutex);
         s_mutex = NULL;
     }
+}
+
+void ntp_cache_get_stats(ntp_cache_stats_t *stats)
+{
+    if (stats == NULL)
+    {
+        return;
+    }
+    stats->record_hits = atomic_load_explicit(&s_lookup_record_hits, memory_order_relaxed);
+    stats->map_hits = atomic_load_explicit(&s_lookup_map_hits, memory_order_relaxed);
+    stats->misses = atomic_load_explicit(&s_lookup_misses, memory_order_relaxed);
 }
 
 void ntp_cache_set_rate_limit(uint32_t requests_per_second)

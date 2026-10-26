@@ -222,8 +222,9 @@ bool web_normalise_mac(const char *text, char (&out)[WEB_MAC_TEXT_SIZE]);
 // Hardware (eFuse) MAC of the chip; with one universal MAC address it is the Ethernet MAC
 bool web_hardware_mac(char (&out)[WEB_MAC_TEXT_SIZE]);
 // Size of the MQTT report buffer for a client limit (tools/json_message_calculator.xlsx: 1166 bytes plus 76 bytes per
-// client; 50 clients = 4966 = MQTT_REPORT_SIZE, 500 clients = 39166)
-constexpr size_t web_mqtt_report_size(size_t client_limit) { return 1166 + 76 * client_limit; }
+// client, plus 260 bytes for the time quality of the servo since 2026-10-26; 50 clients = 5226 = MQTT_REPORT_SIZE,
+// 500 clients = 39426)
+constexpr size_t web_mqtt_report_size(size_t client_limit) { return 1426 + 76 * client_limit; }
 
 // Constant time comparison of two byte ranges of the same length
 bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length);

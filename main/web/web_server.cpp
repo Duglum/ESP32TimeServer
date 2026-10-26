@@ -1371,6 +1371,91 @@ namespace
 
     // Without login: only the names, for the header of the login page (the FQDN is also in the certificate, which
     // every client gets before the login)
+    // Diagnostics panel (review 4.5): only while the panel is open; the stability takes some 10 ms
+    esp_err_t handle_diag(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, false, token) != gate_t::passed)
+            return ESP_OK;
+        web_diag_t *d = new (std::nothrow) web_diag_t{};
+        if (d == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        app_get_diag(*d);
+
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "servo", d->servo);
+        cJSON_AddBoolToObject(root, "servo_valid", d->servo_valid);
+        cJSON_AddBoolToObject(root, "loopback_active", d->loopback_active);
+        cJSON_AddBoolToObject(root, "from_loopback", d->from_loopback);
+        cJSON_AddNumberToObject(root, "offset_ns", d->offset_ns);
+        cJSON_AddNumberToObject(root, "noise_ns", d->noise_ns);
+        cJSON_AddNumberToObject(root, "free_ppb", d->free_ppb);
+        cJSON_AddNumberToObject(root, "cmd_ppb", d->cmd_ppb);
+        cJSON_AddNumberToObject(root, "sw_bias_ns", d->sw_bias_ns);
+        cJSON_AddNumberToObject(root, "sw_bias_samples", d->sw_bias_samples);
+        cJSON_AddNumberToObject(root, "relock_residual_ns", d->relock_residual_ns);
+        cJSON_AddNumberToObject(root, "loopback_used", d->loopback_used);
+        cJSON_AddNumberToObject(root, "loopback_missing", d->loopback_missing);
+        cJSON_AddNumberToObject(root, "loopback_rejected", d->loopback_rejected);
+        cJSON_AddNumberToObject(root, "outliers", d->outliers);
+        cJSON_AddNumberToObject(root, "steps", d->steps);
+        cJSON_AddNumberToObject(root, "command_failures", d->command_failures);
+        cJSON_AddNumberToObject(root, "rms_minute_ns", d->rms_minute_ns);
+        cJSON_AddNumberToObject(root, "rms_minute_samples", d->rms_minute_samples);
+        cJSON_AddNumberToObject(root, "rms_hour_ns", d->rms_hour_ns);
+        cJSON_AddNumberToObject(root, "rms_hour_samples", d->rms_hour_samples);
+        cJSON_AddNumberToObject(root, "rms_age_s", d->rms_age_s == UINT32_MAX ? -1.0 : static_cast<double>(d->rms_age_s));
+        cJSON_AddNumberToObject(root, "stability_samples", d->stability_samples);
+        cJSON_AddNumberToObject(root, "stability_source", d->stability_source);
+        cJSON *stability = cJSON_AddArrayToObject(root, "stability");
+        for (size_t i = 0; i < d->stability_count && i < WEB_DIAG_TAUS; ++i)
+        {
+            cJSON *row = cJSON_CreateObject();
+            cJSON_AddNumberToObject(row, "tau", d->tau_s[i]);
+            cJSON_AddNumberToObject(row, "adev", d->adev[i]);
+            cJSON_AddNumberToObject(row, "tdev_ns", d->tdev_ns[i]);
+            cJSON_AddItemToArray(stability, row);
+        }
+        cJSON_AddNumberToObject(root, "isr_latency_us", d->isr_latency_us);
+        cJSON_AddItemToObject(root, "isr_bins", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->isr_bins), WEB_DIAG_ISR_BINS));
+        cJSON_AddNumberToObject(root, "isr_total", d->isr_total);
+        cJSON_AddNumberToObject(root, "isr_max_ns", d->isr_max_ns);
+        cJSON_AddBoolToObject(root, "ublox", d->ublox);
+        cJSON_AddNumberToObject(root, "qerr_sign", d->qerr_sign);
+        cJSON_AddNumberToObject(root, "qerr_samples", d->qerr_samples);
+        cJSON_AddNumberToObject(root, "qerr_sd_ns", d->qerr_sd_ns);
+        cJSON_AddNumberToObject(root, "qerr_matched", d->qerr_matched);
+        cJSON_AddNumberToObject(root, "qerr_unmatched", d->qerr_unmatched);
+        cJSON_AddNumberToObject(root, "qerr_invalid", d->qerr_invalid);
+        cJSON_AddNumberToObject(root, "hw_replies", d->hw_replies);
+        cJSON_AddNumberToObject(root, "hw_interleaved", d->hw_interleaved);
+        cJSON_AddNumberToObject(root, "hw_no_tx_stamp", d->hw_no_tx_stamp);
+        cJSON_AddNumberToObject(root, "sw_replies", d->sw_replies);
+        cJSON_AddNumberToObject(root, "sw_interleaved", d->sw_interleaved);
+        cJSON_AddNumberToObject(root, "shed", d->shed);
+        cJSON_AddNumberToObject(root, "lookup_record_hits", d->lookup_record_hits);
+        cJSON_AddNumberToObject(root, "lookup_map_hits", d->lookup_map_hits);
+        cJSON_AddNumberToObject(root, "lookup_misses", d->lookup_misses);
+        cJSON_AddBoolToObject(root, "tx_delay", d->tx_delay);
+        cJSON_AddNumberToObject(root, "tx_delay_v4_ns", d->tx_delay_v4_ns);
+        cJSON_AddNumberToObject(root, "tx_delay_v4_samples", d->tx_delay_v4_samples);
+        cJSON_AddNumberToObject(root, "tx_delay_v6_ns", d->tx_delay_v6_ns);
+        cJSON_AddNumberToObject(root, "tx_delay_v6_samples", d->tx_delay_v6_samples);
+        cJSON_AddNumberToObject(root, "uart_overflows", d->uart_overflows);
+        cJSON_AddNumberToObject(root, "nmea_sentences", d->nmea_sentences);
+        cJSON_AddNumberToObject(root, "nmea_checksum_errors", d->nmea_checksum_errors);
+        cJSON_AddItemToObject(root, "rmc_phase_bins", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->rmc_phase_bins), WEB_DIAG_RMC_BINS));
+        cJSON_AddNumberToObject(root, "ubx_frames", d->ubx_frames);
+        cJSON_AddNumberToObject(root, "ubx_naks", d->ubx_naks);
+        cJSON_AddNumberToObject(root, "first_resolved_s", static_cast<double>(d->first_resolved_s));
+        cJSON_AddNumberToObject(root, "resolved_losses", d->resolved_losses);
+        cJSON_AddNumberToObject(root, "first_valid_utc_s", static_cast<double>(d->first_valid_utc_s));
+        cJSON_AddNumberToObject(root, "valid_utc_losses", d->valid_utc_losses);
+        cJSON_AddNumberToObject(root, "uptime_s", static_cast<double>(esp_timer_get_time() / 1000000LL));
+        delete d;
+        return send_json(req, "200 OK", root);
+    }
+
     esp_err_t handle_info(httpd_req_t *req)
     {
         char hostname[WEB_HOSTNAME_MAX_LEN + 1];
@@ -1449,6 +1534,7 @@ namespace
             {"/api/ote", HTTP_POST, handle_ote},
             {"/api/ote/once", HTTP_POST, handle_ote_once},
             {"/api/info", HTTP_GET, handle_info},
+            {"/api/diag", HTTP_GET, handle_diag},
         };
         for (const route_t &route : routes)
         {
@@ -1508,7 +1594,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 20; // 18 routes in use
+        config.max_uri_handlers = 20; // 19 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

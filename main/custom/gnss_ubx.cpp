@@ -111,6 +111,24 @@ namespace
     std::atomic<uint32_t> s_naks{0};
     std::atomic<int32_t> s_last_qerr_ps{0};
     std::atomic<uint8_t> s_tp_time_base{255};
+    // Diagnostics: esp_timer time when NAV-PVT fullyResolved / NAV-TIMEUTC validUTC were first set, and how often
+    // they were lost afterwards (reader task only writes)
+    std::atomic<int64_t> s_first_resolved_us{0};
+    std::atomic<uint32_t> s_resolved_losses{0};
+    bool s_resolved = false;
+    std::atomic<int64_t> s_first_valid_utc_us{0};
+    std::atomic<uint32_t> s_valid_utc_losses{0};
+    bool s_valid_utc = false;
+
+    void note_validity(bool now_valid, bool &was_valid, std::atomic<int64_t> &first_us, std::atomic<uint32_t> &losses,
+                       int64_t rx_us)
+    {
+        if (now_valid && first_us.load(std::memory_order_relaxed) == 0)
+            first_us.store(rx_us, std::memory_order_relaxed);
+        if (!now_valid && was_valid)
+            losses.fetch_add(1, std::memory_order_relaxed);
+        was_valid = now_valid;
+    }
 
     uint16_t get_u2(const uint8_t *p)
     {
@@ -325,6 +343,7 @@ namespace
         s_pvt_seq++;
         taskEXIT_CRITICAL(&s_lock);
         s_pvt_messages.fetch_add(1, std::memory_order_relaxed);
+        note_validity((pvt.valid & 0x04) != 0, s_resolved, s_first_resolved_us, s_resolved_losses, pvt.rx_us);
         note_leap_seconds(pvt);
         if (s_pvt_signal != nullptr)
             xSemaphoreGive(s_pvt_signal);
@@ -344,6 +363,7 @@ namespace
         s_timeutc = timeutc;
         taskEXIT_CRITICAL(&s_lock);
         s_timeutc_messages.fetch_add(1, std::memory_order_relaxed);
+        note_validity((timeutc.valid & 0x04) != 0, s_valid_utc, s_first_valid_utc_us, s_valid_utc_losses, timeutc.rx_us);
     }
 
     // TIM-TP describes the next time pulse (u-blox application note GPS.G6-X-11007): kept in a ring, the PPS task looks
@@ -676,6 +696,10 @@ void gnss_ubx_get_status(gnss_ubx_status_t *status)
     status->last_qerr_ps = s_last_qerr_ps.load(std::memory_order_relaxed);
     status->leap_seconds = s_leap_seconds.load(std::memory_order_relaxed);
     status->tp_time_base = s_tp_time_base.load(std::memory_order_relaxed);
+    status->first_resolved_us = s_first_resolved_us.load(std::memory_order_relaxed);
+    status->resolved_losses = s_resolved_losses.load(std::memory_order_relaxed);
+    status->first_valid_utc_us = s_first_valid_utc_us.load(std::memory_order_relaxed);
+    status->valid_utc_losses = s_valid_utc_losses.load(std::memory_order_relaxed);
 }
 
 #if DEBUG_ENABLED

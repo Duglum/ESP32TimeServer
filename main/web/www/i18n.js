@@ -83,6 +83,61 @@
     'waiting for the GNSS time': 'warte auf die GNSS-Zeit',
     'not set yet': 'noch nicht gesetzt',
     'U-Blox UBX protocol': 'U-Blox-UBX-Protokoll',
+    // ---- Diagnostics panel ----
+    'Diagnostics': 'Diagnose',
+    'Measured by the device itself, without a reference clock. Updated every 10 s while this panel is open.':
+      'Vom Gerät selbst gemessen, ohne Referenzuhr. Wird alle 10 s aktualisiert, solange dieser Abschnitt offen ist.',
+    'PTP clock': 'PTP-Uhr',
+    'Measurement': 'Messung',
+    'Offset': 'Versatz',
+    'Innovation RMS': 'Innovation (RMS)',
+    'Rate': 'Gang',
+    'Filter': 'Filter',
+    'PPS loopback': 'PPS-Loopback',
+    'PPS interrupt': 'PPS-Interrupt',
+    'Replies': 'Antworten',
+    'Interleaved lookup': 'Interleaved-Zuordnung',
+    'Basic mode TX delay': 'TX-Verzögerung Basic Mode',
+    'Load shedding': 'Lastabwurf',
+    'Data': 'Daten',
+    'Stability of the GNSS PPS': 'Stabilität des GNSS-PPS',
+    'not available (the PTP clock is set once per second)': 'nicht verfügbar (die PTP-Uhr wird einmal pro Sekunde gesetzt)',
+    'no estimate (waiting for the PPS)': 'keine Schätzung (warte auf den PPS)',
+    'PTP PPS loopback (hardware capture)': 'PTP-PPS-Loopback (Hardware-Capture)',
+    'software readings (loopback pulse missing)': 'Software-Ablesungen (Loopback-Puls fehlt)',
+    'software readings': 'Software-Ablesungen',
+    'PTP PPS loopback': 'PTP-PPS-Loopback',
+    '{offset} ns (raw PTP clock minus true time), noise {noise} ns': '{offset} ns (rohe PTP-Uhr minus wahre Zeit), Rauschen {noise} ns',
+    'no complete minute yet': 'noch keine vollständige Minute',
+    'no data in the last 2 minutes': 'keine Daten in den letzten 2 Minuten',
+    '{minute} ns in the last minute, {hour} ns in the last hour': '{minute} ns in der letzten Minute, {hour} ns in der letzten Stunde',
+    '{free} ppb free-running, command {cmd} ppb': '{free} ppb frei laufend, Stellwert {cmd} ppb',
+    'outliers {o}, steps {s}, command errors {e}': 'Ausreißer {o}, Sprünge {s}, Stellfehler {e}',
+    're-lock residual {r} ns': 'Rest nach Wiedereinrasten {r} ns',
+    'pulses used {used}, missing {missing}, implausible {rejected}; software minus loopback {bias} ns':
+      'Pulse genutzt {used}, fehlend {missing}, unplausibel {rejected}; Software minus Loopback {bias} ns',
+    'correction sign {sign}, samples {n}, standard deviation {sd} ns; TIM-TP matched {m}, missing {u}, invalid {i}':
+      'Korrekturvorzeichen {sign}, Stichproben {n}, σ {sd} ns; TIM-TP zugeordnet {m}, fehlend {u}, ungültig {i}',
+    'latency {lat} \u00b5s; excess over the central value: {bins}; max {max} \u00b5s':
+      'Latenz {lat} \u00b5s; Überschuss über dem Zentralwert: {bins}; max. {max} \u00b5s',
+    'latency {lat} \u00b5s': 'Latenz {lat} \u00b5s',
+    'Not enough data yet.': 'Noch nicht genug Daten.',
+    '{n} s of continuous data ({source}). ADEV: overlapping Allan deviation, TDEV: time deviation. The frequency commands of the servo are taken out, outliers are replaced by the prediction.':
+      '{n} s zusammenhängende Daten ({source}). ADEV: überlappende Allan-Abweichung, TDEV: Zeitabweichung. Die Frequenz-Stellwerte des Servos sind herausgerechnet, Ausreißer durch die Vorhersage ersetzt.',
+    'hardware path {n}: interleaved {i}, without hardware TX time stamp {x}':
+      'Hardware-Pfad {n}: interleaved {i}, ohne Hardware-TX-Zeitstempel {x}',
+    'socket path {n}: interleaved {i}': 'Socket-Pfad {n}: interleaved {i}',
+    'latest exchange of the address {r}, exchange map {m}, not found (basic mode) {x}':
+      'letzter Austausch der Adresse {r}, Austausch-Tabelle {m}, nicht gefunden (Basic Mode) {x}',
+    'IPv4 {v4} ns ({n4} values), IPv6 {v6} ns ({n6} values)': 'IPv4 {v4} ns ({n4} Werte), IPv6 {v6} ns ({n6} Werte)',
+    '{n} requests dropped since the start': '{n} Anfragen seit dem Start verworfen',
+    'UBX frames {f}, NAK {n}, UART overflows {o}': 'UBX-Frames {f}, NAK {n}, UART-Überläufe {o}',
+    'fullyResolved: not yet': 'fullyResolved: noch nicht',
+    'fullyResolved first at uptime {t}, lost since: {n}': 'fullyResolved erstmals bei Laufzeit {t}, seitdem verloren: {n}',
+    'validUTC: not yet': 'validUTC: noch nicht',
+    'validUTC first at uptime {t}, lost since: {n}': 'validUTC erstmals bei Laufzeit {t}, seitdem verloren: {n}',
+    'sentences {n}, checksum errors {e}, UART overflows {o}': 'Sätze {n}, Prüfsummenfehler {e}, UART-Überläufe {o}',
+    'RMC after the PPS: {bins}': 'RMC nach dem PPS: {bins}',
     'NMEA standard protocol': 'NMEA-Standardprotokoll',
     '{baud} baud': '{baud} Baud',
     '{model} mode': 'Modus {model}',
@@ -289,8 +344,8 @@
     '30 to 86400 s, e.g. 900 = 15 min.': '30 bis 86400 s, z. B. 900 = 15 min.',
     'Broker retains the latest report (retain flag)': 'Broker behält den letzten Bericht (Retain-Flag)',
     'Report contents': 'Inhalt der Berichte',
-    'Every report has the status, uptime, satellites and NTP request counts. Additionally:':
-      'Jeder Bericht enthält Status, Laufzeit, Satelliten und die Anzahl der NTP-Anfragen. Zusätzlich:',
+    'Every report has the status, uptime, satellites, the time quality of the PTP clock and NTP request counts. Additionally:':
+      'Jeder Bericht enthält Status, Laufzeit, Satelliten, die Zeitqualität der PTP-Uhr und die Anzahl der NTP-Anfragen. Zusätzlich:',
     'Client activity: requests per client address': 'Client-Aktivität: Anfragen pro Client-Adresse',
     'Memory usage: free heap, minimum free heap, largest free block': 'Speicherbelegung: freier Heap, minimaler freier Heap, größter freier Block',
     'Historical information: last time synchronised and disciplined, last GNSS and PPS faults':
@@ -300,8 +355,8 @@
     'Without a usable TF card (FAT32) only the last 4 reports are queued, in RAM, with at most 50 clients each: they are lost at a power failure or crash, and the oldest report is dropped first. Flash is not used, so it does not wear out. With a TF card the reports are queued on the card (an empty 16 GB card can hold more than 36,000 reports) with up to the client limit below; when the card is full, the oldest reports are dropped first.':
       'Ohne nutzbare TF-Karte (FAT32) werden nur die letzten 4 Berichte im RAM zwischengespeichert, mit jeweils höchstens 50 Clients: Sie gehen bei Stromausfall oder Absturz verloren, und der älteste Bericht wird zuerst verworfen. Der Flash wird nicht verwendet und nutzt sich daher nicht ab. Mit TF-Karte werden die Berichte auf der Karte zwischengespeichert (eine leere 16-GB-Karte fasst mehr als 36.000 Berichte), mit bis zu dem Client-Limit unten; ist die Karte voll, werden die ältesten Berichte zuerst verworfen.',
     'Client limit per report with the TF card': 'Client-Limit pro Bericht mit TF-Karte',
-    'Report buffer: {kb} kB of RAM (1166 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.':
-      'Berichtspuffer: {kb} kB RAM (1166 Bytes plus 76 Bytes pro Client). Ohne TF-Karte werden höchstens 50 Clients aufgeführt.',
+    'Report buffer: {kb} kB of RAM (1426 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.':
+      'Berichtspuffer: {kb} kB RAM (1426 Bytes plus 76 Bytes pro Client). Ohne TF-Karte werden höchstens 50 Clients aufgeführt.',
     '50 to 1000.': '50 bis 1000.',
     'Only used with client activity reporting.': 'Nur mit Berichten zur Client-Aktivität verwendet.',
     'TF card CMD, CLK, D0 to D3': 'TF-Karte CMD, CLK, D0 bis D3',
@@ -587,7 +642,8 @@
 
   // Texts that stay English on purpose (names, technical terms, examples): listed so that app.js does not report
   // them as missing
-  for (const text of ['ESP32 Time Server', 'UTC', 'Firmware', 'MQTT', 'MAC', 'IPv4', 'IPv6', 'RGB LED', 'Broker URI',
+  for (const text of ['ESP32 Time Server', 'UTC', 'Firmware', 'MQTT', 'MAC', 'IPv4', 'IPv6', 'RGB LED', 'Broker URI', 'NTP',
+    'qErr', 'ADEV', 'TDEV',
     'Topic', 'CMD (GPIO)', 'CLK (GPIO)', 'D0 (GPIO)', 'D1 (GPIO)', 'D2 (GPIO)', 'D3 (GPIO)', 'KY-016', 'WS2812',
     'CET-1CEST,M3.5.0,M10.5.0/3', '192.168.1.0/24 fd00::/8']) {
     if (!Object.prototype.hasOwnProperty.call(de, text)) de[text] = text;

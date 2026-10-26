@@ -95,6 +95,41 @@
       </div>
     </section>
 
+    <section class="card">
+      <details class="panel" id="diag-panel">
+        <summary><h2>Diagnostics</h2><span class="panel-changed" hidden></span></summary>
+        <p class="hint first">Measured by the device itself, without a reference clock. Updated every 10 s while this panel is open.</p>
+        <div class="status-groups diag-groups">
+          <dl class="status-grid">
+            <dt class="group">PTP clock</dt><dd class="group"></dd>
+            <dt>Measurement</dt><dd id="dg-measurement"></dd>
+            <dt>Offset</dt><dd id="dg-offset"></dd>
+            <dt>Innovation RMS</dt><dd id="dg-rms"></dd>
+            <dt>Rate</dt><dd id="dg-rate"></dd>
+            <dt>Filter</dt><dd id="dg-filter"></dd>
+            <dt>PPS loopback</dt><dd id="dg-loopback"></dd>
+            <dt>qErr</dt><dd id="dg-qerr"></dd>
+            <dt>PPS interrupt</dt><dd id="dg-isr"></dd>
+            <dt class="group">NTP</dt><dd class="group"></dd>
+            <dt>Replies</dt><dd><ul id="dg-replies" class="plain"></ul></dd>
+            <dt>Interleaved lookup</dt><dd id="dg-lookup"></dd>
+            <dt>Basic mode TX delay</dt><dd id="dg-txdelay"></dd>
+            <dt>Load shedding</dt><dd id="dg-shed"></dd>
+            <dt class="group">GNSS receiver</dt><dd class="group"></dd>
+            <dt>Data</dt><dd><ul id="dg-gnss" class="plain"></ul></dd>
+          </dl>
+          <div>
+            <h3 class="sub-heading diag-stability-heading">Stability of the GNSS PPS</h3>
+            <p class="hint first" id="dg-stability-note"></p>
+            <table class="diag-table">
+              <thead><tr><th>&tau;</th><th>ADEV</th><th>TDEV</th></tr></thead>
+              <tbody id="dg-stability"></tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </section>
+
     <form id="settings-form" novalidate>
       <p class="legend">Fields marked <span class="badge restart">restart</span> take effect after a restart: <em>Apply</em> restarts the device once with them. A <span class="def-sample">coloured border</span> marks a value that differs from the compiled default.</p>
 
@@ -322,7 +357,7 @@
             <label class="switch"><input type="checkbox" name="mqtt_retain"> Broker retains the latest report (retain flag)</label>
           </div>
           <h3 class="sub-heading">Report contents</h3>
-          <p class="hint first">Every report has the status, uptime, satellites and NTP request counts. Additionally:</p>
+          <p class="hint first">Every report has the status, uptime, satellites, the time quality of the PTP clock and NTP request counts. Additionally:</p>
           <div class="grid">
             <label class="switch span2"><input type="checkbox" name="mqtt_client_reporting"> Client activity: requests per client address</label>
             <label class="switch span2"><input type="checkbox" name="mqtt_memory_reporting"> Memory usage: free heap, minimum free heap, largest free block</label>

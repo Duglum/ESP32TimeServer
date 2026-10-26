@@ -144,6 +144,10 @@ struct gnss_ubx_status_t
     int32_t last_qerr_ps;
     int16_t leap_seconds;    // GPS - UTC from NAV-PVT (-32768 = not known)
     uint8_t tp_time_base;    // of the latest TIM-TP: 0 GNSS, 1 UTC, 255 = none
+    int64_t first_resolved_us;   // esp_timer time when NAV-PVT fullyResolved was first set (0 = not yet)
+    uint32_t resolved_losses;    // fullyResolved lost afterwards
+    int64_t first_valid_utc_us;  // the same for NAV-TIMEUTC validUTC
+    uint32_t valid_utc_losses;
 };
 
 void gnss_ubx_get_status(gnss_ubx_status_t *status);

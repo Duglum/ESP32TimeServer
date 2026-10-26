@@ -93,6 +93,7 @@
 #include "custom/gnss_ubx.h"
 #include "custom/ntp_auth.h"
 #include "custom/ntp_cache.h"
+#include "custom/time_diag.h"
 
 extern "C"
 {
@@ -1261,6 +1262,13 @@ static std::atomic<uint64_t> s_ntp_admission_window{0};
 static std::atomic<uint32_t> s_ntp_input_count{0};
 static std::atomic<bool> s_ntp_shed_during_period{false};
 static std::atomic<uint32_t> s_ntp_rate_limited_requests{0}; // dropped by the per-client rate limit since the start
+// Diagnostics of the NTP paths since the start (status page, review 4.5)
+static std::atomic<uint32_t> s_diag_ntp_shed{0};            // requests dropped by the load shedding
+static std::atomic<uint32_t> s_diag_ntp_hw_replies{0};      // replies of the hardware path
+static std::atomic<uint32_t> s_diag_ntp_hw_interleaved{0};  // of them interleaved
+static std::atomic<uint32_t> s_diag_ntp_hw_no_tx_stamp{0};  // of them without a hardware TX time stamp (review Z-07)
+static std::atomic<uint32_t> s_diag_ntp_sw_replies{0};      // replies of the socket path (not counting the device itself)
+static std::atomic<uint32_t> s_diag_ntp_sw_interleaved{0};
 static SemaphoreHandle_t s_hardware_ntp_transmit_mutex = nullptr;
 
 enum class ntp_transport_health_t : uint8_t
@@ -1303,6 +1311,7 @@ static bool admit_ntp_request()
         const uint32_t next_count = current_window == active_window ? count + 1 : 1;
         if (next_count > window_limit)
         {
+            s_diag_ntp_shed.fetch_add(1, std::memory_order_relaxed);
             s_ntp_shed_during_period.store(true, std::memory_order_relaxed);
             s_last_load_shedding_us.store(now_us, std::memory_order_relaxed);
             return false;
@@ -1352,7 +1361,7 @@ static constexpr size_t MQTT_MAX_REPORT_SIZE = web_mqtt_report_size(WEB_MQTT_TF_
 // please see the spreadsheet at tools/json_message_calculator.xlsx for calculation details
 // Note: increasing this limit will increase memory usage for MQTT report buffering and may impact system performance.
 static constexpr size_t MQTT_CLIENT_LIMIT = 50;
-static constexpr size_t MQTT_REPORT_SIZE = 4966;
+static constexpr size_t MQTT_REPORT_SIZE = 5226;
 
 static constexpr size_t MQTT_NTP_EVENT_QUEUE_DEPTH = 1024;
 static constexpr size_t MQTT_REPORT_QUEUE_DEPTH = 4;
@@ -3439,6 +3448,11 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         else
             ntp_cache_update(client_ipv4, cache_slot, stored_t2, hardware_transmit_time);
         update_tx_delay_estimate(ipv6, authenticated_request, raw_transmit_time, hardware_transmit_time);
+        s_diag_ntp_hw_replies.fetch_add(1, std::memory_order_relaxed);
+        if (interleaved_reply)
+            s_diag_ntp_hw_interleaved.fetch_add(1, std::memory_order_relaxed);
+        if (hardware_transmit_time == 0)
+            s_diag_ntp_hw_no_tx_stamp.fetch_add(1, std::memory_order_relaxed);
         const int64_t response_us = esp_timer_get_time();
         s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
         s_last_ntp_response_us.store(response_us, std::memory_order_relaxed);
@@ -5741,6 +5755,10 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
     }
     st.last_measurement_ns = measurement_ns;
     st.last_from_loopback = from_loopback;
+    // Diagnostics (time_diag): the phase series of the loopback keeps its source when a pulse is missing; that second
+    // gets the prediction, as for an outlier (a software measurement has some 100 ns noise)
+    const time_diag_source_t diag_source = loopback ? time_diag_source_t::loopback : time_diag_source_t::software;
+    const bool diag_use_prediction = loopback && !from_loopback;
 
     // ---- Filter ----
     const int64_t dt = edge_sec - st.last_edge_sec;
@@ -5763,6 +5781,7 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
         st.last_innovation_ns = 0.0;
         st.settle = 3;
         st.initialized = true;
+        time_diag_add_phase(edge_sec, measurement_ns, 0.0, st.free_ppb, diag_source, true);
         relock_continuity = st.relock_pending;
         if (!relock_continuity)
             ptp_relock_reset();
@@ -5775,6 +5794,9 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
                                (st.free_ppb + st.cmd_ppb) * (static_cast<double>(dt) - st.update_after_edge_s);
         const double innovation_ns = measurement_ns - pred_ns;
         st.last_innovation_ns = innovation_ns;
+        // Phase the frequency commands added since the previous edge (diagnostics, the same terms as the prediction)
+        const double commanded_ns = st.prev_cmd_ppb * st.update_after_edge_s +
+                                    st.cmd_ppb * (static_cast<double>(dt) - st.update_after_edge_s);
         const double gate_ns = std::max(from_loopback ? 1000.0 : 3000.0, 8.0 * st.noise_ns);
         // Shortly after a start the first loopback measurement replaces the software start value (whose delay
         // error is not known yet)
@@ -5791,12 +5813,14 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
             st.noise_ns = 0.0;
             st.settle = 0;
             relock_continuity = st.relock_residual_ns != 0.0;
+            time_diag_add_phase(edge_sec, measurement_ns, 0.0, st.free_ppb, diag_source, true);
         }
         else if (fabs(innovation_ns) > gate_ns && st.rejects < 4)
         {
             // Outlier: coast on the prediction (the published mapping stays valid, the command is unchanged)
             ++st.rejects;
             ++st.outliers;
+            time_diag_add_phase(edge_sec, pred_ns, commanded_ns, st.free_ppb, diag_source, false);
             st.offset_ns = pred_ns;
             st.last_edge_sec = edge_sec;
             st.prev_cmd_ppb = st.cmd_ppb;
@@ -5814,9 +5838,14 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
             st.free_ppb = static_cast<double>(s_clock_ppb.load(std::memory_order_relaxed));
             st.noise_ns = 0.0;
             relock_continuity = st.relock_residual_ns != 0.0;
+            time_diag_add_phase(edge_sec, measurement_ns, 0.0, st.free_ppb, diag_source, true);
         }
         else
         {
+            time_diag_add_phase(edge_sec, diag_use_prediction ? pred_ns : measurement_ns, commanded_ns, st.free_ppb,
+                                diag_source, false);
+            if (!diag_use_prediction)
+                time_diag_add_innovation(edge_sec, innovation_ns);
             st.offset_ns = pred_ns + ptp_filter_alpha * innovation_ns;
             st.free_ppb += ptp_filter_beta * innovation_ns / static_cast<double>(dt);
             st.noise_ns += (fabs(innovation_ns) - st.noise_ns) / 16.0;
@@ -5938,6 +5967,59 @@ static void ptp_servo_log_status()
                  sqrt(st.qerr_cov_qq));
 }
 #endif
+
+// Servo values for the diagnostics (status page, MQTT, review 4.5), copied by the PPS task after every update. A reader
+// holds the mutex for a copy only; if it does, the PPS task skips this copy instead of waiting.
+struct ptp_diag_snapshot_t
+{
+    bool valid = false;           // the filter has an estimate
+    bool from_loopback = false;   // the last measurement came from the loopback
+    float offset_ns = 0.0f;       // estimated offset of the raw PTP clock (raw - true)
+    float noise_ns = 0.0f;        // running mean of |innovation|
+    float free_ppb = 0.0f;        // rate of the PTP clock without frequency command
+    int32_t cmd_ppb = 0;
+    float sw_bias_ns = 0.0f;      // software - loopback measurement
+    uint32_t sw_bias_samples = 0;
+    float relock_residual_ns = 0.0f;
+    uint32_t loopback_used = 0;
+    uint32_t loopback_missing = 0;
+    uint32_t loopback_rejected = 0;
+    uint32_t outliers = 0;
+    uint32_t steps = 0;
+    uint32_t command_failures = 0;
+    int8_t qerr_sign = 0;
+    uint32_t qerr_samples = 0;
+    float qerr_sd_ns = 0.0f;      // standard deviation of qErr (exponential window)
+};
+static ptp_diag_snapshot_t s_ptp_diag;
+static SemaphoreHandle_t s_ptp_diag_mutex = nullptr;
+
+static void ptp_diag_publish()
+{
+    if (s_ptp_diag_mutex == nullptr || xSemaphoreTake(s_ptp_diag_mutex, 0) != pdTRUE)
+        return;
+    const ptp_servo_state_t &st = s_ptp_servo;
+    ptp_diag_snapshot_t &d = s_ptp_diag;
+    d.valid = st.initialized;
+    d.from_loopback = st.last_from_loopback;
+    d.offset_ns = static_cast<float>(st.offset_ns);
+    d.noise_ns = static_cast<float>(st.noise_ns);
+    d.free_ppb = static_cast<float>(st.free_ppb);
+    d.cmd_ppb = st.cmd_ppb;
+    d.sw_bias_ns = static_cast<float>(st.sw_bias_ns);
+    d.sw_bias_samples = st.sw_bias_samples;
+    d.relock_residual_ns = static_cast<float>(st.relock_residual_ns);
+    d.loopback_used = st.loopback_used;
+    d.loopback_missing = st.loopback_missing;
+    d.loopback_rejected = st.loopback_rejected;
+    d.outliers = st.outliers;
+    d.steps = st.steps;
+    d.command_failures = st.command_failures;
+    d.qerr_sign = st.qerr_sign;
+    d.qerr_samples = st.qerr_samples;
+    d.qerr_sd_ns = static_cast<float>(sqrt(std::max(0.0, st.qerr_cov_qq)));
+    xSemaphoreGive(s_ptp_diag_mutex);
+}
 #endif
 
 static void pps_discipline_task(void *parameter)
@@ -6128,7 +6210,8 @@ static void pps_discipline_task(void *parameter)
                 anchor_sum += anchor_sorted[i];
             const double d_central = anchor_sum / anchor_keep;
             const double excess_ns = d - d_central; // jitter of this edge relative to the central value
-            (void)excess_ns;                        // only read by the debug log
+            if (anchor_count == anchorWindow)
+                time_diag_add_isr_excess(excess_ns); // diagnostics: histogram of the excess
             // Edge = ISR time - excess - interrupt latency = tick time + central value of d - interrupt latency
             const double edge_sub_ns = tick_rest_ns + d_central;
             const int64_t edge_sub_whole_ns = llround(edge_sub_ns);
@@ -6223,6 +6306,7 @@ static void pps_discipline_task(void *parameter)
 #if PTP_FREE_RUNNING
                 // Measure the PTP clock against this edge and steer its frequency (the clock is not written)
                 ptp_servo_update(edge_sec, edge_local, ticks, est_valid);
+                ptp_diag_publish();
 #else
                 // Set the PTP clock from the PPS second (not from the system clock, whose slew is still pending)
                 set_hardware_clock_from_pps(edge_sec, edge_local);
@@ -6278,6 +6362,7 @@ static void pps_discipline_task(void *parameter)
                     {
                         ptp_servo_holdover();
                         xSemaphoreGive(s_time_mutex);
+                        ptp_diag_publish();
                     }
 #endif
                 }
@@ -7192,6 +7277,36 @@ static size_t json_append(char *payload, size_t payload_size, size_t len, const 
     return end >= payload_size ? payload_size - 1 : end;
 }
 
+#if PTP_FREE_RUNNING
+// Time quality of the servo (review 4.5), at most 260 characters (part of the base size of web_mqtt_report_size)
+static size_t mqtt_append_time_quality(char *payload, size_t payload_size, size_t len)
+{
+    ptp_diag_snapshot_t d{};
+    if (s_ptp_diag_mutex == nullptr || xSemaphoreTake(s_ptp_diag_mutex, pdMS_TO_TICKS(10)) != pdTRUE)
+        return len;
+    d = s_ptp_diag;
+    xSemaphoreGive(s_ptp_diag_mutex);
+    time_diag_innovation_t innovation{};
+    time_diag_innovation(&innovation);
+    const auto limited = [](float value) { return static_cast<double>(std::clamp(value, -999999.9f, 999999.9f)); };
+    char minute[16] = "null";
+    char hour[16] = "null";
+    if (innovation.age_s <= 120) // only while the PPS is there
+    {
+        snprintf(minute, sizeof(minute), "%.1f", limited(innovation.rms_minute_ns));
+        snprintf(hour, sizeof(hour), "%.1f", limited(innovation.rms_hour_ns));
+    }
+    return json_append(payload, payload_size, len,
+                       ",\"time_quality\":{\"measurement\":\"%s\",\"offset_ns\":%.1f,\"noise_ns\":%.1f,"
+                       "\"innovation_rms_ns\":{\"minute\":%s,\"hour\":%s},\"rate_ppb\":%.3f,\"command_ppb\":%ld,"
+                       "\"outliers\":%lu,\"steps\":%lu,\"loopback_missing\":%lu}",
+                       !d.valid ? "none" : (d.from_loopback ? "loopback" : "software"), limited(d.offset_ns),
+                       limited(d.noise_ns), minute, hour, limited(d.free_ppb), static_cast<long>(d.cmd_ppb),
+                       static_cast<unsigned long>(d.outliers), static_cast<unsigned long>(d.steps),
+                       static_cast<unsigned long>(d.loopback_missing));
+}
+#endif
+
 static void mqtt_build_report(char *payload, size_t payload_size)
 {
     uint32_t queued_messages = static_cast<uint32_t>(s_mqtt_queued_messages_count.load());
@@ -7273,6 +7388,9 @@ static void mqtt_build_report(char *payload, size_t payload_size)
     }
 
     len = json_append(payload, payload_size, len, "\"satellites\":%u", (unsigned int)s_satellite_count.load());
+#if PTP_FREE_RUNNING
+    len = mqtt_append_time_quality(payload, payload_size, len);
+#endif
 
     if (s_mqtt_memory_reporting)
     {
@@ -8351,6 +8469,10 @@ void setup_mutexes_and_semaphores(void)
     s_ote_mutex = xSemaphoreCreateMutex();
     s_sync_state_mutex = xSemaphoreCreateMutex();
     s_network_address_mutex = xSemaphoreCreateMutex();
+    time_diag_init();
+#if PTP_FREE_RUNNING
+    s_ptp_diag_mutex = xSemaphoreCreateMutex();
+#endif
 
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
     s_lcd_mutex = xSemaphoreCreateMutex();
@@ -9649,6 +9771,9 @@ static void ntp_server_task(void *parameter)
                     if (!internal_request)
                     {
                         s_last_ntp_response_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+                        s_diag_ntp_sw_replies.fetch_add(1, std::memory_order_relaxed);
+                        if (interleaved_reply)
+                            s_diag_ntp_sw_interleaved.fetch_add(1, std::memory_order_relaxed);
                     }
                     if (source_ipv4 != nullptr)
                     {
@@ -10750,6 +10875,117 @@ void app_get_status(web_app_status_t &status)
     status.ntp_auth_keys_in_use = ntp_auth_key_count();
     status.ntp_rate_limited_requests = s_ntp_rate_limited_requests.load(std::memory_order_relaxed);
     status.free_heap = esp_get_free_heap_size();
+}
+
+// Diagnostics panel of the web page (review 4.5); runs in the web server task (the stability takes some 10 ms)
+void app_get_diag(web_diag_t &diag)
+{
+    diag = web_diag_t{};
+#if PTP_FREE_RUNNING
+    diag.servo = true;
+    diag.loopback_active = s_ptp_loopback_active.load(std::memory_order_acquire);
+    if (s_ptp_diag_mutex != nullptr && xSemaphoreTake(s_ptp_diag_mutex, pdMS_TO_TICKS(10)) == pdTRUE)
+    {
+        const ptp_diag_snapshot_t d = s_ptp_diag;
+        xSemaphoreGive(s_ptp_diag_mutex);
+        diag.servo_valid = d.valid;
+        diag.from_loopback = d.from_loopback;
+        diag.offset_ns = d.offset_ns;
+        diag.noise_ns = d.noise_ns;
+        diag.free_ppb = d.free_ppb;
+        diag.cmd_ppb = d.cmd_ppb;
+        diag.sw_bias_ns = d.sw_bias_ns;
+        diag.sw_bias_samples = d.sw_bias_samples;
+        diag.relock_residual_ns = d.relock_residual_ns;
+        diag.loopback_used = d.loopback_used;
+        diag.loopback_missing = d.loopback_missing;
+        diag.loopback_rejected = d.loopback_rejected;
+        diag.outliers = d.outliers;
+        diag.steps = d.steps;
+        diag.command_failures = d.command_failures;
+        diag.qerr_sign = d.qerr_sign;
+        diag.qerr_samples = d.qerr_samples;
+        diag.qerr_sd_ns = d.qerr_sd_ns;
+    }
+#endif
+    time_diag_innovation_t innovation{};
+    time_diag_innovation(&innovation);
+    diag.rms_minute_ns = innovation.rms_minute_ns;
+    diag.rms_minute_samples = innovation.minute_samples;
+    diag.rms_hour_ns = innovation.rms_hour_ns;
+    diag.rms_hour_samples = innovation.hour_samples;
+    diag.rms_age_s = innovation.age_s;
+
+    static_assert(WEB_DIAG_TAUS == TIME_DIAG_TAUS && WEB_DIAG_ISR_BINS == TIME_DIAG_ISR_BINS, "diagnostics sizes");
+    time_diag_stability_t stability{};
+    if (time_diag_stability(&stability))
+    {
+        diag.stability_samples = stability.samples;
+        diag.stability_source = static_cast<uint8_t>(stability.source);
+        diag.stability_count = stability.count;
+        for (size_t i = 0; i < stability.count; ++i)
+        {
+            diag.tau_s[i] = stability.tau_s[i];
+            diag.adev[i] = stability.adev[i];
+            diag.tdev_ns[i] = stability.tdev_ns[i];
+        }
+    }
+
+    diag.isr_latency_us = static_cast<float>(s_pps_isr_latency_ns.load(std::memory_order_relaxed)) / 1000.0f;
+    time_diag_isr_t isr{};
+    time_diag_isr(&isr);
+    for (size_t i = 0; i < TIME_DIAG_ISR_BINS; ++i)
+        diag.isr_bins[i] = isr.bins[i];
+    diag.isr_total = isr.total;
+    diag.isr_max_ns = isr.max_ns;
+
+    diag.hw_replies = s_diag_ntp_hw_replies.load(std::memory_order_relaxed);
+    diag.hw_interleaved = s_diag_ntp_hw_interleaved.load(std::memory_order_relaxed);
+    diag.hw_no_tx_stamp = s_diag_ntp_hw_no_tx_stamp.load(std::memory_order_relaxed);
+    diag.sw_replies = s_diag_ntp_sw_replies.load(std::memory_order_relaxed);
+    diag.sw_interleaved = s_diag_ntp_sw_interleaved.load(std::memory_order_relaxed);
+    diag.shed = s_diag_ntp_shed.load(std::memory_order_relaxed);
+    ntp_cache_stats_t cache{};
+    ntp_cache_get_stats(&cache);
+    diag.lookup_record_hits = cache.record_hits;
+    diag.lookup_map_hits = cache.map_hits;
+    diag.lookup_misses = cache.misses;
+#if NTP_BASIC_T3_TX_COMPENSATION && NTP_HW_TX_TIMESTAMPS
+    diag.tx_delay = true;
+    diag.tx_delay_v4_ns = s_tx_delay[0][0].delay_ns.load(std::memory_order_relaxed);
+    diag.tx_delay_v4_samples = s_tx_delay[0][0].samples.load(std::memory_order_relaxed);
+    diag.tx_delay_v6_ns = s_tx_delay[1][0].delay_ns.load(std::memory_order_relaxed);
+    diag.tx_delay_v6_samples = s_tx_delay[1][0].samples.load(std::memory_order_relaxed);
+#endif
+
+    diag.uart_overflows = gnss_uart_overflows();
+    diag.first_resolved_s = -1;
+    diag.first_valid_utc_s = -1;
+    diag.ublox = s_gnss_ublox && !s_use_nmea_fallback;
+    if (diag.ublox)
+    {
+        gnss_ubx_status_t ubx{};
+        gnss_ubx_get_status(&ubx);
+        diag.ubx_frames = ubx.frames;
+        diag.ubx_naks = ubx.naks;
+        diag.qerr_matched = ubx.qerr_matched;
+        diag.qerr_unmatched = ubx.qerr_unmatched;
+        diag.qerr_invalid = ubx.qerr_invalid;
+        diag.first_resolved_s = ubx.first_resolved_us != 0 ? ubx.first_resolved_us / 1000000LL : -1;
+        diag.resolved_losses = ubx.resolved_losses;
+        diag.first_valid_utc_s = ubx.first_valid_utc_us != 0 ? ubx.first_valid_utc_us / 1000000LL : -1;
+        diag.valid_utc_losses = ubx.valid_utc_losses;
+    }
+    else
+    {
+        gnss_nmea_status_t nmea{};
+        gnss_nmea_get_status(&nmea);
+        diag.nmea_sentences = nmea.sentences;
+        diag.nmea_checksum_errors = nmea.checksum_errors;
+        static_assert(WEB_DIAG_RMC_BINS == GNSS_NMEA_RMC_PHASE_BINS, "RMC phase bins");
+        for (size_t i = 0; i < GNSS_NMEA_RMC_PHASE_BINS; ++i)
+            diag.rmc_phase_bins[i] = nmea.rmc_phase_bins[i];
+    }
 }
 
 void setup_ntp_server()

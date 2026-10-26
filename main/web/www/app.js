@@ -11,6 +11,7 @@
   let pendingDeadline = 0;
   let refreshTimer = 0;
   let countdownTimer = 0;
+  let diagTimer = 0; // Diagnostics panel: refreshed while it is open
   let formDirty = false; // the settings form was edited since it was filled
 
   // ---- Language: English unless German was chosen with the button (cookie "lang"; German texts in i18n.js) ----
@@ -181,6 +182,7 @@
     state = null;
     clearInterval(refreshTimer);
     clearInterval(countdownTimer);
+    clearInterval(diagTimer);
     $('app').hidden = true;
     $('logout').hidden = true;
     for (const id of ['banner-default-pw', 'banner-network', 'banner-oneshot', 'banner-unsaved']) $(id).hidden = true;
@@ -588,9 +590,9 @@
     // The client limit only matters with the client list; the report buffer is sized from it (RAM, no PSRAM)
     f.mqtt_tf_client_limit.disabled = !f.mqtt_client_reporting.checked;
     const limit = Number(f.mqtt_tf_client_limit.value);
-    const kilobytes = ((1166 + 76 * limit) / 1024).toFixed(1);
+    const kilobytes = ((1426 + 76 * limit) / 1024).toFixed(1);
     $('mqtt-buffer-note').textContent = f.mqtt_client_reporting.checked && Number.isInteger(limit) && limit >= 50 && limit <= 1000
-      ? t('Report buffer: {kb} kB of RAM (1166 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.', { kb: lang === 'de' ? kilobytes.replace('.', ',') : kilobytes })
+      ? t('Report buffer: {kb} kB of RAM (1426 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.', { kb: lang === 'de' ? kilobytes.replace('.', ',') : kilobytes })
       : (f.mqtt_client_reporting.checked ? t('50 to 1000.') : t('Only used with client activity reporting.'));
     const compiledOnly = f.ntp_key_clear.checked;
     document.querySelectorAll('#ntp-keys input, #ntp-keys button').forEach((el) => { el.disabled = compiledOnly; });
@@ -887,6 +889,124 @@
     updateDependent();
   }
 
+  // ---- Diagnostics (review 4.5): loaded only while the panel is open ----
+  // Number with a fixed count of decimals (decimal comma in German)
+  function num(value, digits) {
+    const text = Number(value).toFixed(digits);
+    return lang === 'de' ? text.replace('.', ',') : text;
+  }
+  function percent(part, total) {
+    if (part > 0 && part < total && 100 * part / total < 0.1) return '< ' + num(0.1, 1) + ' %';
+    return (total > 0 ? num(100 * part / total, part === 0 || part === total ? 0 : 1) : num(0, 0)) + ' %';
+  }
+  // Shows or hides a row of a status grid (the dd holding id and its dt)
+  function diagRow(id, visible) {
+    const dd = $(id).closest('dd');
+    dd.hidden = !visible;
+    dd.previousElementSibling.hidden = !visible;
+  }
+  // Non-empty bins of a histogram as "label share", e.g. "300-399 ms 97 %"
+  function bins(counts, labels) {
+    const total = counts.reduce((sum, n) => sum + n, 0);
+    return counts.map((n, i) => (n > 0 ? labels[i] + ' ' + percent(n, total) : '')).filter((s) => s).join(', ');
+  }
+
+  function renderDiag(d) {
+    // PTP clock and servo
+    $('dg-measurement').textContent = !d.servo ? t('not available (the PTP clock is set once per second)')
+      : !d.servo_valid ? t('no estimate (waiting for the PPS)')
+        : d.from_loopback ? t('PTP PPS loopback (hardware capture)')
+          : d.loopback_active ? t('software readings (loopback pulse missing)') : t('software readings');
+    const valid = d.servo && d.servo_valid;
+    diagRow('dg-offset', valid);
+    diagRow('dg-rate', valid);
+    diagRow('dg-filter', d.servo);
+    diagRow('dg-loopback', d.servo);
+    diagRow('dg-qerr', d.servo && d.ublox);
+    $('dg-offset').textContent = t('{offset} ns (raw PTP clock minus true time), noise {noise} ns',
+      { offset: num(d.offset_ns, 1), noise: num(d.noise_ns, 1) });
+    $('dg-rms').textContent = d.rms_age_s < 0 ? t('no complete minute yet')
+      : d.rms_age_s > 120 ? t('no data in the last 2 minutes')
+        : t('{minute} ns in the last minute, {hour} ns in the last hour', { minute: num(d.rms_minute_ns, 1), hour: num(d.rms_hour_ns, 1) });
+    $('dg-rate').textContent = t('{free} ppb free-running, command {cmd} ppb', { free: num(d.free_ppb, 1), cmd: d.cmd_ppb });
+    let filter = t('outliers {o}, steps {s}, command errors {e}', { o: d.outliers, s: d.steps, e: d.command_failures });
+    if (d.relock_residual_ns) filter += '; ' + t('re-lock residual {r} ns', { r: num(d.relock_residual_ns, 1) });
+    $('dg-filter').textContent = filter;
+    $('dg-loopback').textContent = !d.loopback_active ? t('off')
+      : t('pulses used {used}, missing {missing}, implausible {rejected}; software minus loopback {bias} ns',
+        { used: d.loopback_used, missing: d.loopback_missing, rejected: d.loopback_rejected, bias: num(d.sw_bias_ns, 1) });
+    $('dg-qerr').textContent = t('correction sign {sign}, samples {n}, standard deviation {sd} ns; TIM-TP matched {m}, missing {u}, invalid {i}',
+      { sign: d.qerr_sign > 0 ? '+1' : d.qerr_sign < 0 ? '-1' : t('none'), n: d.qerr_samples, sd: num(d.qerr_sd_ns, 1),
+        m: d.qerr_matched, u: d.qerr_unmatched, i: d.qerr_invalid });
+    const isrLabels = ['0.25', '0.5', '1', '2', '5'].map((v) => '≤ ' + (lang === 'de' ? v.replace('.', ',') : v) + ' µs');
+    isrLabels.push('> 5 µs');
+    $('dg-isr').textContent = d.isr_total > 0
+      ? t('latency {lat} µs; excess over the central value: {bins}; max {max} µs',
+        { lat: num(d.isr_latency_us, 2), bins: bins(d.isr_bins, isrLabels), max: num(d.isr_max_ns / 1000, 2) })
+      : t('latency {lat} µs', { lat: num(d.isr_latency_us, 2) });
+
+    // Stability of the GNSS PPS against the free-running PTP clock
+    const rows = d.stability || [];
+    $('dg-stability-note').textContent = rows.length === 0 ? t('Not enough data yet.')
+      : t('{n} s of continuous data ({source}). ADEV: overlapping Allan deviation, TDEV: time deviation. The frequency commands of the servo are taken out, outliers are replaced by the prediction.',
+        { n: d.stability_samples, source: d.stability_source === 1 ? t('PTP PPS loopback') : t('software readings') });
+    const body = $('dg-stability');
+    body.replaceChildren();
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      const adev = Number(row.adev).toExponential(2);
+      for (const text of [row.tau + ' s', lang === 'de' ? adev.replace('.', ',') : adev,
+        row.tdev_ns > 0 ? num(row.tdev_ns, row.tdev_ns < 10 ? 2 : 1) + ' ns' : '-']) {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+
+    // NTP paths since the start
+    fillList('dg-replies', [
+      t('hardware path {n}: interleaved {i}, without hardware TX time stamp {x}',
+        { n: d.hw_replies, i: percent(d.hw_interleaved, d.hw_replies), x: percent(d.hw_no_tx_stamp, d.hw_replies) }),
+      t('socket path {n}: interleaved {i}', { n: d.sw_replies, i: percent(d.sw_interleaved, d.sw_replies) })
+    ], '', false);
+    $('dg-lookup').textContent = t('latest exchange of the address {r}, exchange map {m}, not found (basic mode) {x}',
+      { r: d.lookup_record_hits, m: d.lookup_map_hits, x: d.lookup_misses });
+    diagRow('dg-txdelay', d.tx_delay);
+    $('dg-txdelay').textContent = t('IPv4 {v4} ns ({n4} values), IPv6 {v6} ns ({n6} values)',
+      { v4: d.tx_delay_v4_ns, n4: d.tx_delay_v4_samples, v6: d.tx_delay_v6_ns, n6: d.tx_delay_v6_samples });
+    $('dg-shed').textContent = t('{n} requests dropped since the start', { n: d.shed });
+
+    // GNSS receiver
+    const gnss = [];
+    if (d.ublox) {
+      gnss.push(t('UBX frames {f}, NAK {n}, UART overflows {o}', { f: d.ubx_frames, n: d.ubx_naks, o: d.uart_overflows }));
+      gnss.push(d.first_resolved_s < 0 ? t('fullyResolved: not yet')
+        : t('fullyResolved first at uptime {t}, lost since: {n}', { t: duration(d.first_resolved_s), n: d.resolved_losses }));
+      gnss.push(d.first_valid_utc_s < 0 ? t('validUTC: not yet')
+        : t('validUTC first at uptime {t}, lost since: {n}', { t: duration(d.first_valid_utc_s), n: d.valid_utc_losses }));
+    } else {
+      gnss.push(t('sentences {n}, checksum errors {e}, UART overflows {o}', { n: d.nmea_sentences, e: d.nmea_checksum_errors, o: d.uart_overflows }));
+      const rmcLabels = d.rmc_phase_bins.map((n, i) => (i < 9 ? (i * 100) + '-' + (i * 100 + 99) + ' ms' : '≥ 900 ms'));
+      const rmc = bins(d.rmc_phase_bins, rmcLabels);
+      if (rmc) gnss.push(t('RMC after the PPS: {bins}', { bins: rmc }));
+    }
+    fillList('dg-gnss', gnss, '', false);
+  }
+
+  async function loadDiag() {
+    if (!state || !$('diag-panel').open) return;
+    const r = await api('/api/diag');
+    if (r.status === 200) renderDiag(r.data);
+  }
+
+  $('diag-panel').addEventListener('toggle', () => {
+    clearInterval(diagTimer);
+    if (!$('diag-panel').open) return;
+    loadDiag();
+    diagTimer = setInterval(loadDiag, 10000);
+  });
+
   function renderPending(p) {
     const banner = $('banner-network');
     banner.hidden = !p || !p.active;
@@ -937,6 +1057,7 @@
   function stopAfterRestart(text) {
     clearInterval(refreshTimer);
     clearInterval(countdownTimer);
+    clearInterval(diagTimer);
     show(text, 'warn');
   }
 
@@ -1150,6 +1271,7 @@
 
     oteUploading = true;
     clearInterval(refreshTimer); // the server answers nothing else during the upload
+    clearInterval(diagTimer);
     setBusy(true);
     $('ote-file').disabled = true;
     const progress = $('ote-progress');

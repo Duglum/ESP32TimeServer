@@ -50,6 +50,86 @@ struct web_app_status_t
     uint32_t free_heap;
 };
 
+// Diagnostics of the time keeping (review 4.5) for the collapsed Diagnostics panel. Read on request only
+// (GET /api/diag); the stability (ADEV, TDEV) is computed in the web server task.
+static constexpr size_t WEB_DIAG_TAUS = 11;     // tau = 1, 2, 4, ..., 1024 s
+static constexpr size_t WEB_DIAG_ISR_BINS = 6;  // excess up to 0.25, 0.5, 1, 2, 5 us and above
+static constexpr size_t WEB_DIAG_RMC_BINS = 10; // 100 ms each after the PPS edge, the last one 900 ms and later
+
+struct web_diag_t
+{
+    // Servo of the free-running PTP clock
+    bool servo;                   // the firmware has it (PTP_FREE_RUNNING)
+    bool servo_valid;             // the filter has an estimate
+    bool loopback_active;         // PTP PPS loopback set up
+    bool from_loopback;           // the last measurement came from the loopback
+    float offset_ns;              // estimated offset of the raw PTP clock (raw - true)
+    float noise_ns;               // running mean of |innovation|
+    float free_ppb;               // rate of the PTP clock without frequency command
+    int32_t cmd_ppb;              // frequency command
+    float sw_bias_ns;             // software - loopback measurement
+    uint32_t sw_bias_samples;
+    float relock_residual_ns;     // mapping residual after a holdover
+    uint32_t loopback_used;
+    uint32_t loopback_missing;
+    uint32_t loopback_rejected;
+    uint32_t outliers;
+    uint32_t steps;
+    uint32_t command_failures;
+    // RMS of the innovations (normal filter updates)
+    float rms_minute_ns;
+    uint32_t rms_minute_samples;
+    float rms_hour_ns;
+    uint32_t rms_hour_samples;
+    uint32_t rms_age_s;           // seconds since the last complete minute (UINT32_MAX = none)
+    // Stability of the GNSS PPS against the free-running PTP clock
+    uint32_t stability_samples;   // seconds of continuous data
+    uint8_t stability_source;     // 1 loopback, 2 software readings
+    uint8_t stability_count;
+    uint16_t tau_s[WEB_DIAG_TAUS];
+    float adev[WEB_DIAG_TAUS];
+    float tdev_ns[WEB_DIAG_TAUS]; // 0 = not enough data
+    // PPS interrupt: latency in use and the excess of the interrupt time over its central value
+    float isr_latency_us;
+    uint32_t isr_bins[WEB_DIAG_ISR_BINS];
+    uint32_t isr_total;
+    uint32_t isr_max_ns;
+    // qErr (U-Blox UBX protocol)
+    bool ublox;
+    int8_t qerr_sign;
+    uint32_t qerr_samples;
+    float qerr_sd_ns;
+    uint32_t qerr_matched;
+    uint32_t qerr_unmatched;
+    uint32_t qerr_invalid;
+    // NTP paths since the start
+    uint32_t hw_replies;
+    uint32_t hw_interleaved;
+    uint32_t hw_no_tx_stamp;
+    uint32_t sw_replies;
+    uint32_t sw_interleaved;
+    uint32_t shed;
+    uint32_t lookup_record_hits;
+    uint32_t lookup_map_hits;
+    uint32_t lookup_misses;
+    bool tx_delay;                // the basic mode T3 is compensated by the learned TX delay
+    int32_t tx_delay_v4_ns;
+    uint32_t tx_delay_v4_samples;
+    int32_t tx_delay_v6_ns;
+    uint32_t tx_delay_v6_samples;
+    // GNSS receiver
+    uint32_t uart_overflows;
+    uint32_t nmea_sentences;
+    uint32_t nmea_checksum_errors;
+    uint32_t rmc_phase_bins[WEB_DIAG_RMC_BINS];
+    uint32_t ubx_frames;
+    uint32_t ubx_naks;
+    int64_t first_resolved_s;     // uptime when NAV-PVT fullyResolved was first set (-1 = not yet)
+    uint32_t resolved_losses;
+    int64_t first_valid_utc_s;    // the same for NAV-TIMEUTC validUTC
+    uint32_t valid_utc_losses;
+};
+
 // Starts the web admin in its own task (TLS identity, password hash, HTTPS server). Call once the Ethernet
 // interface exists. If the settings of this boot came from a one-shot set that changed the network, the 120 s
 // confirmation starts as well.
@@ -57,6 +137,7 @@ void web_admin_start();
 
 // Implemented in main.cpp
 void app_get_status(web_app_status_t &status);
+void app_get_diag(web_diag_t &diag);
 esp_netif_t *app_eth_netif();
 // The network configuration of the interface changed: refresh the address cache used by the NTP and LCD code
 void app_network_settings_changed();

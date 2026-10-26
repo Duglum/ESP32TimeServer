@@ -46,6 +46,17 @@ extern "C"
     bool ntp_cache_update_ipv6(const struct in6_addr *ip, uint16_t slot, uint64_t t2, uint64_t t3);
     void ntp_cache_purge_expired(void);
 
+    // Interleaved lookups since the start (requests with an origin timestamp): found in the record of the address
+    // (its latest exchange), found in the exchange map (an earlier exchange, e.g. while another host used the address),
+    // not found (the request is answered in basic mode). Diagnostics only.
+    typedef struct
+    {
+        uint32_t record_hits;
+        uint32_t map_hits;
+        uint32_t misses;
+    } ntp_cache_stats_t;
+    void ntp_cache_get_stats(ntp_cache_stats_t *stats);
+
 #ifdef __cplusplus
 }
 #endif

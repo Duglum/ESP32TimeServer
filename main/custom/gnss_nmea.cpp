@@ -65,6 +65,7 @@ namespace
     std::atomic<int32_t> s_rmc_phase_max_ms{-1};
     std::atomic<uint32_t> s_sentences{0};
     std::atomic<uint32_t> s_checksum_errors{0};
+    std::atomic<uint32_t> s_rmc_phase_bins[GNSS_NMEA_RMC_PHASE_BINS] = {}; // RMC receptions per 100 ms after the PPS
 
     gsv_group_t s_gsv_groups[GSV_GROUP_LIMIT]{}; // only used by the reader task
 
@@ -314,6 +315,7 @@ namespace
                 s_rmc_phase_min_ms.store(phase_ms, std::memory_order_relaxed);
             if (phase_ms > s_rmc_phase_max_ms.load(std::memory_order_relaxed))
                 s_rmc_phase_max_ms.store(phase_ms, std::memory_order_relaxed);
+            s_rmc_phase_bins[std::min<int32_t>(phase_ms / 100, GNSS_NMEA_RMC_PHASE_BINS - 1)].fetch_add(1, std::memory_order_relaxed);
         }
 
         nmea_rmc_time_t time{};
@@ -521,6 +523,8 @@ void gnss_nmea_get_status(gnss_nmea_status_t *status)
     status->rmc_after_pps_max_ms = s_rmc_phase_max_ms.load(std::memory_order_relaxed);
     status->sentences = s_sentences.load(std::memory_order_relaxed);
     status->checksum_errors = s_checksum_errors.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < GNSS_NMEA_RMC_PHASE_BINS; ++i)
+        status->rmc_phase_bins[i] = s_rmc_phase_bins[i].load(std::memory_order_relaxed);
     status->overflows = gnss_uart_overflows();
 }
 

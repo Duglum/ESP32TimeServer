@@ -126,7 +126,7 @@ static constexpr int MQTT_QOS = 0;
 //   be managed on a FIFO basis.
 //
 //   Note: Adjust MQTT_TF_Client_Limit based on the expected number of unique clients and available TF card storage.
-//         The report buffer is sized from it at the start (1166 bytes plus 76 bytes per client, RAM), so no other
+//         The report buffer is sized from it at the start (1426 bytes plus 76 bytes per client, RAM), so no other
 //         value has to be recalculated. Allowed: 50 to 1000 (also on the web admin page).
 static constexpr size_t MQTT_TF_Client_Limit = 500;
 

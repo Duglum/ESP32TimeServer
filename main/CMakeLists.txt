@@ -8,6 +8,7 @@ set(MAIN_SOURCES
         "custom/gnss_ubx.cpp"
         "custom/ntp_auth.cpp"
         "custom/ntp_cache.c"
+        "custom/time_diag.cpp"
         "web/web_auth.cpp"
         "web/web_net.cpp"
         "web/web_ote.cpp"

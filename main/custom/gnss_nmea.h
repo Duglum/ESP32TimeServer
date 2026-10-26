@@ -7,6 +7,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // Date and time (UTC) of an RMC sentence
@@ -58,6 +59,8 @@ void gnss_nmea_set_min_satellites(uint8_t count);
 // The latest RMC was valid and is at most max_age_us old
 bool gnss_nmea_time_valid(int64_t max_age_us);
 
+static constexpr size_t GNSS_NMEA_RMC_PHASE_BINS = 10; // 0-99 ms, 100-199 ms, ... 900 ms and later
+
 struct gnss_nmea_status_t
 {
     bool running;
@@ -70,6 +73,7 @@ struct gnss_nmea_status_t
     uint32_t sentences;
     uint32_t checksum_errors;
     uint32_t overflows;       // receive buffer or FIFO overflows (data lost)
+    uint32_t rmc_phase_bins[GNSS_NMEA_RMC_PHASE_BINS]; // RMC receptions since the start per 100 ms after the PPS edge
 };
 
 void gnss_nmea_get_status(gnss_nmea_status_t *status);

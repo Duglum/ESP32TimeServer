@@ -297,6 +297,20 @@ details.panel > summary + h3.sub-heading { margin-top: 0; }
 .panel-changed { color: var(--changed); font-size: .8rem; font-weight: 500; }
 .panel-changed.bad { color: var(--danger); }
 
+/* Diagnostics panel: status grid on the left, stability table on the right */
+.diag-groups { margin-top: .75rem; }
+@media (min-width: 1001px) {
+  .diag-groups { grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr); }
+}
+@media (max-width: 1000px) {
+  .diag-groups > div { margin-top: 1.25rem; }
+}
+h3.diag-stability-heading { margin-top: 0; }
+.diag-table { border-collapse: collapse; margin-top: .5rem; font-variant-numeric: tabular-nums; }
+.diag-table th, .diag-table td { padding: .15rem .9rem .15rem 0; text-align: right; }
+.diag-table th { color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); }
+.diag-table th:first-child, .diag-table td:first-child { text-align: left; }
+
 /* GPIO pins at the bottom of a panel, collapsed until the summary row is clicked */
 details.pins { margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: .25rem; }
 details.pins > summary { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem .6rem; padding: .5rem .25rem; margin: 0 -.25rem; border-radius: 8px; cursor: pointer; list-style: none; user-select: none; }
