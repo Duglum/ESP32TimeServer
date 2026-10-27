@@ -84,6 +84,7 @@ Contents
 | 55 | **qErr and MON-RF lines moved to the diagnostics** (2026-10-26, request) | the status shows only protocol, baud rate, model and satellites of the GNSS receiver |
 | 56 | **Board result: the M10 gives no qErr** (2026-10-26, documentation only) | the qErr correction is not available with this module; the code stays for a receiver that gives a valid qErr |
 | 57 | **Diagnostics of the basic mode TX delay** (2026-10-27, request) | minimum, maximum and the mean per 100 ms of the second show what delays the transmission; the time path is unchanged |
+| 58 | **Board result: the basic mode TX path is not slower** (2026-10-28, documentation only) | minimum 13.9 us as in 7.4; the higher mean comes from occasional delays without a relation to the PPS or the GNSS data; the open point is closed |
 
 No memory leak was found in the review (section 4.13).
 
@@ -929,7 +930,21 @@ Board test: the learned TX delay of the hardware path (software T3 to the hardwa
 - How to read it: a minimum near 14 us with a varying mean points to occasional delays (interrupts, flash access of the other core); if they belong to a phase of the second (e.g. the GNSS data after the PPS), that bin is higher. A chrony client locked to the server asks at almost the same phase each time, so one or two bins fill and others follow as the phase moves. A minimum above 20 us means the path itself is slower than in 7.4.
 - `/api/diag`: `tx_delay_min_ns` and `tx_delay_max_ns` (arrays IPv4, IPv6; 0 = no value), `tx_delay_phase` (per family `ns` and `n`, 10 bins). Diagnostics panel, row *Basic mode TX delay*: the former line, then per family with values `IPv4: minimum … us, maximum … us` and `IPv4 by phase of the second (mean, values): 400-499 ms 21.3 us (9840), …`. German texts in `i18n.js`.
 - Cost: 176 B of static RAM; the time path up to the transmission is unchanged. Stack: `update_tx_delay_estimate()` now has a frame of 48 B for the 64-bit division (it is called after the transmission, beside the deeper EMAC and SHA-256 call chains, so the measured stack of the hardware NTP task stays valid); the frames of the hardware NTP handler (400 B), `app_get_diag()` (400 B) and `handle_diag()` (256 B) are unchanged; `web_diag_t` is on the heap.
-- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, stack frames from the disassembly, the page against the mock (English, German, phone width; `I18N.missing` empty). Not on the board yet.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, stack frames from the disassembly, the page against the mock (English, German, phone width; `I18N.missing` empty). Board result in 4.57.
+
+### 4.57 Board result: the basic mode TX path is not slower (2026-10-28)
+
+Board run with the GT-U16 and the firmware of 4.56, chrony over IPv4 and IPv6 (`xleave`):
+
+| Family | Running mean | Minimum | Maximum | Mean per 100 ms phase of the second |
+|---|---|---|---|---|
+| IPv4 | 19.5 us (1359 values) | 13.9 us | 75.1 us | 17.0 to 21.1 us, about 85 values per bin, 544 in 400-499 ms (phase of the chrony client, 17.6 us) |
+| IPv6 | 21.2 us (827 values) | 15.2 us | 63.9 us | 19.4 to 24.0 us, about 80 values per bin |
+
+- The minimum is the same as the mean of the run in 7.4 (14.3 us, other board, firmware before the review series): the transmission itself is not slower. The higher mean comes from occasional delays of single replies (up to about 60 us more).
+- No phase of the second stands out: the differences between the bins are within the scatter of a running mean of about 32 values, and the bin 0-99 ms (GNSS data after the PPS) is not higher. The delays are not caused by the PPS, the PPS task or the GNSS UART. Likely causes, not separated: interrupts on core 1, cache misses in the flash code between the T3 reading and the transmit call (reply, checksums; the EMAC transmit functions are already in IRAM with `CONFIG_ETH_IRAM_OPTIMIZATION`), and a frame of another path on the link.
+- IPv6 is about 1.3 us slower than IPv4 (the longer frame and the checksum over the 128-bit addresses).
+- Consequence: only for clients without interleaved mode; their T3 carries the scatter of the delay around the compensated mean (a few us). Interleaved clients use the hardware TX time stamp and are not affected. The open point of the review is closed; no firmware change.
 
 ## 5. Security and open ports
 
@@ -1253,7 +1268,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - PPS without valid GNSS time (4.43): built, not on the board yet. Check with the M10 (time pulse also without fix, if it can be set) or by unplugging the GNSS antenna while the PPS keeps running: console `PPS not followed`, stratum 1 for the PPS holdover time, then as set; after the antenna is back `PPS followed again` and a ramp instead of a step in chrony. With the GT-U16 nothing changes in normal operation.
 - Diagnostics (4.42): built, formulas checked in Python, page tested against a mock, not on the board yet. Check: open the *Diagnostics* panel; with the loopback the measurement says *PTP PPS loopback*, the innovation RMS after a minute is a few ns, ADEV at 1 s some 1e-9 to 1e-8 and falling with tau, TDEV a few ns at 1 s; the hardware path shows nearly 100 % interleaved for the chrony client; MQTT reports carry `time_quality`. Measure the stacks of the PPS task, `ntp_server` and the MQTT task once with `CALCULATE_STACK_SIZES_ENABLED 1` (frames +16, +16 and +112 B).
 - Native NMEA reader (4.36): built and modelled, page tested against a mock, not tested on the board yet. Check with the GT-U16: synchronisation and stratum 1 as before (RMC only), then with GGA enabled (`$CFGMSG,0,0,1`): satellites and fix quality on the status page, the RMC phase (stable, some 10 to a few 100 ms), the minimum satellites setting (e.g. 30: stratum 16 after a few seconds; back to 0: stratum 1), and the stack of the `gnss_nmea` task with `CALCULATE_STACK_SIZES_ENABLED 1`.
-- Diagnostics of the basic mode TX delay (4.56): after an hour with chrony, read the row *Basic mode TX delay*: the minimum (about 14 us or above 20 us?), the maximum, and which 100 ms phases of the second have a higher mean; repeat after some hours, when the client has moved to other phases.
+- Diagnostics of the basic mode TX delay (4.56): tested on the board (4.57): minimum 13.9 us (IPv4) and 15.2 us (IPv6), maximum up to 75 us, no phase of the second stands out. Basic mode clients keep a scatter of a few us around the compensated mean.
 
 ## 13. Recommendations that are not in the code
 
