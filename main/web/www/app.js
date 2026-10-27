@@ -989,8 +989,20 @@
     $('dg-lookup').textContent = t('latest exchange of the address {r}, exchange map {m}, not found (basic mode) {x}',
       { r: d.lookup_record_hits, m: d.lookup_map_hits, x: d.lookup_misses });
     diagRow('dg-txdelay', d.tx_delay);
-    $('dg-txdelay').textContent = t('IPv4 {v4} ns ({n4} values), IPv6 {v6} ns ({n6} values)',
-      { v4: d.tx_delay_v4_ns, n4: d.tx_delay_v4_samples, v6: d.tx_delay_v6_ns, n6: d.tx_delay_v6_samples });
+    const txDelay = [t('IPv4 {v4} ns ({n4} values), IPv6 {v6} ns ({n6} values)',
+      { v4: d.tx_delay_v4_ns, n4: d.tx_delay_v4_samples, v6: d.tx_delay_v6_ns, n6: d.tx_delay_v6_samples })];
+    // Per family without authentication: range since the start and the running mean per 100 ms of the second of T3
+    const us = (ns) => num(ns / 1000, 1);
+    ['IPv4', 'IPv6'].forEach((family, i) => {
+      const phase = (d.tx_delay_phase || [])[i];
+      if (!phase || !d.tx_delay_max_ns || d.tx_delay_max_ns[i] <= 0) return;
+      txDelay.push(t('{family}: minimum {min} µs, maximum {max} µs',
+        { family: family, min: us(d.tx_delay_min_ns[i]), max: us(d.tx_delay_max_ns[i]) }));
+      const parts = phase.n.map((n, b) => (n > 0 ? (b * 100) + '-' + (b * 100 + 99) + ' ms ' + us(phase.ns[b]) + ' µs (' + n + ')' : ''))
+        .filter((s) => s);
+      txDelay.push(t('{family} by phase of the second (mean, values): {bins}', { family: family, bins: parts.join(', ') }));
+    });
+    fillList('dg-txdelay', txDelay, '', false);
     $('dg-shed').textContent = t('{n} requests dropped since the start', { n: d.shed });
 
     // GNSS receiver

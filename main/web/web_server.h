@@ -62,6 +62,7 @@ struct web_app_status_t
 static constexpr size_t WEB_DIAG_TAUS = 11;     // tau = 1, 2, 4, ..., 1024 s
 static constexpr size_t WEB_DIAG_ISR_BINS = 6;  // excess up to 0.25, 0.5, 1, 2, 5 us and above
 static constexpr size_t WEB_DIAG_RMC_BINS = 10; // 100 ms each within the first second after the PPS edge
+static constexpr size_t WEB_DIAG_TX_PHASE_BINS = 10; // 100 ms each of the second of the basic mode T3
 
 struct web_diag_t
 {
@@ -134,6 +135,12 @@ struct web_diag_t
     uint32_t tx_delay_v4_samples;
     int32_t tx_delay_v6_ns;
     uint32_t tx_delay_v6_samples;
+    // TX delay of unauthenticated replies, [0] IPv4, [1] IPv6: minimum and maximum since the start (0 = no value),
+    // running mean and count per 100 ms phase of the second of the software T3
+    int32_t tx_delay_min_ns[2];
+    int32_t tx_delay_max_ns[2];
+    int32_t tx_delay_phase_ns[2][WEB_DIAG_TX_PHASE_BINS];
+    uint32_t tx_delay_phase_samples[2][WEB_DIAG_TX_PHASE_BINS];
     // GNSS receiver
     uint32_t uart_overflows;
     uint32_t nmea_sentences;

@@ -1459,6 +1459,16 @@ namespace
         cJSON_AddNumberToObject(root, "tx_delay_v4_samples", d->tx_delay_v4_samples);
         cJSON_AddNumberToObject(root, "tx_delay_v6_ns", d->tx_delay_v6_ns);
         cJSON_AddNumberToObject(root, "tx_delay_v6_samples", d->tx_delay_v6_samples);
+        cJSON_AddItemToObject(root, "tx_delay_min_ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_min_ns), 2));
+        cJSON_AddItemToObject(root, "tx_delay_max_ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_max_ns), 2));
+        cJSON *phase = cJSON_AddArrayToObject(root, "tx_delay_phase");
+        for (size_t family = 0; family < 2; ++family)
+        {
+            cJSON *row = cJSON_CreateObject();
+            cJSON_AddItemToObject(row, "ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_phase_ns[family]), WEB_DIAG_TX_PHASE_BINS));
+            cJSON_AddItemToObject(row, "n", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_phase_samples[family]), WEB_DIAG_TX_PHASE_BINS));
+            cJSON_AddItemToArray(phase, row);
+        }
         cJSON_AddNumberToObject(root, "uart_overflows", d->uart_overflows);
         cJSON_AddNumberToObject(root, "nmea_sentences", d->nmea_sentences);
         cJSON_AddNumberToObject(root, "nmea_checksum_errors", d->nmea_checksum_errors);

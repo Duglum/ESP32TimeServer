@@ -3033,6 +3033,27 @@ static constexpr uint32_t tx_delay_min_samples = 16;  // compensate only after t
 static constexpr int32_t tx_delay_max_ns = 500000;    // plausible range of a sample
 static constexpr int32_t tx_delay_ewma_shift = 5;     // running mean with weight 1/32
 
+// Diagnostics of the TX delay of unauthenticated replies, per family: minimum and maximum since the start and a
+// running mean per 100 ms phase of the second of the software T3, to see what delays the transmission
+static constexpr size_t tx_delay_phase_bins = 10;
+static_assert(tx_delay_phase_bins == WEB_DIAG_TX_PHASE_BINS, "TX delay phase bins of the diagnostics");
+struct tx_delay_stats_t
+{
+    std::atomic<int32_t> min_ns{INT32_MAX};
+    std::atomic<int32_t> max_ns{0};
+    std::atomic<int32_t> phase_ns[tx_delay_phase_bins];
+    std::atomic<uint32_t> phase_samples[tx_delay_phase_bins];
+};
+static tx_delay_stats_t s_tx_delay_stats[2]; // [0 = IPv4, 1 = IPv6]
+
+// Plain mean for the first 32 samples, then the running mean with weight 1/32
+static int32_t tx_delay_running_mean(int32_t current, uint32_t n, int64_t sample_ns)
+{
+    if (n < (1u << tx_delay_ewma_shift))
+        return static_cast<int32_t>((static_cast<int64_t>(current) * n + sample_ns) / (n + 1));
+    return static_cast<int32_t>(current + ((sample_ns - current) >> tx_delay_ewma_shift));
+}
+
 // Adds the estimated transmit delay to a software T3 (NTP 32.32 format)
 static uint64_t compensate_basic_t3(uint64_t t3, bool ipv6, bool authenticated)
 {
@@ -3057,15 +3078,25 @@ __attribute__((noinline)) static void update_tx_delay_estimate(bool ipv6, bool a
 
     tx_delay_estimate_t &estimate = s_tx_delay[ipv6 ? 1 : 0][authenticated ? 1 : 0];
     const uint32_t n = estimate.samples.load(std::memory_order_relaxed);
-    const int32_t current = estimate.delay_ns.load(std::memory_order_relaxed);
-    int32_t updated;
-    if (n < (1u << tx_delay_ewma_shift))
-        updated = static_cast<int32_t>((static_cast<int64_t>(current) * n + sample_ns) / (n + 1)); // plain mean at the start
-    else
-        updated = static_cast<int32_t>(current + ((sample_ns - current) >> tx_delay_ewma_shift));
-    estimate.delay_ns.store(updated, std::memory_order_relaxed);
+    estimate.delay_ns.store(tx_delay_running_mean(estimate.delay_ns.load(std::memory_order_relaxed), n, sample_ns),
+                            std::memory_order_relaxed);
     if (n < UINT32_MAX)
         estimate.samples.store(n + 1, std::memory_order_relaxed);
+
+    if (authenticated)
+        return;
+    tx_delay_stats_t &stats = s_tx_delay_stats[ipv6 ? 1 : 0];
+    const int32_t sample = static_cast<int32_t>(sample_ns);
+    if (sample < stats.min_ns.load(std::memory_order_relaxed))
+        stats.min_ns.store(sample, std::memory_order_relaxed);
+    if (sample > stats.max_ns.load(std::memory_order_relaxed))
+        stats.max_ns.store(sample, std::memory_order_relaxed);
+    const size_t bin = static_cast<size_t>(((software_t3 & 0xFFFFFFFFULL) * tx_delay_phase_bins) >> 32); // fraction of the second
+    const uint32_t bin_n = stats.phase_samples[bin].load(std::memory_order_relaxed);
+    stats.phase_ns[bin].store(tx_delay_running_mean(stats.phase_ns[bin].load(std::memory_order_relaxed), bin_n, sample_ns),
+                              std::memory_order_relaxed);
+    if (bin_n < UINT32_MAX)
+        stats.phase_samples[bin].store(bin_n + 1, std::memory_order_relaxed);
 }
 #else
 static inline uint64_t compensate_basic_t3(uint64_t t3, bool, bool) { return t3; }
@@ -11364,6 +11395,18 @@ void app_get_diag(web_diag_t &diag)
     diag.tx_delay_v4_samples = s_tx_delay[0][0].samples.load(std::memory_order_relaxed);
     diag.tx_delay_v6_ns = s_tx_delay[1][0].delay_ns.load(std::memory_order_relaxed);
     diag.tx_delay_v6_samples = s_tx_delay[1][0].samples.load(std::memory_order_relaxed);
+    for (size_t family = 0; family < 2; ++family)
+    {
+        const tx_delay_stats_t &stats = s_tx_delay_stats[family];
+        const int32_t min_ns = stats.min_ns.load(std::memory_order_relaxed);
+        diag.tx_delay_min_ns[family] = min_ns == INT32_MAX ? 0 : min_ns;
+        diag.tx_delay_max_ns[family] = stats.max_ns.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < tx_delay_phase_bins; ++i)
+        {
+            diag.tx_delay_phase_ns[family][i] = stats.phase_ns[i].load(std::memory_order_relaxed);
+            diag.tx_delay_phase_samples[family][i] = stats.phase_samples[i].load(std::memory_order_relaxed);
+        }
+    }
 #endif
 
     diag.uart_overflows = gnss_uart_overflows();

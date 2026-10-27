@@ -83,6 +83,7 @@ Contents
 | 54 | **qErr flagged invalid by the receiver shown as such** (2026-10-26, board finding with the M10) | the status line no longer says *TIM-TP missing*; the diagnostics show the raw qErr and flags of the latest TIM-TP |
 | 55 | **qErr and MON-RF lines moved to the diagnostics** (2026-10-26, request) | the status shows only protocol, baud rate, model and satellites of the GNSS receiver |
 | 56 | **Board result: the M10 gives no qErr** (2026-10-26, documentation only) | the qErr correction is not available with this module; the code stays for a receiver that gives a valid qErr |
+| 57 | **Diagnostics of the basic mode TX delay** (2026-10-27, request) | minimum, maximum and the mean per 100 ms of the second show what delays the transmission; the time path is unchanged |
 
 No memory leak was found in the review (section 4.13).
 
@@ -920,6 +921,16 @@ Long run with the u-blox M10 (UBX protocol, firmware `54e308a`): the diagnostics
 - Consequence: with this module the PPS keeps its quantization sawtooth; the loopback measurement is not corrected (measured on the board: innovation RMS about 10 ns, ADEV(1 s) 1.3e-8, similar to the GT-U16). The correction with the learned sign (4.37) stays in the code and switches itself on with a receiver that gives a valid qErr; without one it costs nothing but the TIM-TP lookup.
 - No firmware change. The diagnostics row already shows this state (4.53, 4.54).
 
+### 4.56 Diagnostics of the basic mode TX delay (2026-10-27)
+
+Board test: the learned TX delay of the hardware path (software T3 to the hardware TX time stamp) was 19.4 us after 5126 values with the M10 and 25.0 us after 1737 values with the GT-U16, varying between about 15 and more than 20 us; the run of 2026-10-19 (other board, firmware before the review series, 7.4) settled at 14 to 15 us. The GNSS module is not the cause. All runs start at 23 to 25 us and fall over hours. The running mean alone cannot tell whether the transmission itself got slower or is delayed now and then.
+
+- `update_tx_delay_estimate()` (hardware NTP task, after the transmission) also keeps, for unauthenticated replies per family: the minimum and maximum sample since the start, and per 100 ms phase of the second of the software T3 a running mean (the same as the estimate: plain mean for 32 samples, then weight 1/32) with its count. The running mean of the estimate moved into `tx_delay_running_mean()`; the compensation is unchanged.
+- How to read it: a minimum near 14 us with a varying mean points to occasional delays (interrupts, flash access of the other core); if they belong to a phase of the second (e.g. the GNSS data after the PPS), that bin is higher. A chrony client locked to the server asks at almost the same phase each time, so one or two bins fill and others follow as the phase moves. A minimum above 20 us means the path itself is slower than in 7.4.
+- `/api/diag`: `tx_delay_min_ns` and `tx_delay_max_ns` (arrays IPv4, IPv6; 0 = no value), `tx_delay_phase` (per family `ns` and `n`, 10 bins). Diagnostics panel, row *Basic mode TX delay*: the former line, then per family with values `IPv4: minimum … us, maximum … us` and `IPv4 by phase of the second (mean, values): 400-499 ms 21.3 us (9840), …`. German texts in `i18n.js`.
+- Cost: 176 B of static RAM; the time path up to the transmission is unchanged. Stack: `update_tx_delay_estimate()` now has a frame of 48 B for the 64-bit division (it is called after the transmission, beside the deeper EMAC and SHA-256 call chains, so the measured stack of the hardware NTP task stays valid); the frames of the hardware NTP handler (400 B), `app_get_diag()` (400 B) and `handle_diag()` (256 B) are unchanged; `web_diag_t` is on the heap.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, stack frames from the disassembly, the page against the mock (English, German, phone width; `I18N.missing` empty). Not on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1242,6 +1253,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - PPS without valid GNSS time (4.43): built, not on the board yet. Check with the M10 (time pulse also without fix, if it can be set) or by unplugging the GNSS antenna while the PPS keeps running: console `PPS not followed`, stratum 1 for the PPS holdover time, then as set; after the antenna is back `PPS followed again` and a ramp instead of a step in chrony. With the GT-U16 nothing changes in normal operation.
 - Diagnostics (4.42): built, formulas checked in Python, page tested against a mock, not on the board yet. Check: open the *Diagnostics* panel; with the loopback the measurement says *PTP PPS loopback*, the innovation RMS after a minute is a few ns, ADEV at 1 s some 1e-9 to 1e-8 and falling with tau, TDEV a few ns at 1 s; the hardware path shows nearly 100 % interleaved for the chrony client; MQTT reports carry `time_quality`. Measure the stacks of the PPS task, `ntp_server` and the MQTT task once with `CALCULATE_STACK_SIZES_ENABLED 1` (frames +16, +16 and +112 B).
 - Native NMEA reader (4.36): built and modelled, page tested against a mock, not tested on the board yet. Check with the GT-U16: synchronisation and stratum 1 as before (RMC only), then with GGA enabled (`$CFGMSG,0,0,1`): satellites and fix quality on the status page, the RMC phase (stable, some 10 to a few 100 ms), the minimum satellites setting (e.g. 30: stratum 16 after a few seconds; back to 0: stratum 1), and the stack of the `gnss_nmea` task with `CALCULATE_STACK_SIZES_ENABLED 1`.
+- Diagnostics of the basic mode TX delay (4.56): after an hour with chrony, read the row *Basic mode TX delay*: the minimum (about 14 us or above 20 us?), the maximum, and which 100 ms phases of the second have a higher mean; repeat after some hours, when the client has moved to other phases.
 
 ## 13. Recommendations that are not in the code
 

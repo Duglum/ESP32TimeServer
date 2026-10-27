@@ -148,6 +148,8 @@
     'latest exchange of the address {r}, exchange map {m}, not found (basic mode) {x}':
       'letzter Austausch der Adresse {r}, Austausch-Tabelle {m}, nicht gefunden (Basic Mode) {x}',
     'IPv4 {v4} ns ({n4} values), IPv6 {v6} ns ({n6} values)': 'IPv4 {v4} ns ({n4} Werte), IPv6 {v6} ns ({n6} Werte)',
+    '{family}: minimum {min} µs, maximum {max} µs': '{family}: Minimum {min} µs, Maximum {max} µs',
+    '{family} by phase of the second (mean, values): {bins}': '{family} nach Phase der Sekunde (Mittel, Werte): {bins}',
     '{n} requests dropped since the start': '{n} Anfragen seit dem Start verworfen',
     'UBX frames {f}, NAK {n}, UART overflows {o}': 'UBX-Frames {f}, NAK {n}, UART-Überläufe {o}',
     'fullyResolved: not yet': 'fullyResolved: noch nicht',
