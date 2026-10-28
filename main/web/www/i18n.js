@@ -36,10 +36,7 @@
       'Die aktiven Einstellungen weichen von den gespeicherten ab. Sie gehen beim nächsten Neustart verloren, wenn Sie nicht <em>Einstellungen speichern</em> verwenden.',
     'Log in': 'Anmelden',
     'Password': 'Passwort',
-    'Factory default password: <code>password</code> (change it after the first login).':
-      'Standardpasswort ab Werk: <code>password</code> (nach der ersten Anmeldung ändern).',
-    'Check the certificate fingerprint in the browser against the one printed on the serial console at every start.':
-      'Vergleichen Sie den Fingerprint des Zertifikats im Browser mit dem, der bei jedem Start auf der seriellen Konsole ausgegeben wird.',
+    'Default: <code>password</code>': 'Standard: <code>password</code>',
     '<a href="https://github.com/Duglum/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer WebInterface fork</a> · based on <a href="https://github.com/roblatour/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer</a> by Rob Latour · MIT license':
       '<a href="https://github.com/Duglum/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer WebInterface Fork</a> · basierend auf <a href="https://github.com/roblatour/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer</a> von Rob Latour · MIT-Lizenz',
 

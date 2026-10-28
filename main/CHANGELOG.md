@@ -106,6 +106,7 @@ Contents
 | 77 | **Restart after a receive hang of the EMAC** (2026-10-28, board flood test) | an NTP flood of 15000 requests per second could stop the Ethernet receive path for good (no NTP, ping or web page until a power cycle); the device now detects it and restarts |
 | 78 | **Load shedding from 10000 requests per second** (2026-10-28) | the threshold of 14500 per second (chip revision above 1.3) was above what the board can receive; the board answers at most 10000 per second |
 | 79 | **No receive hang of the EMAC under a flood** (2026-10-28, board flood test) | the receive DMA keeps frames instead of flushing them when its descriptors are used up; 14 floods of 15000 requests per second without a hang (before: hung in the first or second) |
+| 80 | **Shorter hint on the login page** (2026-10-28) | `Default: password` under the button; the hint about the certificate fingerprint is removed |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1189,6 +1190,12 @@ Cause of the hang of 4.76. ESP-IDF sets the DMA to flush a received frame when n
 - Normal operation unchanged: chrony interleaved with hardware time stamps, about 20 frames per 5 s between the floods, heap and request buffers as before.
 - The watchdog of 4.76 stays: the bit avoids the hang that was seen, but nothing documents it for the P4.
 - Verified: build (-O2, no warning); board test 2026-10-28 with the release `df29742` (bit set at the start of the EMAC): 5 more floods of 15000 requests per second without a hang (see 4.77), chrony interleaved with hardware time stamps.
+
+### 4.79 Shorter hint on the login page (2026-10-28)
+
+On the request of the owner the login card has one short hint under the button: `Default: password` (German `Standard: password`) instead of *Factory default password: password (change it after the first login)*. The second hint (*compare the certificate fingerprint in the browser with the one on the serial console at every start*) is removed. The red banner after the login still asks to change the factory password; the fingerprint is still shown under *Status* and on the console.
+
+- Verified: page against the mock in English and German, `window.I18N.missing` empty.
 
 ## 5. Security and open ports
 
