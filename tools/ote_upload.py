@@ -39,6 +39,7 @@ CHUNK_SIZE = 16384
 CONNECT_TIMEOUT = 10.0  # per address
 SOCKET_TIMEOUT = 30.0  # the device waits at most 15 s for data, and needs a moment per flash sector
 TOTAL_TIMEOUT = 330.0  # the device ends an upload after 300 s
+EARLY_ANSWER_WAIT = 2.0  # the device checks the password (about 0.3 s) before it reads the image
 BASIC_USER = "admin"  # not checked by the device
 
 
@@ -116,6 +117,23 @@ def connect(host, port, family, context):
     raise SystemExit(f"error: no connection to {host} port {port}\n  " + "\n  ".join(errors))
 
 
+def early_answer(connection):
+    """The answer of the device before the image is sent (a refusal), or None when it waits for the image.
+
+    The device refuses (factory password, wrong password, lock-out, updates off) as soon as it has the headers and
+    closes the connection without reading the image. If image data is still unread then, its TCP stack resets the
+    connection and Windows drops the answer that has already arrived; so the image is only sent when no answer came.
+    """
+    connection.sock.settimeout(EARLY_ANSWER_WAIT)
+    try:
+        return connection.getresponse()
+    except TimeoutError:  # no answer: the device reads the image
+        return None
+    finally:
+        if connection.sock is not None:
+            connection.sock.settimeout(SOCKET_TIMEOUT)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Over The Ethernet update of the ESP32 Time Server (HTTPS).")
     parser.add_argument("-i", "--host", required=True,
@@ -171,20 +189,21 @@ def main():
 
     sent = 0
     send_error = None
-    while sent < len(image):
-        if time.monotonic() > deadline:
-            raise SystemExit("error: upload deadline exceeded; check the device before trying again")
-        try:
-            connection.send(image[sent:sent + CHUNK_SIZE])
-        except OSError as error:  # the device refused the image and closed the connection: read its answer
-            send_error = error
-            break
-        sent += min(CHUNK_SIZE, len(image) - sent)
-        print(f"\rSent {sent * 100 // len(image):3d} %", end="", flush=True)
-    print()
-
     try:
-        response = connection.getresponse()
+        response = early_answer(connection)
+        if response is None:
+            while sent < len(image):
+                if time.monotonic() > deadline:
+                    raise SystemExit("error: upload deadline exceeded; check the device before trying again")
+                try:
+                    connection.send(image[sent:sent + CHUNK_SIZE])
+                except OSError as error:  # the device refused the image and closed the connection: read its answer
+                    send_error = error
+                    break
+                sent += min(CHUNK_SIZE, len(image) - sent)
+                print(f"\rSent {sent * 100 // len(image):3d} %", end="", flush=True)
+            print()
+            response = connection.getresponse()
         body = response.read(4096)
     except (OSError, http.client.HTTPException) as error:
         raise SystemExit(f"error: no answer from the device ({send_error or error}); "
