@@ -102,6 +102,7 @@ Contents
 | 73 | **Warning for unusable compiled network settings** (2026-10-28, review 6.2) | a static IPv4 address in `ESP32TimeServerSettings.h` without a valid subnet mask or gateway is reported at the start instead of being taken silently |
 | 74 | **NTP request path without the global libatomic lock** (2026-10-28, review 6.2) | a hardware path request took the global lock of all 64-bit atomics 13 times (with the interrupts masked); now no time, the reply status is read without any lock |
 | 75 | **Cppcheck over all sources** (2026-10-28, review S-16) | no defect found; the 153 messages are false positives or style |
+| 76 | **Host tests and fuzzing of the GNSS parsers and the NTP client cache** (2026-10-28, review S-16) | `testing/host`: 842 checks and two libFuzzer targets with AddressSanitizer and UndefinedBehaviorSanitizer on the PC; no defect found |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1137,6 +1138,17 @@ Review S-16, rest of 4.62 (cppcheck was not installed then). Cppcheck 2.22 (`win
 - No code change. The analysis is not part of the build (it needs the compile commands of a build and the forced include); command for a later run: `cppcheck --project=<build>/compile_commands.json "--file-filter=*/main/*" --include=<header with MIN/MAX> --enable=warning,performance,portability,style -j 8`.
 - Together with 4.62 (GCC extra warnings, `-fanalyzer` on 9 files) and the host tests of 4.75 this closes S-16. Still not possible: `-fanalyzer` for `main.cpp`, clang-tidy (no checks in esp-clangd).
 
+### 4.75 Host tests and fuzzing of the GNSS parsers and the NTP client cache (2026-10-28)
+
+Review S-16. The code that reads outside input without the board: `testing/host` (see its README). The firmware sources are compiled unchanged with clang (LLVM-MinGW, `winget install MartinStorsjo.LLVM-MinGW.UCRT`) and AddressSanitizer / UndefinedBehaviorSanitizer; `testing/host/stubs` replaces the ESP-IDF and FreeRTOS calls (single-threaded, simulated `esp_timer` clock, the UART write goes to a simulated receiver that answers through the real byte parser). `run_tests.ps1` builds and runs everything, `-FuzzSeconds N` also the fuzz targets.
+
+- `gnss_test` (108 checks): the byte parser of the UART reader (`gnss_uart.cpp`, reached through `gnss_uart_hooks.cpp`) with noise, cut sentences, flushes in a sentence, UBX sync bytes in a sentence, overlong sentences and frames; NMEA checksum and RMC (status, mode, build year, field ranges, leap second, NMEA 2.2 without mode); GGA fix quality and minimum satellites; GSV groups (complete groups only, GN not added to the constellations, order, malformed counts); RMC phase after the PPS; NAV-PVT (fields, checksum and length errors, leap seconds 18 from a resolved epoch, invalid reasons); TIM-TP and `gnss_ubx_qerr_for_edge()` on the GPS and the UTC time base and with qErrInvalid; the commands MON-VER, SEC-UNIQID, MON-RF, CFG-VALGET and CFG-VALSET with answers, NAKs, a wrong key, time-outs and a stopped reader.
+- `ntp_cache_test` (734 checks): interleaved T3 from the record and from the exchange map (also after another host replaced the record and after the record expired), no T3 for another address or an unknown origin, implausible T3 kept out of the map, a stale slot in `ntp_cache_update()`, the per-client rate limit (burst of one second, 4 per second sustained over 10 s, own bucket for requests with the T2 cookie, no interleaved T3 for a limited request, off, no check for the device itself), the IPv6 limit per /64 and per address, the interleaved state per address with the limit per /64, more /64s than prefix records.
+- `gnss_fuzz`: a byte stream from the receiver with flushes, then the answer of the receiver to each command; seed inputs from `gnss_test --seeds`. `ntp_cache_fuzz`: sequences of requests, stored exchanges, time steps, expiries and rate limit changes; every interleaved T3 is checked against a model of the stored exchanges. To check the check, an exchange map lookup without the address (planted in a copy) was found within two minutes.
+- Result: all checks pass; 5 minutes of fuzzing each (3.7 million GNSS inputs, coverage 406 edges with the seeds, and 5 million cache inputs) found no defect. clang reported one unused variable: `s_pvt_seq` in `gnss_ubx.cpp` was counted but never read (since 4.37); removed.
+- Not covered: the parsers inside `main.cpp` (raw Ethernet frames, NTP requests, the time conversion: they need the EMAC and the PTP clock and are tested on the board), the web server and its JSON input, `ntp_auth.cpp` (its request check accepts only 48 or 48 + 24 bytes; a host test would need a SHA-256 in the stubs).
+- Firmware: only the removed variable; build (-O2, no warning).
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1419,6 +1431,8 @@ Only with `DEBUG_ENABLED`:
 
 | Scripted uploads with the web admin password, no OTE password / mDNS host name (2026-10-23, 4.27) | `idf.py build` with ESP-IDF 6.1 (profile v3.1, no warnings in the project code); `tools/ote_upload.py` against a local HTTPS mock of `/api/ote` (IPv4 and IPv6 literal, a name with two addresses of which the first does not answer, wrong password, `.local` / single-label / unknown names, `-4`, a UTF-8 password with space and colon; 12 checks) and its image parsing against the built image; the page (card, Apply body, German texts with `I18N.missing` empty) against a local mock of the JSON API | **not yet** |
 
+| GNSS parsers and NTP client cache (2026-10-28, 4.75) | `testing/host`: 842 checks with AddressSanitizer and UndefinedBehaviorSanitizer, libFuzzer 5 min per target (no finding) | the parsers run on the board since 4.36 / 4.37, the cache since the earlier work |
+
 | Web admin page (2026-10-21) | `idf.py build` with ESP-IDF 6.1, -O2 and the IDF warning flags, `sdkconfig` regenerated from `sdkconfig.defaults` (no new warnings in the project code); the page (login, status, apply with network confirmation, dark / light mode) in a browser against a local mock of the JSON API | **not yet** (nothing of 4.23 has run on the board yet) |
 
 The transmit delay compensation of basic mode responses was measured on the board (7.4) but not checked with a basic mode client (chrony uses the interleaved mode).
@@ -1501,6 +1515,7 @@ Current files of the changes:
 | `CMakeLists.txt` (root) | -O2 warning handling for third-party components |
 | `sdkconfig.defaults`, `sdkconfig` | `CONFIG_COMPILER_OPTIMIZATION_PERF=y` |
 | `main/CHANGELOG.md` | this file |
+| `testing/host/` | host tests and fuzz targets of the GNSS parsers and the NTP client cache, stubs, `run_tests.ps1` (4.75) |
 | `main/web/web_settings.*` | web settings: defaults, NVS (saved, one-shot), validation (4.23) |
 | `main/web/web_auth.*` | password hash, sessions, CSRF, login throttling, allow-list |
 | `main/web/web_tls.*` | TLS key and self-signed certificate |

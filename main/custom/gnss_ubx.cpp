@@ -95,7 +95,6 @@ namespace
     command_t s_command{};
 
     gnss_ubx_pvt_t s_pvt{};
-    uint32_t s_pvt_seq = 0;
     timeutc_t s_timeutc{};
     tp_t s_tp[TP_RING_SIZE]{};
     uint32_t s_tp_head = 0;
@@ -343,7 +342,6 @@ namespace
 
         taskENTER_CRITICAL(&s_lock);
         s_pvt = pvt;
-        s_pvt_seq++;
         taskEXIT_CRITICAL(&s_lock);
         s_pvt_messages.fetch_add(1, std::memory_order_relaxed);
         note_validity((pvt.valid & 0x04) != 0, s_resolved, s_first_resolved_us, s_resolved_losses, pvt.rx_us);
