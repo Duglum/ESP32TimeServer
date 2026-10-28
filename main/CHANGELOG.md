@@ -87,6 +87,7 @@ Contents
 | 58 | **Board result: the basic mode TX path is not slower** (2026-10-28, documentation only) | minimum 13.9 us as in 7.4; the higher mean comes from occasional delays without a relation to the PPS or the GNSS data; the open point is closed |
 | 59 | **Root dispersion growth in the holdover 15 ppm by default** (2026-10-28, review Z-22) | the advertised uncertainty after a PPS loss grows by 4.5 ms in 5 minutes instead of 30 ms, so clients keep the server longer; saved settings keep their value |
 | 60 | **Stack reserve of the tasks and the heap in the diagnostics** (2026-10-28, review E-14) | the release build shows how close each task came to its stack size and how low the internal heap went since the start, without a debug build |
+| 61 | **MQTT reports after 49.7 days of uptime** (2026-10-28, code review) | the report schedule no longer sends reports back to back when the FreeRTOS tick count wraps |
 
 No memory leak was found in the review (section 4.13).
 
@@ -968,6 +969,15 @@ Review E-14. The stack sizes were set from measurements with `CALCULATE_STACK_SI
 - `/api/diag`: `tasks` (`name`, `size`, `free`), `heap_free`, `heap_min_free`, `heap_largest_block`. Diagnostics panel, group *Device*: rows *Heap* (`free … kB, lowest since the start … kB, largest block … kB`) and *Task stacks* (`<name>: at least <free> of <size> B free (<share>)`, the tightest first, in red below 10 %). German texts in `i18n.js`.
 - Cost: 88 B of static RAM; `note_task_stack()` has a frame of 32 B at the loop level of each task (far from the deepest call chains); the frames of the tasks (PPS 800 B, GNSS sync 192 B, `ntp_server` 560 B, hardware NTP handler 400 B) and of `app_get_diag()` (400 B) and `handle_diag()` (256 B) are unchanged; the time path is unchanged (the hardware NTP task reaches its checkpoint after the reply).
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, stack frames from the disassembly, the page against the mock (English, German, phone width; `I18N.missing` empty). Not on the board yet.
+
+### 4.60 MQTT reports after 49.7 days of uptime (2026-10-28)
+
+Found in the code review of the changes since the review (4.62). The FreeRTOS tick count is 32 bits at 1 kHz and wraps after 49.7 days.
+
+- `mqtt_service_task()` compared `xTaskGetTickCount() >= next_report`. Shortly before the wrap `next_report` (tick + period) wraps to a small value while the tick count is still large: the condition held at once, and after each report `next_report += period` stayed small, so the task sent a report every pass (about every `MQTT_QUEUED_PUBLISH_DELAY_MS`) until the tick count itself wrapped, up to one report period long. Now the signed difference `(int32_t)(tick - next_report) >= 0`, correct across the wrap.
+- The wait for the MQTT event queue in the start-up health test used `tick < deadline` the same way (only at the start, so it could not hit the wrap); changed to the signed difference as well.
+- The other time comparisons were checked: `uptime_ms()` users take differences of 32-bit values (correct across the wrap), the tick waits of the MQTT restart notice take differences, absolute times are `int64_t` from `esp_timer`. No time path change.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`.
 
 ## 5. Security and open ports
 

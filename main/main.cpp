@@ -8052,7 +8052,9 @@ static void mqtt_service_task(void *parameter)
         if (connected && s_mqtt_queued_messages_count.load() > 0)
             mqtt_send_queued_messages();
 
-        if (xTaskGetTickCount() >= next_report)
+        // Signed difference: the tick count wraps after 49.7 days (1 kHz); a plain >= would then send reports
+        // back to back until the count passes the wrapped next_report
+        if (static_cast<int32_t>(xTaskGetTickCount() - next_report) >= 0)
         {
             mqtt_build_report(s_mqtt_payload, s_mqtt_payload_size);
             if (!mqtt_publish_report(s_mqtt_payload))
@@ -10542,7 +10544,7 @@ static startup_health_mqtt_metrics_result_t check_startup_health_mqtt_metrics(co
     }
 
     const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(MQTT_QUEUED_PUBLISH_DELAY_MS * 2U);
-    while (uxQueueMessagesWaiting(s_mqtt_ntp_event_queue) != 0 && xTaskGetTickCount() < deadline)
+    while (uxQueueMessagesWaiting(s_mqtt_ntp_event_queue) != 0 && static_cast<int32_t>(xTaskGetTickCount() - deadline) < 0)
         vTaskDelay(pdMS_TO_TICKS(1));
 
     if (uxQueueMessagesWaiting(s_mqtt_ntp_event_queue) != 0 || s_ntp_telemetry_events_dropped.load(std::memory_order_relaxed) != 0 ||
