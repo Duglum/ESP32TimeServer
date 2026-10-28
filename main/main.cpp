@@ -720,9 +720,87 @@ static int64_t s_ote_reboot_at_us = 0;
 static char s_ote_error_reason[lcdColumns + 1] = "";
 #endif
 
+// A 64-bit value shared between tasks, for the NTP request path. std::atomic<int64_t> is not lock-free on this RISC-V
+// core: every access calls libatomic, which takes one global spinlock with the interrupts masked (shared by every
+// 64-bit atomic of the program, on both cores). Here a reader only loads 32-bit atomics (a seqlock), and a writer takes
+// the value's own spinlock: the interrupts of its core are masked for a few instructions, so a reader on the same core
+// never meets a write in progress and a reader on the other core waits at most that long.
+template <typename T>
+class shared64_t
+{
+    static_assert(sizeof(T) == 8, "a 64-bit type");
+
+public:
+    T load() const
+    {
+        uint32_t s1, s2, low, high;
+        do
+        {
+            s1 = m_seq.load(std::memory_order_acquire);
+            low = m_lo.load(std::memory_order_relaxed);
+            high = m_hi.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            s2 = m_seq.load(std::memory_order_relaxed);
+        } while (s1 != s2 || (s1 & 1u));
+        return static_cast<T>((static_cast<uint64_t>(high) << 32) | low);
+    }
+
+    void store(T value)
+    {
+        taskENTER_CRITICAL(&m_lock);
+        write_locked(value);
+        taskEXIT_CRITICAL(&m_lock);
+    }
+
+    // Stores the value only while the current one is 0 (the first time stamp after a reset)
+    void store_if_zero(T value)
+    {
+        if (load() != 0)
+            return;
+        taskENTER_CRITICAL(&m_lock);
+        if (read_locked() == 0)
+            write_locked(value);
+        taskEXIT_CRITICAL(&m_lock);
+    }
+
+    // Replaces the value with next(current) under the lock (next must be short: the interrupts are masked); returns
+    // the value before
+    template <typename F>
+    T update(F next)
+    {
+        taskENTER_CRITICAL(&m_lock);
+        const T current = read_locked();
+        write_locked(next(current));
+        taskEXIT_CRITICAL(&m_lock);
+        return current;
+    }
+
+private:
+    T read_locked() const
+    {
+        return static_cast<T>((static_cast<uint64_t>(m_hi.load(std::memory_order_relaxed)) << 32) |
+                              m_lo.load(std::memory_order_relaxed));
+    }
+
+    void write_locked(T value)
+    {
+        const uint32_t s = m_seq.load(std::memory_order_relaxed);
+        m_seq.store(s + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release); // the data stores must not move before the odd sequence
+        m_lo.store(static_cast<uint32_t>(static_cast<uint64_t>(value)), std::memory_order_relaxed);
+        m_hi.store(static_cast<uint32_t>(static_cast<uint64_t>(value) >> 32), std::memory_order_relaxed);
+        m_seq.store(s + 2, std::memory_order_release);
+    }
+
+    std::atomic<uint32_t> m_seq{0};
+    std::atomic<uint32_t> m_lo{0};
+    std::atomic<uint32_t> m_hi{0};
+    portMUX_TYPE m_lock = portMUX_INITIALIZER_UNLOCKED;
+};
+
 static std::atomic<bool> s_time_setting_in_progress{false};
 static std::atomic<bool> s_time_has_been_set{false};
-static std::atomic<uint64_t> s_ntp_reference_time_64{0};
+static shared64_t<uint64_t> s_ntp_reference_time_64;
 static std::atomic<bool> s_ntp_reference_valid{false};
 static std::atomic<bool> s_ptp_clock_ready{false};
 
@@ -1445,12 +1523,12 @@ static void control_RGB_LED(uint32_t rgb_colour, bool enabled);
 static led_strip_handle_t s_ws2812_strip = nullptr;
 #endif
 static std::atomic<bool> s_open_for_business_message_written{false};
-static std::atomic<int64_t> s_last_hardware_ntp_response_us{0};
-static std::atomic<int64_t> s_last_ntp_input_us{0};
-static std::atomic<int64_t> s_first_ntp_input_us{0};
-static std::atomic<int64_t> s_last_ntp_response_us{0};
-static std::atomic<int64_t> s_last_load_shedding_us{0};
-static std::atomic<uint64_t> s_ntp_admission_window{0};
+static shared64_t<int64_t> s_last_hardware_ntp_response_us;
+static shared64_t<int64_t> s_last_ntp_input_us;
+static shared64_t<int64_t> s_first_ntp_input_us;
+static shared64_t<int64_t> s_last_ntp_response_us;
+static shared64_t<int64_t> s_last_load_shedding_us;
+static shared64_t<uint64_t> s_ntp_admission_window; // 100 ms window (high half) and its request count
 static std::atomic<uint32_t> s_ntp_input_count{0};
 static std::atomic<bool> s_ntp_shed_during_period{false};
 static std::atomic<uint32_t> s_ntp_rate_limited_requests{0}; // dropped by the per-client rate limit since the start
@@ -1475,16 +1553,15 @@ static std::atomic<ntp_transport_health_t> s_ntp_transport_health{ntp_transport_
 
 static bool ntp_load_shedding_active()
 {
-    const int64_t last_shedding_us = s_last_load_shedding_us.load(std::memory_order_relaxed);
+    const int64_t last_shedding_us = s_last_load_shedding_us.load();
     return last_shedding_us > 0 && esp_timer_get_time() - last_shedding_us < 1500000LL;
 }
 
 static void record_ntp_input(int64_t now_us)
 {
     s_ntp_input_count.fetch_add(1, std::memory_order_relaxed);
-    s_last_ntp_input_us.store(now_us, std::memory_order_relaxed);
-    int64_t first_input_us = 0;
-    s_first_ntp_input_us.compare_exchange_strong(first_input_us, now_us, std::memory_order_relaxed);
+    s_last_ntp_input_us.store(now_us);
+    s_first_ntp_input_us.store_if_zero(now_us);
 }
 
 static bool admit_ntp_request()
@@ -1494,24 +1571,26 @@ static bool admit_ntp_request()
 
     const uint32_t window = static_cast<uint32_t>(now_us / 100000LL);
     const uint32_t window_limit = NTP_Requests_Per_Second_Load_Shedding_Threshold / 10;
-    uint64_t current = s_ntp_admission_window.load(std::memory_order_relaxed);
-    for (;;)
-    {
+    bool admitted = true;
+    s_ntp_admission_window.update([&](uint64_t current) -> uint64_t {
         const uint32_t current_window = static_cast<uint32_t>(current >> 32);
         const uint32_t active_window = current_window > window ? current_window : window;
         const uint32_t count = static_cast<uint32_t>(current);
         const uint32_t next_count = current_window == active_window ? count + 1 : 1;
         if (next_count > window_limit)
         {
-            s_diag_ntp_shed.fetch_add(1, std::memory_order_relaxed);
-            s_ntp_shed_during_period.store(true, std::memory_order_relaxed);
-            s_last_load_shedding_us.store(now_us, std::memory_order_relaxed);
-            return false;
+            admitted = false;
+            return current;
         }
-        const uint64_t next = (static_cast<uint64_t>(active_window) << 32) | next_count;
-        if (s_ntp_admission_window.compare_exchange_weak(current, next, std::memory_order_relaxed))
-            return true;
+        return (static_cast<uint64_t>(active_window) << 32) | next_count;
+    });
+    if (!admitted)
+    {
+        s_diag_ntp_shed.fetch_add(1, std::memory_order_relaxed);
+        s_ntp_shed_during_period.store(true, std::memory_order_relaxed);
+        s_last_load_shedding_us.store(now_us);
     }
+    return admitted;
 }
 
 static bool configure_hardware_timestamps();
@@ -1721,13 +1800,13 @@ struct sync_candidate_t
 static sync_state_t s_sync_state{};
 static sync_state_t get_sync_state_snapshot();
 static std::atomic<uint32_t> s_ntp_sync_state_sequence{0};
-static std::atomic<int64_t> s_ntp_last_successful_sync_us{0};
-static std::atomic<int64_t> s_ntp_last_gnss_valid_us{0};
-static std::atomic<int64_t> s_ntp_last_pps_us{0};
-static std::atomic<int64_t> s_pps_holdover_us{0};    // PPS holdover of the settings (live), see get_ntp_reply_status()
+static shared64_t<int64_t> s_ntp_last_successful_sync_us;
+static shared64_t<int64_t> s_ntp_last_gnss_valid_us;
+static shared64_t<int64_t> s_ntp_last_pps_us;
+static shared64_t<int64_t> s_pps_holdover_us;    // PPS holdover of the settings (live), see get_ntp_reply_status()
 static std::atomic<uint8_t> s_pps_lost_stratum{16};  // after the holdover: stratum of the replies (live)
 static std::atomic<bool> s_pps_lost_serve{true};     // after the holdover: answer NTP requests at all (live)
-static std::atomic<int64_t> s_pps_lost_serve_us{0};  // ... for this long after the PPS was lost, 0 = no limit (live)
+static shared64_t<int64_t> s_pps_lost_serve_us;  // ... for this long after the PPS was lost, 0 = no limit (live)
 static std::atomic<uint32_t> s_pps_dispersion_ppm{ntpHoldoverDispersionPpm}; // root dispersion growth while coasting (live)
 static std::atomic<bool> s_ntp_pps_active{false};
 static std::atomic<bool> s_ntp_gnss_timing_valid{false};
@@ -1821,9 +1900,9 @@ static void publish_ntp_sync_state_locked(const sync_state_t &state)
     // seqlock writer (always called with s_sync_state_mutex held): odd sequence while the values change
     s_ntp_sync_state_sequence.fetch_add(1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release); // the data stores must not move before the odd sequence
-    s_ntp_last_successful_sync_us.store(state.last_successful_sync_us, std::memory_order_relaxed);
-    s_ntp_last_gnss_valid_us.store(state.last_gnss_valid_us, std::memory_order_relaxed);
-    s_ntp_last_pps_us.store(state.last_pps_us, std::memory_order_relaxed);
+    s_ntp_last_successful_sync_us.store(state.last_successful_sync_us);
+    s_ntp_last_gnss_valid_us.store(state.last_gnss_valid_us);
+    s_ntp_last_pps_us.store(state.last_pps_us);
     s_ntp_pps_active.store(state.pps_active, std::memory_order_relaxed);
     s_ntp_gnss_timing_valid.store(state.gnss_timing_valid, std::memory_order_relaxed);
     s_ntp_pps_missing.store(state.faults.pps_missing, std::memory_order_relaxed);
@@ -2779,9 +2858,9 @@ static ntp_reply_status_t get_ntp_reply_status()
         if ((sequence_before & 1U) != 0)
             continue;
 
-        int64_t last_successful_sync_us = s_ntp_last_successful_sync_us.load(std::memory_order_relaxed);
-        int64_t last_gnss_valid_us = s_ntp_last_gnss_valid_us.load(std::memory_order_relaxed);
-        int64_t last_pps_us = s_ntp_last_pps_us.load(std::memory_order_relaxed);
+        int64_t last_successful_sync_us = s_ntp_last_successful_sync_us.load();
+        int64_t last_gnss_valid_us = s_ntp_last_gnss_valid_us.load();
+        int64_t last_pps_us = s_ntp_last_pps_us.load();
         bool pps_active = s_ntp_pps_active.load(std::memory_order_relaxed);
         bool gnss_timing_valid = s_ntp_gnss_timing_valid.load(std::memory_order_relaxed);
         sync_faults_t faults{
@@ -2846,7 +2925,7 @@ static ntp_reply_status_t get_ntp_reply_status()
             const uint32_t dispersion = static_cast<uint32_t>(uncapped < Ntp_Root_Dispersion_Max_S1616 ? uncapped : Ntp_Root_Dispersion_Max_S1616);
 
             // PPS holdover (from release 3.0.5): stratum 1 for the holdover time of the settings after the PPS was lost
-            if (pps_age_us < Gnss_Validity_Timeout_Us + s_pps_holdover_us.load(std::memory_order_relaxed))
+            if (pps_age_us < Gnss_Validity_Timeout_Us + s_pps_holdover_us.load())
             {
                 if (can_coast && !faults.sync_stale && !sync_stale)
                     return {0, 1, "GPS", true, false, false, true, dispersion};
@@ -2856,7 +2935,7 @@ static ntp_reply_status_t get_ntp_reply_status()
                 // After the holdover, as set: no answer (also once the serving time after the PPS loss is over), or
                 // a lower stratum while coasting is still possible (at most Pps_Lost_Coast_Max_Us after the last
                 // pulse), otherwise stratum 16
-                const int64_t serve_us = s_pps_lost_serve_us.load(std::memory_order_relaxed);
+                const int64_t serve_us = s_pps_lost_serve_us.load();
                 if (!s_pps_lost_serve.load(std::memory_order_relaxed) ||
                     (serve_us > 0 && pps_age_us >= Gnss_Validity_Timeout_Us + serve_us))
                 {
@@ -2885,7 +2964,7 @@ static bool gnss_recently_valid(int64_t now_us)
         if ((sequence & 1U) != 0)
             continue;
         const bool valid = s_ntp_gnss_timing_valid.load(std::memory_order_relaxed);
-        const int64_t last_valid_us = s_ntp_last_gnss_valid_us.load(std::memory_order_relaxed);
+        const int64_t last_valid_us = s_ntp_last_gnss_valid_us.load();
         std::atomic_thread_fence(std::memory_order_acquire);
         if (sequence != s_ntp_sync_state_sequence.load(std::memory_order_relaxed))
             continue;
@@ -2912,7 +2991,7 @@ static void build_ntp_reply(const uint8_t *request, uint8_t *reply, uint8_t vers
     memcpy(reply + 12, status.reference_id, 4);
 
     if (status.reference_time_valid)
-        write_ntp_timestamp(reply, 16, s_ntp_reference_time_64.load(std::memory_order_acquire));
+        write_ntp_timestamp(reply, 16, s_ntp_reference_time_64.load());
 
     memcpy(reply + 24, request + 40, 8);
     write_ntp_timestamp(reply, 32, receive_time);
@@ -3704,8 +3783,8 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         if (hardware_transmit_time == 0)
             s_diag_ntp_hw_no_tx_stamp.fetch_add(1, std::memory_order_relaxed);
         const int64_t response_us = esp_timer_get_time();
-        s_last_hardware_ntp_response_us.store(response_us, std::memory_order_release);
-        s_last_ntp_response_us.store(response_us, std::memory_order_relaxed);
+        s_last_hardware_ntp_response_us.store(response_us);
+        s_last_ntp_response_us.store(response_us);
 #if MQTT_ENABLED
         if (s_mqtt_on)
         {
@@ -4080,16 +4159,16 @@ static void ethernet_transport_recovery_task(void *parameter)
             health = ntp_transport_health_t::no_ip;
         else if (serving && s_ntp_external_responses_enabled.load(std::memory_order_acquire) && interval_input > 0)
         {
-            const int64_t last_reply = std::max(s_last_ntp_response_us.load(std::memory_order_relaxed), last_not_serving_us);
-            const int64_t first_input = s_first_ntp_input_us.load(std::memory_order_relaxed);
+            const int64_t last_reply = std::max(s_last_ntp_response_us.load(), last_not_serving_us);
+            const int64_t first_input = s_first_ntp_input_us.load();
             if (first_input > 0 && now_us - (last_reply > 0 ? last_reply : first_input) >= NTP_TRANSPORT_STALL_TIMEOUT_US)
                 health = ntp_transport_health_t::stalled;
             else
                 health = ntp_transport_health_t::healthy;
         }
         const ntp_transport_health_t old_health = s_ntp_transport_health.exchange(health, std::memory_order_relaxed);
-        const int64_t last_input_us = s_last_ntp_input_us.load(std::memory_order_relaxed);
-        const int64_t last_shedding_us = s_last_load_shedding_us.load(std::memory_order_relaxed);
+        const int64_t last_input_us = s_last_ntp_input_us.load();
+        const int64_t last_shedding_us = s_last_load_shedding_us.load();
         const bool link_up = s_ethernet_connected.load(std::memory_order_acquire);
         const bool responses_enabled = s_ntp_external_responses_enabled.load(std::memory_order_acquire);
         const EventBits_t net_bits = xEventGroupGetBits(s_net_event_group);
@@ -4112,7 +4191,7 @@ static void ethernet_transport_recovery_task(void *parameter)
 #endif
         if (recovery_verification_us > 0)
         {
-            if (s_last_hardware_ntp_response_us.load(std::memory_order_acquire) > recovery_verification_us)
+            if (s_last_hardware_ntp_response_us.load() > recovery_verification_us)
                 recovery_verification_us = 0;
             else if (link_up &&
                      s_last_physical_link_down_us.load(std::memory_order_relaxed) < recovery_verification_us &&
@@ -6731,7 +6810,7 @@ static void pps_discipline_task(void *parameter)
                 // Set the PTP clock from the PPS second (not from the system clock, whose slew is still pending)
                 set_hardware_clock_from_pps(edge_sec, edge_local);
 #endif
-                s_ntp_reference_time_64 = get_current_time_in_ntp64_format();
+                s_ntp_reference_time_64.store(get_current_time_in_ntp64_format());
                 s_ntp_reference_valid = true;
             }
             else
@@ -7366,7 +7445,7 @@ static void setup_gnss()
     // Parsers of the GNSS UART (custom/gnss_uart): NMEA sentences and UBX frames; the received UBX messages of an
     // earlier setup are forgotten
     gnss_nmea_config_t nmea_config{};
-    nmea_config.last_pps_us = []() -> int64_t { return s_ntp_last_pps_us.load(std::memory_order_relaxed); };
+    nmea_config.last_pps_us = []() -> int64_t { return s_ntp_last_pps_us.load(); };
     // A u-blox receiver also sends NMEA: then only NAV-PVT counts (unless the NMEA fallback is in use)
     nmea_config.on_satellites = [](uint8_t count)
     {
@@ -8657,8 +8736,8 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
         if (!s_ethernet_recovery_in_progress.load(std::memory_order_acquire))
             s_last_physical_link_down_us.store(esp_timer_get_time(), std::memory_order_relaxed);
         s_ethernet_connected.store(false);
-        s_first_ntp_input_us.store(0, std::memory_order_relaxed);
-        s_last_ntp_response_us.store(0, std::memory_order_relaxed);
+        s_first_ntp_input_us.store(0);
+        s_last_ntp_response_us.store(0);
 #if MQTT_ENABLED
         if (s_mqtt_on)
         {
@@ -8675,8 +8754,8 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
         break;
     case ETHERNET_EVENT_STOP:
         s_ethernet_connected.store(false);
-        s_first_ntp_input_us.store(0, std::memory_order_relaxed);
-        s_last_ntp_response_us.store(0, std::memory_order_relaxed);
+        s_first_ntp_input_us.store(0);
+        s_last_ntp_response_us.store(0);
 #if MQTT_ENABLED
         if (s_mqtt_on)
         {
@@ -9895,7 +9974,7 @@ static void gnss_time_sync_task(void *parameter)
                 s_clock_comp_valid.store(false, std::memory_order_release);
                 model_invalidate();
                 synchronize_hardware_clock();
-                s_ntp_reference_time_64 = get_current_time_in_ntp64_format();
+                s_ntp_reference_time_64.store(get_current_time_in_ntp64_format());
                 s_ntp_reference_valid = true;
 
                 xSemaphoreGive(s_time_mutex);
@@ -10385,7 +10464,7 @@ static void ntp_server_task(void *parameter)
                 {
                     if (!internal_request)
                     {
-                        s_last_ntp_response_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+                        s_last_ntp_response_us.store(esp_timer_get_time());
                         s_diag_ntp_sw_replies.fetch_add(1, std::memory_order_relaxed);
                         if (interleaved_reply)
                             s_diag_ntp_sw_interleaved.fetch_add(1, std::memory_order_relaxed);
@@ -11356,10 +11435,10 @@ void app_apply_live_settings(const web_settings_t &settings)
     if (s_live_settings_mutex != nullptr)
         xSemaphoreGive(s_live_settings_mutex);
     s_lcd_title_changed.store(true, std::memory_order_release);
-    s_pps_holdover_us.store(static_cast<int64_t>(settings.pps_holdover_s) * 1000000LL, std::memory_order_relaxed);
+    s_pps_holdover_us.store(static_cast<int64_t>(settings.pps_holdover_s) * 1000000LL);
     s_pps_lost_stratum.store(settings.pps_lost_stratum, std::memory_order_relaxed);
     s_pps_lost_serve.store(settings.pps_lost_serve, std::memory_order_relaxed);
-    s_pps_lost_serve_us.store(static_cast<int64_t>(settings.pps_lost_serve_min) * 60LL * 1000000LL, std::memory_order_relaxed);
+    s_pps_lost_serve_us.store(static_cast<int64_t>(settings.pps_lost_serve_min) * 60LL * 1000000LL);
     s_pps_dispersion_ppm.store(settings.pps_dispersion_ppm, std::memory_order_relaxed);
     ntp_cache_set_rate_limit(settings.ntp_client_rate_limit);
     s_gnss_min_fix_age_us.store(static_cast<int64_t>(settings.gnss_min_fix_age_s) * 1000000LL, std::memory_order_relaxed);
