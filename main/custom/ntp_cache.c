@@ -58,6 +58,16 @@ typedef struct
     bool is_active;
 } ntp_client_record_ipv6_t;
 
+// Rate limit of a /64 (IPv6 clients outside the server's own prefixes, review S-03)
+typedef struct
+{
+    uint64_t prefix; // the first 8 bytes of the address as stored
+    int64_t last_seen_ms;
+    int64_t rate_tat_us;
+    int64_t rate_tat_cookie_us;
+    bool is_active;
+} ntp_prefix_record_t;
+
 typedef struct
 {
     uint64_t t2;          // T2 of the exchange (NTP 32.32 format), 0 = free
@@ -67,6 +77,7 @@ typedef struct
 
 static ntp_client_record_t s_ipv4_records[MAX_TRACKED_CLIENTS_IPV4];
 static ntp_client_record_ipv6_t s_ipv6_records[MAX_TRACKED_CLIENTS_IPV6];
+static ntp_prefix_record_t s_ipv6_prefixes[MAX_TRACKED_PREFIXES_IPV6];
 static exchange_entry_t s_exchanges[EXCHANGE_MAP_SETS][EXCHANGE_MAP_WAYS];
 static SemaphoreHandle_t s_mutex;
 static _Atomic uint32_t s_rate_interval_us; // 1 s / rate limit, 0 = no rate limit
@@ -278,6 +289,36 @@ static size_t ipv4_slot_for_update(uint32_t ip, uint16_t slot, bool *found)
     return select_ipv4_slot(ip, found);
 }
 
+// The record of the /64 of ip (a free or the least recently used one if it has none; must be called with s_mutex held)
+static ntp_prefix_record_t *select_prefix_record(const struct in6_addr *ip)
+{
+    uint64_t prefix;
+    memcpy(&prefix, ip, sizeof(prefix));
+    size_t selected = 0;
+    int64_t oldest_ms = INT64_MAX;
+    for (size_t i = 0; i < MAX_TRACKED_PREFIXES_IPV6; ++i)
+    {
+        if (s_ipv6_prefixes[i].is_active && s_ipv6_prefixes[i].prefix == prefix)
+        {
+            return &s_ipv6_prefixes[i];
+        }
+        if (!s_ipv6_prefixes[i].is_active)
+        {
+            selected = i;
+            oldest_ms = INT64_MIN;
+        }
+        else if (oldest_ms != INT64_MIN && s_ipv6_prefixes[i].last_seen_ms < oldest_ms)
+        {
+            selected = i;
+            oldest_ms = s_ipv6_prefixes[i].last_seen_ms;
+        }
+    }
+    memset(&s_ipv6_prefixes[selected], 0, sizeof(s_ipv6_prefixes[selected]));
+    s_ipv6_prefixes[selected].prefix = prefix;
+    s_ipv6_prefixes[selected].is_active = true;
+    return &s_ipv6_prefixes[selected];
+}
+
 static size_t ipv6_slot_for_update(const struct in6_addr *ip, uint16_t slot, bool *found)
 {
     if (slot < MAX_TRACKED_CLIENTS_IPV6 && s_ipv6_records[slot].is_active &&
@@ -393,7 +434,7 @@ bool ntp_cache_update(uint32_t ip, uint16_t slot, uint64_t t2, uint64_t t3)
 }
 
 bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint64_t origin_timestamp, uint64_t *interleaved_t3,
-                                   bool *rate_limited, uint16_t *slot)
+                                   bool *rate_limited, uint16_t *slot, bool per_prefix)
 {
     if (rate_limited != NULL)
     {
@@ -422,9 +463,18 @@ bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint64_t origin_ti
         s_ipv6_records[selected].is_active = true;
         s_ipv6_records[selected].last_seen_ms = current_time_ms();
     }
-    check_request_locked(&s_ipv6_records[selected].rate_tat_us, &s_ipv6_records[selected].rate_tat_cookie_us,
-                         s_ipv6_records[selected].prev_t2, s_ipv6_records[selected].prev_t3, address_tag_ipv6(ip),
-                         origin_timestamp, interleaved_t3, rate_limited);
+    int64_t *rate_tat_us = &s_ipv6_records[selected].rate_tat_us;
+    int64_t *rate_tat_cookie_us = &s_ipv6_records[selected].rate_tat_cookie_us;
+    if (per_prefix && rate_limited != NULL)
+    {
+        ntp_prefix_record_t *const prefix = select_prefix_record(ip);
+        prefix->last_seen_ms = current_time_ms();
+        rate_tat_us = &prefix->rate_tat_us;
+        rate_tat_cookie_us = &prefix->rate_tat_cookie_us;
+    }
+    check_request_locked(rate_tat_us, rate_tat_cookie_us, s_ipv6_records[selected].prev_t2,
+                         s_ipv6_records[selected].prev_t3, address_tag_ipv6(ip), origin_timestamp, interleaved_t3,
+                         rate_limited);
     if (slot != NULL)
     {
         *slot = (uint16_t)selected;
@@ -482,6 +532,13 @@ void ntp_cache_purge_expired(void)
         if (s_ipv6_records[i].is_active && now_ms - s_ipv6_records[i].last_seen_ms > CACHE_TIMEOUT_MS_IPV6)
         {
             memset(&s_ipv6_records[i], 0, sizeof(s_ipv6_records[i]));
+        }
+    }
+    for (size_t i = 0; i < MAX_TRACKED_PREFIXES_IPV6; ++i)
+    {
+        if (s_ipv6_prefixes[i].is_active && now_ms - s_ipv6_prefixes[i].last_seen_ms > CACHE_TIMEOUT_MS_IPV6)
+        {
+            memset(&s_ipv6_prefixes[i], 0, sizeof(s_ipv6_prefixes[i]));
         }
     }
     xSemaphoreGive(s_mutex);

@@ -20,6 +20,8 @@ extern "C"
 #define CACHE_TIMEOUT_MS_IPV4 1800000
 #define MAX_TRACKED_CLIENTS_IPV6 128
 #define CACHE_TIMEOUT_MS_IPV6 1800000
+// IPv6 clients outside the server's own prefixes share the rate limit of their /64 (see ntp_cache_find_or_create_ipv6)
+#define MAX_TRACKED_PREFIXES_IPV6 64
 // No record (ntp_cache_find_or_create failed): ntp_cache_update searches the address
 #define NTP_CACHE_SLOT_NONE UINT16_MAX
 
@@ -41,8 +43,11 @@ extern "C"
     // slot: from ntp_cache_find_or_create of the request; the address is only searched again if the record was given
     // to another client meanwhile (or slot is NTP_CACHE_SLOT_NONE).
     bool ntp_cache_update(uint32_t ip, uint16_t slot, uint64_t t2, uint64_t t3);
+    // The same for IPv6. per_prefix: the rate limit counts the /64 of the address instead of the address (review S-03):
+    // for clients outside the server's own prefixes, which can use any of the 2^64 addresses of their /64, like the
+    // hosts behind one IPv4 NAT address. The interleaved state stays per address.
     bool ntp_cache_find_or_create_ipv6(const struct in6_addr *ip, uint64_t origin_timestamp, uint64_t *interleaved_t3,
-                                       bool *rate_limited, uint16_t *slot);
+                                       bool *rate_limited, uint16_t *slot, bool per_prefix);
     bool ntp_cache_update_ipv6(const struct in6_addr *ip, uint16_t slot, uint64_t t2, uint64_t t3);
     void ntp_cache_purge_expired(void);
 

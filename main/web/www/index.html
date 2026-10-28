@@ -186,7 +186,7 @@
           <div class="grid">
             <label class="span2"><span class="lt">Rate limit per client (requests per second, 0 = off)</span>
               <input type="number" name="ntp_client_rate_limit" min="0" max="10000">
-              <small class="note">0 to 10000. A client is identified by its IP address; its requests beyond this rate are dropped without an answer. Takes effect at once with Apply (no confirmation needed). Default covers a polling rate of up to -4 (16 packets/s) per client plus reserve. Raise it only if a very large number of clients is expected behind a single NAT address: they all count as one client.</small>
+              <small class="note">0 to 10000. A client is identified by its IP address (an IPv6 client outside the /64 prefixes of this server by its /64); its requests beyond this rate are dropped without an answer. Takes effect at once with Apply (no confirmation needed). Default covers a polling rate of up to -4 (16 packets/s) per client plus reserve. Raise it only if a very large number of clients is expected behind a single NAT address or in one remote IPv6 /64: they all count as one client.</small>
               <small class="def" data-for="ntp_client_rate_limit"></small>
             </label>
           </div>

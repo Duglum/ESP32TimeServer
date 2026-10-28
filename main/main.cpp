@@ -1281,6 +1281,30 @@ static bool ipv6_is_own_address(const uint8_t *address)
     return own;
 }
 
+// The client address (16 bytes, network byte order) is on a /64 of the server's own addresses, or link-local
+// (fe80::/10): such clients keep the rate limit per address; others are counted per /64 (review S-03)
+static bool ipv6_is_on_own_prefix(const uint8_t *address)
+{
+    if (address[0] == 0xFE && (address[1] & 0xC0) == 0x80)
+        return true;
+    uint32_t words[2];
+    memcpy(words, address, sizeof(words));
+    bool own = false;
+    uint32_t s1, s2;
+    do
+    {
+        s1 = s_own_ipv6_seq.load(std::memory_order_acquire);
+        own = false;
+        const uint32_t count = std::min<uint32_t>(s_own_ipv6_count.load(std::memory_order_relaxed), Own_Ipv6_Max);
+        for (uint32_t i = 0; i < count && !own; ++i)
+            own = s_own_ipv6_words[i][0].load(std::memory_order_relaxed) == words[0] &&
+                  s_own_ipv6_words[i][1].load(std::memory_order_relaxed) == words[1];
+        std::atomic_thread_fence(std::memory_order_acquire);
+        s2 = s_own_ipv6_seq.load(std::memory_order_relaxed);
+    } while (s1 != s2 || (s1 & 1u));
+    return own;
+}
+
 static void clear_network_addresses()
 {
     if (s_network_address_mutex == nullptr || xSemaphoreTake(s_network_address_mutex, portMAX_DELAY) != pdTRUE)
@@ -3487,7 +3511,8 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     bool rate_limited = false;
     uint16_t cache_slot = NTP_CACHE_SLOT_NONE; // record of the client, reused by the cache update below
     const bool cached = ipv6 ? ntp_cache_find_or_create_ipv6(&client_ipv6, client_origin_timestamp, &interleaved_t3,
-                                                             &rate_limited, &cache_slot)
+                                                             &rate_limited, &cache_slot,
+                                                             !ipv6_is_on_own_prefix(client_ipv6.s6_addr))
                              : ntp_cache_find_or_create(client_ipv4, client_origin_timestamp, &interleaved_t3,
                                                         &rate_limited, &cache_slot);
     if (!cached)
@@ -10194,7 +10219,7 @@ static void ntp_server_task(void *parameter)
                 {
                     client_ipv6 = &reinterpret_cast<const struct sockaddr_in6 *>(&source_addr)->sin6_addr;
                     ntp_cache_find_or_create_ipv6(client_ipv6, client_origin_timestamp, &interleaved_t3, rate_limit_check,
-                                                  &cache_slot);
+                                                  &cache_slot, !ipv6_is_on_own_prefix(client_ipv6->s6_addr));
                 }
                 if (rate_limited) // over the per-client rate limit: dropped without an answer
                 {
