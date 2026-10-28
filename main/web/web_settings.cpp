@@ -1031,7 +1031,7 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
     if (s.pps_dispersion_ppm < 1 || s.pps_dispersion_ppm > WEB_PPS_DISPERSION_MAX_PPM)
         FAIL("Root dispersion growth: 1 to %u ppm (0.001 to 10 ms per second)", static_cast<unsigned>(WEB_PPS_DISPERSION_MAX_PPM));
 
-    // ---- LCD and time zone ----
+    // ---- LCD Display ----
     {
         const size_t length = strnlen(s.lcd_title, WEB_LCD_TITLE_SIZE);
         if (length == 0 || length >= WEB_LCD_TITLE_SIZE || !is_printable_ascii(s.lcd_title, 0x20, 0x7D))

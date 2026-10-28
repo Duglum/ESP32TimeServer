@@ -314,8 +314,8 @@
     'Keep answering after the PPS loss: 0 to 1440 min': 'Weiter antworten nach dem PPS-Ausfall: 0 bis 1440 min',
     'Stratum after the holdover: 2 to 16': 'Stratum nach dem Holdover: 2 bis 16',
 
-    // ---- LCD and time zone ----
-    'LCD and time zone': 'LCD und Zeitzone',
+    // ---- LCD Display ----
+    'LCD Display': 'LCD-Display',
     'Enable LCD Display': 'LCD-Display aktivieren',
     '20 × 4 character LCD (HD44780) with a PCF8574 I2C backpack: SDA on GPIO 8, SCL on GPIO 7, I2C address 0x27 or 0x3F (found automatically).':
       '20 × 4 Zeichen LCD (HD44780) mit PCF8574-I2C-Backpack: SDA an GPIO 8, SCL an GPIO 7, I2C-Adresse 0x27 oder 0x3F (wird automatisch erkannt).',

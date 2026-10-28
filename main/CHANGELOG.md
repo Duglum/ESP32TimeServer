@@ -98,6 +98,7 @@ Contents
 | 69 | **Interference monitor of the u-blox receiver switched on** (2026-10-28, review 6.2) | MON-RF reports a jamming state (none, warning, critical) instead of *unknown* |
 | 70 | **No abort when the PPS input or the button cannot be set up** (2026-10-28, review E-08) | the board starts without PPS (stratum 16 or no answer, as set) and the web admin stays reachable, instead of restarting in a loop |
 | 71 | **Unused status fields removed** (2026-10-28, review 6.2) | `/api/state` no longer sends `gnss_antenna_power` and `gnss_agc_percent`, which the page has not shown since 4.54 |
+| 72 | **Settings panel *LCD Display*** (2026-10-28) | the panel *LCD and time zone* is called *LCD Display* (German *LCD-Display*); its fields are unchanged |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1089,6 +1090,12 @@ Review E-08. The setup still had `ESP_ERROR_CHECK` in two places: the seven call
 Review 6.2 (point 8). Since 4.54 the MON-RF values are shown in the diagnostics (from `/api/diag`), and the status page uses only the antenna and jamming states. `gnss_antenna_power` and `gnss_agc_percent` were still filled in `app_get_status()` and sent in `/api/state`; both are removed from `web_status_t`, the status JSON and the mock. The AGC stays in the diagnostics (`rf_agc_count`), the antenna power in the MON-RF parser (`gnss_ubx_rf_t`). No other user (page, MQTT) read them.
 
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`.
+
+### 4.71 Settings panel *LCD Display* (2026-10-28)
+
+The settings panel *LCD and time zone* is renamed to *LCD Display* (German *LCD-Display*, as in *LCD-Display aktivieren*). Only the heading changes: the panel still holds the LCD switch, the title, the time zone (POSIX TZ string, used for the LCD clock and the local time stamps of MQTT), the 24-hour clock, the leading zero and *Show the time zone*. The setting names in `/api/settings` and the saved settings stay the same.
+
+- Verified: page against the mock in English and German, `window.I18N.missing` empty.
 
 ## 5. Security and open ports
 
