@@ -93,6 +93,7 @@ Contents
 | 64 | **IPv6: hardware path only for the own addresses** (2026-10-28, review S-04) | an IPv6 request to a foreign address that reaches this MAC is no longer answered with that address as the source; such frames go to lwIP |
 | 65 | **IPv6 rate limit per /64 outside the own prefixes** (2026-10-28, review S-03) | a remote host can no longer avoid the per-client rate limit by changing its address within its /64; clients in the server's own prefixes keep their limit per address |
 | 66 | **One year threshold for the GNSS date, from the build date** (2026-10-28, review Z-23) | NMEA and UBX refuse a GNSS date before the year of the build (before: 2022 and 2025) |
+| 67 | **NTP time stamps rounded instead of truncated** (2026-10-28, review Z-14) | the ns to 2^-32 s conversion of T2, T3 and the TX delay no longer has a bias of -0.116 ns |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1042,6 +1043,14 @@ Review Z-23. A GNSS date in the past is a known failure (a receiver without alma
 - New `app_build_year()` (`custom/app_metadata.h`, constexpr from `APP_BUILD_DATE` "YYYY-MM-DD", which the build sets for the main component; a static_assert checks the format). Both paths refuse a year before the build year (`gnss_nmea.cpp` RMC, `main.cpp` NAV-PVT); the rest of the date check is unchanged.
 - The threshold moves with every build. A board keeps the year of its firmware: a receiver that reports a date before it is refused, as before with the fixed numbers.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. No time path or stack change.
+
+### 4.66 NTP time stamps rounded instead of truncated (2026-10-28)
+
+Review Z-14. The fraction of an NTP time stamp has steps of 2^-32 s (0.233 ns); the conversion from ns cut the fraction off, so every served time stamp was on average 0.116 ns early. Negligible against the other errors, but free to remove.
+
+- Rounded to the nearest step: `ntp64_from_unix_ns()` (every T2 and T3 of the model clock and the PTP mapping), the fallback of `ntp64_from_hardware_timestamp()` (no mapping yet) and the TX delay added to the basic mode T3 (`compensate_basic_t3()`, delay >= 0). The remainder is below 1e9 ns, so the rounded fraction is at most 4294967292 and never carries into the seconds (checked at 0, 0.5 s and 999 999 999 ns).
+- Unchanged: the fallback from `gettimeofday()` (us, before the model clock is valid) and its drift term. The interleaved lookup compares stored and received T2 exactly, both from the same conversion.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Frames unchanged.
 
 ## 5. Security and open ports
 

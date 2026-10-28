@@ -2711,7 +2711,9 @@ static inline uint64_t ntp64_from_unix_ns(int64_t unix_ns)
 {
     const uint64_t sec = NTP_EPOCH_OFFSET + static_cast<uint64_t>(unix_ns / 1000000000LL);
     const uint64_t rem = static_cast<uint64_t>(unix_ns % 1000000000LL);
-    return (sec << 32) | ((rem << 32) / 1000000000ULL);
+    // Rounded to the nearest 2^-32 s (review Z-14; truncating gave a bias of -0.116 ns). rem < 1e9, so the fraction
+    // stays below 2^32 (at most 4294967292) and does not carry into the seconds
+    return (sec << 32) | (((rem << 32) + 500000000ULL) / 1000000000ULL);
 }
 
 static uint64_t get_current_time_in_ntp64_format()
@@ -3046,7 +3048,7 @@ static bool udp_checksum_is_valid(const uint8_t *source, const uint8_t *destinat
 static uint64_t ntp64_from_hardware_timestamp(const eth_mac_time_t &timestamp)
 {
     const uint64_t seconds = NTP_EPOCH_OFFSET + timestamp.seconds;
-    const uint64_t fraction = (static_cast<uint64_t>(timestamp.nanoseconds) << 32) / 1000000000ULL;
+    const uint64_t fraction = ((static_cast<uint64_t>(timestamp.nanoseconds) << 32) + 500000000ULL) / 1000000000ULL; // rounded
     uint64_t ts = (seconds << 32) | fraction;
 
 #if PTP_FREE_RUNNING
@@ -3207,7 +3209,7 @@ static uint64_t compensate_basic_t3(uint64_t t3, bool ipv6, bool authenticated)
     if (estimate.samples.load(std::memory_order_relaxed) < tx_delay_min_samples)
         return t3;
     const int64_t delay_ns = estimate.delay_ns.load(std::memory_order_relaxed);
-    return t3 + static_cast<uint64_t>((delay_ns << 32) / 1000000000LL);
+    return t3 + static_cast<uint64_t>(((delay_ns << 32) + 500000000LL) / 1000000000LL); // delay_ns >= 0, rounded
 }
 
 // Called by the hardware NTP task (only writer) with the uncompensated software T3 and the hardware TX time stamp
