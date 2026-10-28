@@ -89,6 +89,7 @@ Contents
 | 60 | **Stack reserve of the tasks and the heap in the diagnostics** (2026-10-28, review E-14) | the release build shows how close each task came to its stack size and how low the internal heap went since the start, without a debug build |
 | 61 | **MQTT reports after 49.7 days of uptime** (2026-10-28, code review) | the report schedule no longer sends reports back to back when the FreeRTOS tick count wraps |
 | 62 | **Model clock and PTP mapping without the global atomic lock** (2026-10-28, code review) | reading the time no longer takes the global spinlock of the 64-bit atomics with the interrupts masked; less contention between the cores |
+| 63 | **Code review of the changes since the review, static analysis** (2026-10-28, review S-16, documentation) | extra GCC warnings and the GCC analyzer without findings; two findings of the manual review fixed (4.60, 4.61) |
 
 No memory leak was found in the review (section 4.13).
 
@@ -989,6 +990,28 @@ Found in the code review (4.62). The ESP32-P4 cores have no 64-bit atomic instru
 - Effect: `ptp_map_offset_at()`, `model_ns_at()`, `ptp_map_publish()` and `model_publish()` no longer call libatomic (0 calls instead of 4, 2, 4 and 2); the frame of `ptp_map_offset_at()` drops from 80 to 48 B, `ptp_map_publish()` from 48 B to none. Each libatomic call costs a critical section of the order of 0.1 us and can wait for the other core. The values are the same; the PPS task (800 B) and the hardware NTP handler (400 B) keep their frames.
 - Not changed: the other 64-bit atomics (time stamps of events in us, read a few times per request or per second); the hardware NTP path still has 3 such calls per request outside the time stamps.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, disassembly (no `__atomic_*_8` in the four functions). Not on the board yet; the servo and the diagnostics must look as before.
+
+### 4.62 Code review of the changes since the review, static analysis (2026-10-28)
+
+Review S-16 and a second look at the code written since the review of 2026-10-23 (`baa9da6`..`cffa678`: 38 commits, about 5700 lines added and 1500 removed in 25 files of `main/`), with the focus on efficiency, stability and long-term time precision.
+
+Static analysis (in a separate worktree, nothing of it in the repository):
+
+| Tool | Scope | Result |
+|---|---|---|
+| GCC 15.2 `-Wextra -Wshadow=local -Wnull-dereference -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wcast-align -Wfloat-conversion` | all 15 sources of `main/` | no warning |
+| GCC `-fanalyzer` | `gnss_ubx`, `gnss_nmea`, `gnss_uart`, `time_diag`, `crash_dump`, `ntp_cache`, `ntp_auth`, `web_ote`, `web_settings` | no finding |
+| GCC `-fanalyzer` | `main.cpp` (12 000 lines) | not possible: the compiler ends without a message (memory) |
+| clang-tidy | - | not available: the installed esp-clangd 21 runs no clang-tidy checks (tested with a deliberate finding); cppcheck is not installed |
+
+Manual review, with the result:
+
+- Time counters over months: the 32-bit tick count was compared absolutely in the MQTT report schedule, which failed at the wrap after 49.7 days (fixed in 4.60). `uptime_ms()`, the stack watch (4.59) and the PPS phase of the latency calibration use 32-bit differences, correct across the wrap. All absolute times are `int64_t` (esp_timer, ns of the fine timebase); the products in the PTP mapping, the model clock and the holdover dispersion are split or capped below the int64 range (checked again).
+- NTP era 2036: the 64-bit NTP time stamps are formed from 64-bit seconds and taken modulo 2^32 by the shift, as the wire format requires; the differences in the code (TX delay, interleaved lookup by exact value) are modulo 2^64 and stay correct across the era change.
+- Efficiency of the time path: the 64-bit atomics took a global lock in every time conversion (fixed in 4.61). Still 9 such calls per NTP request outside the time stamps (reply status 6, handler 3), each a short critical section; left as is.
+- GNSS parsers: UBX frames are bounded (payload at most 512 B, longer ones skipped), each message checks its length before reading, the command response copy is capped at 256 B, MON-VER extensions are read only within the received length; NMEA lines are bounded by the sentence size. No finding.
+- Holdover, re-lock, PPS without valid GNSS time, update check, core dump: board-tested (sections 12, 4.43 to 4.57); no new finding in the code.
+- Not covered: host tests and fuzzing of the parsers (no host compiler, review S-16), the analyzer for `main.cpp`.
 
 ## 5. Security and open ports
 
