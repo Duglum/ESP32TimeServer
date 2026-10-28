@@ -92,6 +92,7 @@ Contents
 | 63 | **Code review of the changes since the review, static analysis** (2026-10-28, review S-16, documentation) | extra GCC warnings and the GCC analyzer without findings; two findings of the manual review fixed (4.60, 4.61) |
 | 64 | **IPv6: hardware path only for the own addresses** (2026-10-28, review S-04) | an IPv6 request to a foreign address that reaches this MAC is no longer answered with that address as the source; such frames go to lwIP |
 | 65 | **IPv6 rate limit per /64 outside the own prefixes** (2026-10-28, review S-03) | a remote host can no longer avoid the per-client rate limit by changing its address within its /64; clients in the server's own prefixes keep their limit per address |
+| 66 | **One year threshold for the GNSS date, from the build date** (2026-10-28, review Z-23) | NMEA and UBX refuse a GNSS date before the year of the build (before: 2022 and 2025) |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1033,6 +1034,14 @@ Review S-03 (open part). The per-client rate limit (4.26, 4.30) counted IPv6 cli
 - Web page: the hint of the rate limit names the /64 rule (German text in `i18n.js`).
 - Cost: 2.6 kB of static RAM; one more linear search over at most 64 entries in the mutex of the cache for remote IPv6 clients (after T2, before the reply is built). Frames unchanged (`ntp_cache_find_or_create_ipv6()` 96 B, hardware NTP handler 400 B, `ntp_server` 560 B).
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, frames from the disassembly, the page against the mock (English, German, `I18N.missing` empty). Not on the board yet.
+
+### 4.65 One year threshold for the GNSS date, from the build date (2026-10-28)
+
+Review Z-23. A GNSS date in the past is a known failure (a receiver without almanac, or after a GPS week number rollover, which reports a date 19.6 years early). The NMEA path refused years up to 2022, the UBX path up to 2025: two different fixed numbers that age.
+
+- New `app_build_year()` (`custom/app_metadata.h`, constexpr from `APP_BUILD_DATE` "YYYY-MM-DD", which the build sets for the main component; a static_assert checks the format). Both paths refuse a year before the build year (`gnss_nmea.cpp` RMC, `main.cpp` NAV-PVT); the rest of the date check is unchanged.
+- The threshold moves with every build. A board keeps the year of its firmware: a receiver that reports a date before it is refused, as before with the fixed numbers.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. No time path or stack change.
 
 ## 5. Security and open ports
 

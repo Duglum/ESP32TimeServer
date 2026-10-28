@@ -9559,7 +9559,7 @@ static bool acquire_sync_candidate(sync_candidate_t *candidate)
         int minute = pvt.minute;
         int second = pvt.second;
 
-        if (year <= 2025 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
+        if (year < app_build_year() || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
         {
             candidate->failures.gnss_invalid = true;
 #if DEBUG_ENABLED

@@ -19,3 +19,15 @@ typedef struct
 } app_metadata_t;
 
 const app_metadata_t *get_app_metadata();
+
+#ifdef __cplusplus
+// Year of the build (APP_BUILD_DATE "YYYY-MM-DD", main component only). A GNSS date before it is not plausible: a
+// receiver without almanac or after a GPS week number rollover reports an old date. One threshold for the NMEA and
+// the UBX path (review Z-23).
+static_assert(sizeof(APP_BUILD_DATE) == sizeof("YYYY-MM-DD"), "APP_BUILD_DATE format");
+constexpr int app_build_year()
+{
+    return (APP_BUILD_DATE[0] - '0') * 1000 + (APP_BUILD_DATE[1] - '0') * 100 + (APP_BUILD_DATE[2] - '0') * 10 +
+           (APP_BUILD_DATE[3] - '0');
+}
+#endif

@@ -6,6 +6,7 @@
 
 #include "gnss_nmea.h"
 #include "gnss_uart.h"
+#include "app_metadata.h"
 #include "ESP32TimeServerSettings.h"
 
 #include <algorithm>
@@ -431,7 +432,7 @@ bool gnss_nmea_parse_rmc(const char *sentence, nmea_rmc_time_t *time_data)
 
     const int year = 2000 + year_two_digit;
 
-    if (year <= 2022 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
+    if (year < app_build_year() || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
         return false;
 
     time_data->year = year;
