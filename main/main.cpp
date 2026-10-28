@@ -847,6 +847,25 @@ static void ptp_comp_read(int64_t &anchor_ns, int64_t &offset_ns)
 #endif
 
 #if PTP_FREE_RUNNING
+// A 64-bit value inside a seqlock, held as two 32-bit atomics. std::atomic<int64_t> is not lock-free on this RISC-V
+// core: each access calls libatomic, which takes one global spinlock with the interrupts masked (shared by every 64-bit
+// atomic of the program, on both cores). The sequence counter of the seqlock already makes the halves consistent.
+struct seqlock_i64_t
+{
+    std::atomic<uint32_t> lo{0};
+    std::atomic<uint32_t> hi{0};
+    void store(int64_t value)
+    {
+        lo.store(static_cast<uint32_t>(value), std::memory_order_relaxed);
+        hi.store(static_cast<uint32_t>(static_cast<uint64_t>(value) >> 32), std::memory_order_relaxed);
+    }
+    int64_t load() const
+    {
+        const uint32_t low = lo.load(std::memory_order_relaxed);
+        return static_cast<int64_t>((static_cast<uint64_t>(hi.load(std::memory_order_relaxed)) << 32) | low);
+    }
+};
+
 // ---- PTP mapping, PTP_FREE_RUNNING 1 (seqlock, the PPS task is the only writer) ----
 // offset(raw) = raw PTP time - true time, piecewise linear around a reference point:
 //   offset(raw) = ref_offset + rate * (raw - ref_raw)   with rate = rate_new for raw >= ref_raw, rate_old before
@@ -854,10 +873,10 @@ static void ptp_comp_read(int64_t &anchor_ns, int64_t &offset_ns)
 // The rates are in milli-ppb (1e-12). The reference point is the instant of the last frequency update, so the two
 // segments are the offset rates before and after that update and the mapping is continuous.
 static std::atomic<uint32_t> s_ptpmap_seq{0};
-static std::atomic<int64_t> s_ptpmap_ref_raw_ns{0};
-static std::atomic<int64_t> s_ptpmap_ref_offset_ns{0};
-static std::atomic<int64_t> s_ptpmap_rate_old_mppb{0};
-static std::atomic<int64_t> s_ptpmap_rate_new_mppb{0};
+static seqlock_i64_t s_ptpmap_ref_raw_ns;
+static seqlock_i64_t s_ptpmap_ref_offset_ns;
+static seqlock_i64_t s_ptpmap_rate_old_mppb;
+static seqlock_i64_t s_ptpmap_rate_new_mppb;
 // Ethernet MAC of the PTP clock (set when the PTP clock is enabled; frequency commands and direct reads)
 static esp_eth_mac_t *s_ptp_mac = nullptr;
 // Incremented whenever the PTP clock is set or re-initialised: the servo starts its estimate again
@@ -880,10 +899,10 @@ static void ptp_map_publish(int64_t ref_raw_ns, int64_t ref_offset_ns, int64_t r
     const uint32_t s = s_ptpmap_seq.load(std::memory_order_relaxed);
     s_ptpmap_seq.store(s + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
-    s_ptpmap_ref_raw_ns.store(ref_raw_ns, std::memory_order_relaxed);
-    s_ptpmap_ref_offset_ns.store(ref_offset_ns, std::memory_order_relaxed);
-    s_ptpmap_rate_old_mppb.store(rate_old_mppb, std::memory_order_relaxed);
-    s_ptpmap_rate_new_mppb.store(rate_new_mppb, std::memory_order_relaxed);
+    s_ptpmap_ref_raw_ns.store(ref_raw_ns);
+    s_ptpmap_ref_offset_ns.store(ref_offset_ns);
+    s_ptpmap_rate_old_mppb.store(rate_old_mppb);
+    s_ptpmap_rate_new_mppb.store(rate_new_mppb);
     s_ptpmap_seq.store(s + 2, std::memory_order_release);
 }
 
@@ -896,10 +915,10 @@ static bool ptp_map_offset_at(int64_t raw_ns, int64_t &offset_ns)
     do
     {
         s1 = s_ptpmap_seq.load(std::memory_order_acquire);
-        ref_raw = s_ptpmap_ref_raw_ns.load(std::memory_order_relaxed);
-        ref_offset = s_ptpmap_ref_offset_ns.load(std::memory_order_relaxed);
-        rate_old = s_ptpmap_rate_old_mppb.load(std::memory_order_relaxed);
-        rate_new = s_ptpmap_rate_new_mppb.load(std::memory_order_relaxed);
+        ref_raw = s_ptpmap_ref_raw_ns.load();
+        ref_offset = s_ptpmap_ref_offset_ns.load();
+        rate_old = s_ptpmap_rate_old_mppb.load();
+        rate_new = s_ptpmap_rate_new_mppb.load();
         std::atomic_thread_fence(std::memory_order_acquire);
         s2 = s_ptpmap_seq.load(std::memory_order_relaxed);
     } while (s1 != s2 || (s1 & 1u));
@@ -1089,8 +1108,8 @@ static bool ptp_mac_enable(esp_eth_mac_t *mac, bool first)
 // true time = second of the last PPS edge + time since that edge (fine local timebase), corrected by the measured ppb.
 static std::atomic<uint32_t> s_model_seq{0};
 static std::atomic<bool> s_model_valid{false};
-static std::atomic<int64_t> s_model_sec{0};     // Unix second of the last PPS edge
-static std::atomic<int64_t> s_model_edge_ns{0}; // local time of that edge in ns (local_now_ns scale)
+static seqlock_i64_t s_model_sec;     // Unix second of the last PPS edge
+static seqlock_i64_t s_model_edge_ns; // local time of that edge in ns (local_now_ns scale)
 static std::atomic<int32_t> s_model_ppb{0};     // >0 = local clock runs fast
 
 // The PPS task is the only writer (seqlock, so readers never see mixed values)
@@ -1099,8 +1118,8 @@ static void model_publish(int64_t unix_sec, int64_t edge_ns, int32_t ppb)
     const uint32_t s = s_model_seq.load(std::memory_order_relaxed);
     s_model_seq.store(s + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
-    s_model_sec.store(unix_sec, std::memory_order_relaxed);
-    s_model_edge_ns.store(edge_ns, std::memory_order_relaxed);
+    s_model_sec.store(unix_sec);
+    s_model_edge_ns.store(edge_ns);
     s_model_ppb.store(ppb, std::memory_order_relaxed);
     s_model_seq.store(s + 2, std::memory_order_release);
     s_model_valid.store(true, std::memory_order_release);
@@ -1123,8 +1142,8 @@ static bool model_ns_at(int64_t esp_ns, int64_t &unix_ns)
     do
     {
         s1 = s_model_seq.load(std::memory_order_acquire);
-        sec = s_model_sec.load(std::memory_order_relaxed);
-        edge_ns = s_model_edge_ns.load(std::memory_order_relaxed);
+        sec = s_model_sec.load();
+        edge_ns = s_model_edge_ns.load();
         ppb = s_model_ppb.load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
         s2 = s_model_seq.load(std::memory_order_relaxed);

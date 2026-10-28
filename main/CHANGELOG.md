@@ -88,6 +88,7 @@ Contents
 | 59 | **Root dispersion growth in the holdover 15 ppm by default** (2026-10-28, review Z-22) | the advertised uncertainty after a PPS loss grows by 4.5 ms in 5 minutes instead of 30 ms, so clients keep the server longer; saved settings keep their value |
 | 60 | **Stack reserve of the tasks and the heap in the diagnostics** (2026-10-28, review E-14) | the release build shows how close each task came to its stack size and how low the internal heap went since the start, without a debug build |
 | 61 | **MQTT reports after 49.7 days of uptime** (2026-10-28, code review) | the report schedule no longer sends reports back to back when the FreeRTOS tick count wraps |
+| 62 | **Model clock and PTP mapping without the global atomic lock** (2026-10-28, code review) | reading the time no longer takes the global spinlock of the 64-bit atomics with the interrupts masked; less contention between the cores |
 
 No memory leak was found in the review (section 4.13).
 
@@ -978,6 +979,16 @@ Found in the code review of the changes since the review (4.62). The FreeRTOS ti
 - The wait for the MQTT event queue in the start-up health test used `tick < deadline` the same way (only at the start, so it could not hit the wrap); changed to the signed difference as well.
 - The other time comparisons were checked: `uptime_ms()` users take differences of 32-bit values (correct across the wrap), the tick waits of the MQTT restart notice take differences, absolute times are `int64_t` from `esp_timer`. No time path change.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`.
+
+### 4.61 Model clock and PTP mapping without the global atomic lock (2026-10-28)
+
+Found in the code review (4.62). The ESP32-P4 cores have no 64-bit atomic instructions: every access to a `std::atomic<int64_t>` calls libatomic (`__atomic_load_8`, `__atomic_store_8`), which takes one global spinlock (`s_atomic_lock`) with the interrupts masked, the same lock for every 64-bit atomic of the program on both cores.
+
+- The two seqlocks of the time conversion used such atomics for their 64-bit fields: the PTP mapping (`ptp_map_offset_at()`, 4 loads, for every T2 and hardware T3 and every PTP reading) and the model clock (`model_ns_at()`, 2 loads, for every software time, the basic mode T3 included). The seqlock already makes the fields consistent (sequence counter odd while writing, read again after the loads), so the atomics only have to avoid torn 32-bit words.
+- New `seqlock_i64_t`: a 64-bit value as two `std::atomic<uint32_t>` (lock-free, relaxed), used for `s_ptpmap_ref_raw_ns`, `s_ptpmap_ref_offset_ns`, `s_ptpmap_rate_old_mppb`, `s_ptpmap_rate_new_mppb`, `s_model_sec` and `s_model_edge_ns`. Writer and reader order (fences, sequence counter) are unchanged.
+- Effect: `ptp_map_offset_at()`, `model_ns_at()`, `ptp_map_publish()` and `model_publish()` no longer call libatomic (0 calls instead of 4, 2, 4 and 2); the frame of `ptp_map_offset_at()` drops from 80 to 48 B, `ptp_map_publish()` from 48 B to none. Each libatomic call costs a critical section of the order of 0.1 us and can wait for the other core. The values are the same; the PPS task (800 B) and the hardware NTP handler (400 B) keep their frames.
+- Not changed: the other 64-bit atomics (time stamps of events in us, read a few times per request or per second); the hardware NTP path still has 3 such calls per request outside the time stamps.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`, disassembly (no `__atomic_*_8` in the four functions). Not on the board yet; the servo and the diagnostics must look as before.
 
 ## 5. Security and open ports
 
