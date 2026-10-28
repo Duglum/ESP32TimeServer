@@ -1173,6 +1173,14 @@ enum class ipv6_address_priority_t : uint8_t
 static ipv6_address_priority_t s_ipv6_address_priority = ipv6_address_priority_t::none;
 // Assigned IPv4 address in network byte order (0 = none); read lock-free by the hardware NTP path
 static std::atomic<uint32_t> s_own_ipv4_address_be{0};
+// Assigned IPv6 addresses (link-local, SLAAC, DHCPv6 or static, review S-04) in network byte order, read lock-free
+// by the hardware NTP path: a seqlock over 32-bit words. Written by the IP event handler and once per second by the
+// Ethernet recovery task (lwIP sends no event when an address expires), serialised by s_own_ipv6_writer_lock.
+static constexpr size_t Own_Ipv6_Max = CONFIG_LWIP_IPV6_NUM_ADDRESSES;
+static std::atomic<uint32_t> s_own_ipv6_seq{0};
+static std::atomic<uint32_t> s_own_ipv6_count{0};
+static std::atomic<uint32_t> s_own_ipv6_words[Own_Ipv6_Max][4];
+static portMUX_TYPE s_own_ipv6_writer_lock = portMUX_INITIALIZER_UNLOCKED;
 
 struct network_address_snapshot_t
 {
@@ -1232,6 +1240,47 @@ static network_address_snapshot_t get_network_address_snapshot()
     return snapshot;
 }
 
+// Takes the valid IPv6 addresses of the Ethernet interface (none if it is down or IPv6 is off)
+static void refresh_own_ipv6_addresses()
+{
+    esp_ip6_addr_t addresses[Own_Ipv6_Max] = {};
+    const int found = (IPV6_ENABLED && s_eth_netif != nullptr) ? esp_netif_get_all_ip6(s_eth_netif, addresses) : 0;
+    const uint32_t count = static_cast<uint32_t>(std::clamp(found, 0, static_cast<int>(Own_Ipv6_Max)));
+    taskENTER_CRITICAL(&s_own_ipv6_writer_lock);
+    const uint32_t s = s_own_ipv6_seq.load(std::memory_order_relaxed);
+    s_own_ipv6_seq.store(s + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    for (uint32_t i = 0; i < count; ++i)
+        for (size_t w = 0; w < 4; ++w)
+            s_own_ipv6_words[i][w].store(addresses[i].addr[w], std::memory_order_relaxed);
+    s_own_ipv6_count.store(count, std::memory_order_relaxed);
+    s_own_ipv6_seq.store(s + 2, std::memory_order_release);
+    taskEXIT_CRITICAL(&s_own_ipv6_writer_lock);
+}
+
+// The 16-byte address (network byte order) is one of the assigned IPv6 addresses
+static bool ipv6_is_own_address(const uint8_t *address)
+{
+    uint32_t words[4];
+    memcpy(words, address, sizeof(words));
+    bool own = false;
+    uint32_t s1, s2;
+    do
+    {
+        s1 = s_own_ipv6_seq.load(std::memory_order_acquire);
+        own = false;
+        const uint32_t count = std::min<uint32_t>(s_own_ipv6_count.load(std::memory_order_relaxed), Own_Ipv6_Max);
+        for (uint32_t i = 0; i < count && !own; ++i)
+            own = s_own_ipv6_words[i][0].load(std::memory_order_relaxed) == words[0] &&
+                  s_own_ipv6_words[i][1].load(std::memory_order_relaxed) == words[1] &&
+                  s_own_ipv6_words[i][2].load(std::memory_order_relaxed) == words[2] &&
+                  s_own_ipv6_words[i][3].load(std::memory_order_relaxed) == words[3];
+        std::atomic_thread_fence(std::memory_order_acquire);
+        s2 = s_own_ipv6_seq.load(std::memory_order_relaxed);
+    } while (s1 != s2 || (s1 & 1u));
+    return own;
+}
+
 static void clear_network_addresses()
 {
     if (s_network_address_mutex == nullptr || xSemaphoreTake(s_network_address_mutex, portMAX_DELAY) != pdTRUE)
@@ -1243,6 +1292,7 @@ static void clear_network_addresses()
     s_ipv6_address_priority = ipv6_address_priority_t::none;
     s_own_ipv4_address_be.store(0, std::memory_order_relaxed);
     xSemaphoreGive(s_network_address_mutex);
+    refresh_own_ipv6_addresses();
 }
 
 static void set_network_ipv4_address(const esp_ip4_addr_t &address)
@@ -3309,8 +3359,9 @@ static bool hardware_ntp_frame_is_acceptable(const uint8_t *frame, bool ipv4, si
     static constexpr uint8_t unspecified[16] = {};
     static constexpr uint8_t loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 
-    // Destination must not be multicast (ff00::/8): the reply would use it as its source address
-    if (destination[0] == 0xFF)
+    // Destination must be an assigned IPv6 address (the reply uses it as its source address; review S-04): not
+    // multicast, not a foreign address that reached this MAC
+    if (!ipv6_is_own_address(destination))
         return false;
     // Source must be unicast: not multicast, unspecified or loopback
     if (source[0] == 0xFF || memcmp(source, unspecified, 16) == 0 || memcmp(source, loopback, 16) == 0)
@@ -4123,6 +4174,7 @@ static void ethernet_transport_recovery_task(void *parameter)
             else
                 consecutive_rx_unavailable_recoveries = 0;
         }
+        refresh_own_ipv6_addresses(); // addresses that expired or were added without an event
         task_stack_checkpoint(Ethernet_Transport_Recovery);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -8567,6 +8619,7 @@ static void ethernet_ip_event_handler(void *, esp_event_base_t, int32_t event, v
         if (info.esp_netif != s_eth_netif || !IPV6_ENABLED)
             break;
         const bool routable_ipv6_acquired = set_network_ipv6_address(info.ip6_info.ip);
+        refresh_own_ipv6_addresses();
 #if MQTT_ENABLED
         if (s_mqtt_on)
         {
