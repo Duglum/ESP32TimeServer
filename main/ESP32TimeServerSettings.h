@@ -241,7 +241,7 @@ static constexpr uint8_t gnssMinimumSatellites = 0;
 //   steps) corrected at every PPS edge. Both run on the 40 MHz crystal of the board; an external 32.768 kHz RTC crystal
 //   would not help.
 // - Every GNSS PPS edge is captured by a hardware timer (12.5 ns), so the interrupt latency does not enter the time;
-//   the served time stamps stay within some 10 ns of the PPS (see main/CHANGELOG.md, sections 4 and 7).
+//   the served time stamps stay within some 10 ns of the PPS.
 // - The baud rate only decides how soon the label of a second (its date and time) arrives after the PPS edge: it has to
 //   be complete within 950 ms. It does not affect the accuracy, which comes from the PPS. 921600 baud (MAX-M10S) leaves
 //   the most margin; 9600 baud still works with a single RMC sentence per second.
