@@ -101,6 +101,7 @@ Contents
 | 72 | **Settings panel *LCD Display*** (2026-10-28) | the panel *LCD and time zone* is called *LCD Display* (German *LCD-Display*); its fields are unchanged |
 | 73 | **Warning for unusable compiled network settings** (2026-10-28, review 6.2) | a static IPv4 address in `ESP32TimeServerSettings.h` without a valid subnet mask or gateway is reported at the start instead of being taken silently |
 | 74 | **NTP request path without the global libatomic lock** (2026-10-28, review 6.2) | a hardware path request took the global lock of all 64-bit atomics 13 times (with the interrupts masked); now no time, the reply status is read without any lock |
+| 75 | **Cppcheck over all sources** (2026-10-28, review S-16) | no defect found; the 153 messages are false positives or style |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1119,6 +1120,22 @@ Review 6.2 (point 2), the rest of 4.61. `std::atomic<int64_t>` is not lock-free 
 - Stack (frames): `admit_ntp_request()` 32 B (was 48), `pps_discipline_task` 816 B (was 800), `publish_ntp_sync_state_locked()` 32 B (was 16), `app_apply_live_settings()` 96 B (was 80, httpd task); `process_hardware_ntp_request()`, `ntp_server_task`, `get_ntp_reply_status()` and the recovery task unchanged. The stack sizes have a margin of 30 % or more (board test of 4.59), so no size changes.
 - No change of a time stamp or of the reply: the NTP time is taken as before; only the bookkeeping around it changes.
 - Verified: build (-O2, no warning); the disassembly has no `__atomic_*_8` call left in the NTP tasks, `get_ntp_reply_status()`, `admit_ntp_request()` and `record_ntp_input()`. Not on the board yet.
+
+### 4.74 Cppcheck over all sources (2026-10-28)
+
+Review S-16, rest of 4.62 (cppcheck was not installed then). Cppcheck 2.22 (`winget install Cppcheck.Cppcheck`) with the compile commands of the IDF build (`--project=build/compile_commands.json --file-filter=*/main/*`, `--enable=warning,performance,portability,style`, 9 s for the 15 sources). FatFs `ffconf.h` uses `MIN` / `MAX` from `sys/param.h` in an `#if`, which cppcheck does not see; without a forced include that defines them cppcheck drops `main.cpp` silently (only a `syntaxError` in `ff.h`), so the run uses `--include=` of a two-line header with both macros.
+
+| Messages in `main/` | Count | Assessment |
+|---|---|---|
+| `dangerousTypeCast`, `cstyleCast` | 65 | the C casts inside the FreeRTOS macro `xSemaphoreGive` and the lwIP macros `netif_ip6_addr`, `IP2STR`; no change |
+| `subtractPointers` (the only *error*) | 1 | `favicon_ico_end - favicon_ico_start` in `web_server.cpp`: the linker symbols of an embedded file, the usual ESP-IDF idiom; false positive |
+| `knownConditionTrueFalse`, `unreachableSwitchCase`, `compareValueOutOfTypeRangeError`, `compareBoolExpressionWithInt`, `unsignedLessThanZero`, `duplicateExpression` | 22 | conditions that are constant only for the compiled settings (`PreferIPvX`, the setting limits), checksums and register values that cppcheck cannot follow through `esp_eth_ioctl()` or a pointer (`rate_limit_check`); none is dead for all settings |
+| `uninitMemberVarNoCtor` | 11 | structs without constructor that are always value-initialized (`{}`) or static |
+| `unreadVariable`, `redundantInitialization`, `duplicateConditionalAssign` | 11 | values read later through a pointer or in the debug build, or a harmless last assignment (`gnss_communication_confirmed` after `halt_with_display()`) |
+| `const...`, `variableScope`, `useStlAlgorithm`, `unusedStructMember` | 43 | style |
+
+- No code change. The analysis is not part of the build (it needs the compile commands of a build and the forced include); command for a later run: `cppcheck --project=<build>/compile_commands.json "--file-filter=*/main/*" --include=<header with MIN/MAX> --enable=warning,performance,portability,style -j 8`.
+- Together with 4.62 (GCC extra warnings, `-fanalyzer` on 9 files) and the host tests of 4.75 this closes S-16. Still not possible: `-fanalyzer` for `main.cpp`, clang-tidy (no checks in esp-clangd).
 
 ## 5. Security and open ports
 
