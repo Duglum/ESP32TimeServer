@@ -11486,9 +11486,7 @@ void app_get_status(web_app_status_t &status)
             {
                 status.gnss_rf_known = true;
                 status.gnss_antenna_status = s_gnss_rf.antenna_status;
-                status.gnss_antenna_power = s_gnss_rf.antenna_power;
                 status.gnss_jamming_state = s_gnss_rf.jamming_state;
-                status.gnss_agc_percent = static_cast<uint8_t>(std::min<uint32_t>(100, (s_gnss_rf.agc_count * 100u + 4095u) / 8191u));
             }
             xSemaphoreGive(s_gnss_info_mutex);
         }

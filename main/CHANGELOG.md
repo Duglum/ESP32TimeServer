@@ -97,6 +97,7 @@ Contents
 | 68 | **PPS task on the core of the PPS interrupt** (2026-10-28, review Z-17) | the PPS task is woken on its own core and no longer runs beside the hardware NTP task on core 1 |
 | 69 | **Interference monitor of the u-blox receiver switched on** (2026-10-28, review 6.2) | MON-RF reports a jamming state (none, warning, critical) instead of *unknown* |
 | 70 | **No abort when the PPS input or the button cannot be set up** (2026-10-28, review E-08) | the board starts without PPS (stratum 16 or no answer, as set) and the web admin stays reachable, instead of restarting in a loop |
+| 71 | **Unused status fields removed** (2026-10-28, review 6.2) | `/api/state` no longer sends `gnss_antenna_power` and `gnss_agc_percent`, which the page has not shown since 4.54 |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1082,6 +1083,12 @@ Review E-08. The setup still had `ESP_ERROR_CHECK` in two places: the seven call
 - No other `ESP_ERROR_CHECK` is left in `main/`. The pins are still checked by the settings (reserved and duplicate pins are refused), so these failures need a driver or hardware fault.
 - Stack: `app_main()` 304 B (was 320 B; `setup_pps_input()` is inlined). No time path change.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet.
+
+### 4.70 Unused status fields removed (2026-10-28)
+
+Review 6.2 (point 8). Since 4.54 the MON-RF values are shown in the diagnostics (from `/api/diag`), and the status page uses only the antenna and jamming states. `gnss_antenna_power` and `gnss_agc_percent` were still filled in `app_get_status()` and sent in `/api/state`; both are removed from `web_status_t`, the status JSON and the mock. The AGC stays in the diagnostics (`rf_agc_count`), the antenna power in the MON-RF parser (`gnss_ubx_rf_t`). No other user (page, MQTT) read them.
+
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`.
 
 ## 5. Security and open ports
 

@@ -42,9 +42,7 @@ struct web_app_status_t
     int32_t gnss_qerr_slope_milli; // regression slope of the qErr correction x 1000 (states 2 and 3)
     bool gnss_rf_known;           // U-Blox UBX: MON-RF answered within the last 30 s
     uint8_t gnss_antenna_status;  // 0 starting, 1 unknown, 2 OK, 3 short circuit, 4 open
-    uint8_t gnss_antenna_power;   // 0 off, 1 on, 2 unknown
     uint8_t gnss_jamming_state;   // 0 unknown, 1 OK, 2 warning, 3 critical
-    uint8_t gnss_agc_percent;     // AGC monitor, 0 to 100 %
     bool lcd_present;
     bool led_active;
     bool mqtt_connected;
