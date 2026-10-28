@@ -114,6 +114,7 @@ extern "C"
 #include "esp_mac.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "soc/emac_mac_struct.h"
 #include "esp_ipc.h"
 #include "mqtt_client.h"
 #include "esp_netif.h"
@@ -1512,6 +1513,7 @@ static std::atomic<int64_t> s_last_physical_link_down_us{0};
 static std::atomic<bool> s_ethernet_recovery_in_progress{false};
 static std::atomic<bool> s_ethernet_recovery_rx_probe_active{false};
 static std::atomic<uint32_t> s_ethernet_recovery_rx_probe_frames{0};
+static std::atomic<uint32_t> s_ethernet_rx_frames{0}; // every frame the EMAC delivered (receive hang check)
 static std::atomic<bool> s_hardware_ntp_accepting{false};
 static std::atomic<bool> s_ntp_external_responses_enabled{false};
 static std::atomic<bool> s_ntp_server_ready{false};
@@ -3017,6 +3019,8 @@ static constexpr int64_t ETHERNET_RECOVERY_INTERVAL_US = 60000000LL;      // min
 static constexpr int64_t ETHERNET_RECOVERY_MAX_INTERVAL_US = 900000000LL; // longest back-off for address, link state and time stamp failures
 static constexpr uint32_t ETHERNET_RECOVERY_TIMESTAMP_ATTEMPTS = 3;       // recoveries per boot for hardware TX time stamp errors
 static constexpr int64_t NTP_TRANSPORT_STALL_TIMEOUT_US = 35000000LL;
+static constexpr int64_t ETHERNET_RX_HANG_QUIET_US = 10000000LL; // no frame for this long before the EMAC state is checked
+static constexpr uint32_t ETHERNET_RX_HANG_CHECKS = 5;           // checks in a row (1 s apart) with the read controller busy
 
 struct hardware_ntp_request_t
 {
@@ -3811,6 +3815,7 @@ static uint64_t read_ntp_timestamp(const uint8_t *packet, size_t offset)
 
 static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uint32_t length, void *netif, void *info)
 {
+    s_ethernet_rx_frames.fetch_add(1, std::memory_order_relaxed);
     if (s_ethernet_recovery_rx_probe_active.load(std::memory_order_relaxed))
         s_ethernet_recovery_rx_probe_frames.fetch_add(1, std::memory_order_relaxed);
     size_t ip_offset = 0;
@@ -4136,6 +4141,9 @@ static void ethernet_transport_recovery_task(void *parameter)
     int64_t last_not_serving_us = 0;
     int64_t persistent_interval_us = ETHERNET_RECOVERY_INTERVAL_US; // grows while the failures below persist
     uint32_t timestamp_recoveries = 0;
+    uint32_t last_rx_frames = 0;
+    int64_t rx_quiet_since_us = 0;
+    uint32_t rx_hang_checks = 0;
     for (;;)
     {
         const int64_t now_us = esp_timer_get_time();
@@ -4284,6 +4292,31 @@ static void ethernet_transport_recovery_task(void *parameter)
             else
                 consecutive_rx_unavailable_recoveries = 0;
         }
+        // Receive hang of the EMAC (NTP flood test 2026-10-28, 15000 requests per second): the Rx FIFO read controller
+        // of the MTL stays in "reading frame status" while the receive DMA waits for a frame. From then on no frame
+        // arrives (no NTP, ARP, ping or web page) and nothing above notices it: without input there is no stall.
+        // esp_eth_stop() cannot stop the MAC in this state (emac_hal_stop() waits for an idle read controller), so the
+        // device restarts. A quiet network does not trigger it: there the read controller is idle.
+        const uint32_t rx_frames = s_ethernet_rx_frames.load(std::memory_order_relaxed);
+        if (rx_frames != last_rx_frames || !s_ethernet_connected.load(std::memory_order_acquire) ||
+            s_ethernet_recovery_in_progress.load(std::memory_order_acquire) || rx_quiet_since_us == 0)
+        {
+            last_rx_frames = rx_frames;
+            rx_quiet_since_us = now_us;
+            rx_hang_checks = 0;
+        }
+        else if (now_us - rx_quiet_since_us >= ETHERNET_RX_HANG_QUIET_US)
+        {
+            const uint32_t read_state = EMAC_MAC.emacdebug.mtlrfrcs;
+            rx_hang_checks = read_state != 0 ? rx_hang_checks + 1 : 0;
+            if (rx_hang_checks >= ETHERNET_RX_HANG_CHECKS)
+            {
+                ESP_LOGE(TAG, "Ethernet receive path hung (EMAC Rx FIFO read controller state %u, no frame for %lld s): restarting",
+                         static_cast<unsigned int>(read_state), static_cast<long long>((now_us - rx_quiet_since_us) / 1000000LL));
+                controlled_restart("ethernet_receive_hang");
+            }
+        }
+
         refresh_own_ipv6_addresses(); // addresses that expired or were added without an event
         task_stack_checkpoint(Ethernet_Transport_Recovery);
         vTaskDelay(pdMS_TO_TICKS(1000));
