@@ -1524,7 +1524,7 @@ namespace
     }
 
     // Core dump of the last crash (review E-07): the raw content of the partition (header, ELF core file, checksum),
-    // for "idf.py coredump-info --core coredump.bin --core-format raw". Reading the flash stops the cache for a
+    // for "idf.py coredump-info --core coredump.bin" (the format is detected). Reading the flash stops the cache for a
     // moment per block, so it is only read on request.
     esp_err_t handle_coredump(httpd_req_t *req)
     {
