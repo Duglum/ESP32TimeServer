@@ -94,6 +94,7 @@ Contents
 | 65 | **IPv6 rate limit per /64 outside the own prefixes** (2026-10-28, review S-03) | a remote host can no longer avoid the per-client rate limit by changing its address within its /64; clients in the server's own prefixes keep their limit per address |
 | 66 | **One year threshold for the GNSS date, from the build date** (2026-10-28, review Z-23) | NMEA and UBX refuse a GNSS date before the year of the build (before: 2022 and 2025) |
 | 67 | **NTP time stamps rounded instead of truncated** (2026-10-28, review Z-14) | the ns to 2^-32 s conversion of T2, T3 and the TX delay no longer has a bias of -0.116 ns |
+| 68 | **PPS task on the core of the PPS interrupt** (2026-10-28, review Z-17) | the PPS task is woken on its own core and no longer runs beside the hardware NTP task on core 1 |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1052,6 +1053,15 @@ Review Z-14. The fraction of an NTP time stamp has steps of 2^-32 s (0.233 ns); 
 - Unchanged: the fallback from `gettimeofday()` (us, before the model clock is valid) and its drift term. The interleaved lookup compares stored and received T2 exactly, both from the same conversion.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Frames unchanged.
 
+### 4.67 PPS task on the core of the PPS interrupt (2026-10-28)
+
+Review Z-17. The PPS task (priority 14) had no core affinity, so FreeRTOS ran it on either core, also on core 1 beside the hardware NTP task (priority 17), which could delay it there, and the PPS capture interrupt woke it across the cores.
+
+- The task is now created on `s_pps_isr_core`, the core of the PPS capture interrupt (`setup_pps_input()` runs at the start of `app_main()`, core 0; the PTP loopback interrupt is on the same core since 4.41). If that core is not known, it keeps `tskNO_AFFINITY`.
+- The measurements of the task come from hardware captures (PPS, PTP loopback), and a software PTP reading that was interrupted is dropped (bracket check), so the core does not change the measured values. Priority, stack and the fixed values (ISR latency 2.5 us, PTP write latency) are unchanged; the ISR latency measurement still runs on the other core.
+- On core 0 the task can be delayed by higher-priority tasks there (esp_timer, lwIP, GNSS time sync, the system event task), as it could before on that core; its deadline is the next edge, about 1 s.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1374,6 +1384,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - PPS without valid GNSS time (4.43): built, not on the board yet. Check with the M10 (time pulse also without fix, if it can be set) or by unplugging the GNSS antenna while the PPS keeps running: console `PPS not followed`, stratum 1 for the PPS holdover time, then as set; after the antenna is back `PPS followed again` and a ramp instead of a step in chrony. With the GT-U16 nothing changes in normal operation. Board test 2026-10-27 with the GT-U16, the UART RX line disconnected while the PPS kept running: `PPS not followed: GNSS time not valid (holdover)`, after reconnecting `PPS followed again: GNSS time valid for 5 s` 21 s later, *Last holdover* +301.7 ns.
 - Diagnostics (4.42): built, formulas checked in Python, page tested against a mock, not on the board yet. Check: open the *Diagnostics* panel; with the loopback the measurement says *PTP PPS loopback*, the innovation RMS after a minute is a few ns, ADEV at 1 s some 1e-9 to 1e-8 and falling with tau, TDEV a few ns at 1 s; the hardware path shows nearly 100 % interleaved for the chrony client; MQTT reports carry `time_quality`. Measure the stacks of the PPS task, `ntp_server` and the MQTT task once with `CALCULATE_STACK_SIZES_ENABLED 1` (frames +16, +16 and +112 B). Board test 2026-10-26: PTP PPS loopback, innovation RMS about 9 ns (GT-U16) and 10 ns (M10), noise 7 ns, ADEV(1 s) 1.4e-8 falling to 1.3e-9 at 16 s and then flat (crystal); stacks measured. MQTT `time_quality` not checked (MQTT off; 2026-10-28: not pursued).
 - Native NMEA reader (4.36): built and modelled, page tested against a mock, not tested on the board yet. Check with the GT-U16: synchronisation and stratum 1 as before (RMC only), then with GGA enabled (`$CFGMSG,0,0,1`): satellites and fix quality on the status page, the RMC phase (stable, some 10 to a few 100 ms), the minimum satellites setting (e.g. 30: stratum 16 after a few seconds; back to 0: stratum 1), and the stack of the `gnss_nmea` task with `CALCULATE_STACK_SIZES_ENABLED 1`. Board test 2026-10-26 with the GT-U16: synchronisation and stratum 1, with GGA 23 satellites and fix quality 1, RMC 36 to 67 ms after the PPS; stack of the reader measured (`43658df`).
+- PPS task on core 0 (4.67): the diagnostics show the same innovation RMS (about 9 to 10 ns), no growth of the loopback rejections or of the filter outliers, and the PPS interrupt histogram as before.
 - IPv6 rate limit per /64 (4.64): a local IPv6 client (same /64) at `minpoll -4` keeps its replies; requests from a remote /64 with changing addresses are held to the limit together.
 - IPv6 own addresses (4.63): chrony over IPv6 keeps `Interleaved: Yes` and `TX timestamping: Hardware` (global and, if used, link-local address); after a change of the prefix (router) the new address is answered by the hardware path within about a second.
 - Stack reserve and heap (4.59): open the diagnostics after an hour: every running task listed with some hundred bytes or more free (the sizes were measured with a margin of 30 to 70 %), none in red; the heap minimum stays well above 100 kB, also after a TLS login and an OTE upload. Compare with the values of the stack measurement (`43658df`).

@@ -9902,7 +9902,10 @@ void setup_the_gnss()
 
     xTaskCreatePinnedToCore(gnss_time_sync_task, "gnss_time_sync", GNSS_Time_Sync_Task_Stack_Size, nullptr, 15, nullptr, tskNO_AFFINITY);
 
-    xTaskCreatePinnedToCore(pps_discipline_task, "pps_discipline", PPS_Discipline_Task_Stack_Size, nullptr, 14, nullptr, tskNO_AFFINITY);
+    // The PPS task runs on the core of the PPS capture interrupt (review Z-17): the interrupt wakes it on the same
+    // core, and it does not compete with the hardware NTP task (core 1). Its measurements use hardware captures, so the
+    // core does not change them; without a known interrupt core it may run on either core as before.
+    xTaskCreatePinnedToCore(pps_discipline_task, "pps_discipline", PPS_Discipline_Task_Stack_Size, nullptr, 14, nullptr, s_pps_isr_core);
 
 #if PPS_ISR_LATENCY_AUTO
     if (!s_pps_isr_latency_known)
