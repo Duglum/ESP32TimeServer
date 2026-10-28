@@ -648,6 +648,27 @@ void web_settings_defaults(web_settings_t &out)
     out.ntp_key_count = 0;
 }
 
+// The compiled settings are not checked when ESP32TimeServerSettings.h is edited: a static IPv4 address with an
+// unusable address or subnet mask falls back to DHCP, and an incomplete set (for example no gateway) is used as it is
+// while the page refuses every save until the value is corrected. Both are said at a start that uses the compiled
+// settings (nothing saved yet, after a factory reset, or with the web admin disabled).
+static void check_compiled_settings(const web_settings_t &defaults)
+{
+    if (StaticIPAddress[0] != '\0' && defaults.ipv4_dhcp)
+        ESP_LOGW(TAG, "StaticIPAddress \"%s\" with SubnetMask \"%s\" in ESP32TimeServerSettings.h is not valid, DHCP is used",
+                 StaticIPAddress, SubnetMask);
+
+    char error[96] = "";
+    if (!web_settings_validate(defaults, error, sizeof(error)))
+#if WEB_ADMIN_ENABLED
+        ESP_LOGW(TAG, "Compiled settings in ESP32TimeServerSettings.h are not valid (%s): they are used as they are, "
+                      "and the web admin saves only after the value is corrected on the page",
+                 error);
+#else
+        ESP_LOGW(TAG, "Compiled settings in ESP32TimeServerSettings.h are not valid (%s): they are used as they are", error);
+#endif
+}
+
 void web_settings_load_boot()
 {
     if (s_mutex == nullptr)
@@ -655,6 +676,7 @@ void web_settings_load_boot()
 
     web_settings_defaults(s_boot);
     const char *source = "compiled defaults";
+    bool compiled = true;
 
 #if !WEB_ADMIN_ENABLED
     // Web admin disabled: only the compiled settings. Saved settings stay in NVS untouched; a pending one-shot set
@@ -667,6 +689,7 @@ void web_settings_load_boot()
         nvs_close(disabled_handle);
     }
     s_running = s_boot;
+    check_compiled_settings(s_boot);
     ESP_LOGI(TAG, "Settings: compiled settings (web admin disabled, WEB_ADMIN_ENABLED 0)");
     return;
 #endif
@@ -696,6 +719,7 @@ void web_settings_load_boot()
             {
                 s_boot = blob.settings;
                 source = "saved settings (NVS)";
+                compiled = false;
             }
             else
                 ESP_LOGW(TAG, "Saved web settings are not valid for this firmware (%s), compiled defaults are used", error);
@@ -715,6 +739,7 @@ void web_settings_load_boot()
                 s_boot_oneshot = true;
                 s_boot_network_confirm = (blob.flags & 1u) != 0;
                 source = "one-shot settings of the web admin (valid for this boot only)";
+                compiled = false;
             }
             else
                 ESP_LOGW(TAG, "One-shot web settings are not valid (%s), ignored", error);
@@ -731,6 +756,8 @@ void web_settings_load_boot()
         ESP_LOGW(TAG, "NVS namespace %s unavailable (%s), compiled defaults are used", NVS_NAMESPACE, esp_err_to_name(err));
 
     s_running = s_boot;
+    if (compiled)
+        check_compiled_settings(s_boot);
     ESP_LOGI(TAG, "Settings: %s", source);
 }
 

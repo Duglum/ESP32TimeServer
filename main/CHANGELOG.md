@@ -99,6 +99,7 @@ Contents
 | 70 | **No abort when the PPS input or the button cannot be set up** (2026-10-28, review E-08) | the board starts without PPS (stratum 16 or no answer, as set) and the web admin stays reachable, instead of restarting in a loop |
 | 71 | **Unused status fields removed** (2026-10-28, review 6.2) | `/api/state` no longer sends `gnss_antenna_power` and `gnss_agc_percent`, which the page has not shown since 4.54 |
 | 72 | **Settings panel *LCD Display*** (2026-10-28) | the panel *LCD and time zone* is called *LCD Display* (German *LCD-Display*); its fields are unchanged |
+| 73 | **Warning for unusable compiled network settings** (2026-10-28, review 6.2) | a static IPv4 address in `ESP32TimeServerSettings.h` without a valid subnet mask or gateway is reported at the start instead of being taken silently |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1097,6 +1098,16 @@ The settings panel *LCD and time zone* is renamed to *LCD Display* (German *LCD-
 
 - Verified: page against the mock in English and German, `window.I18N.missing` empty.
 
+### 4.72 Warning for unusable compiled network settings (2026-10-28)
+
+Review 6.2 (point 3), found while checking an upstream bug report (a static IP address with an empty DNS setting crashed the upstream firmware: it passes 0.0.0.0 to `esp_netif_set_dns_info()` under `ESP_ERROR_CHECK`, which ESP-IDF refuses). This fork is not affected: its DNS manager (`web_net.cpp`) sets the servers with `dns_setserver()`, and an empty entry means no server. The check found a smaller problem: the compiled settings were never checked.
+
+- `StaticIPAddress` that cannot be parsed, or a `SubnetMask` that is empty or not a valid mask: the firmware used DHCP without a word. Now: `StaticIPAddress "..." with SubnetMask "..." in ESP32TimeServerSettings.h is not valid, DHCP is used`.
+- A static address with an empty or unusable `Gateway` (or another value the page would refuse, e.g. a DNS server that is not an address): the set was used as it is (no gateway: only the local subnet is reachable), and the web admin refused every save with the error of that field, also when only another panel was changed. Now: `Compiled settings in ESP32TimeServerSettings.h are not valid (<error of the page>): they are used as they are, and the web admin saves only after the value is corrected on the page`. With the web admin disabled the second half is left out.
+- The check runs in `web_settings_load_boot()` with `web_settings_validate()`, the check of the page, at a start that uses the compiled settings (nothing saved yet, saved settings not valid for this firmware, after a factory reset, web admin disabled); with saved settings the compiled ones do not matter and nothing is said. Nothing else changes: the board starts with the same network settings as before.
+- Stack: `web_settings_load_boot()` 160 B as before; `app_main()` unchanged.
+- Verified: build (-O2, no warning). Not on the board (the default settings use DHCP and give no warning).
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1342,6 +1353,7 @@ Always printed (brief):
 - `PTP write latency calibration: PPS locked, warm-up started (10 min)`, `warm-up done, measuring (about 30 to 40 min)`, `finished: N ns (default was D ns), stored in NVS`
 - Failures: calibration not stable, result outside the range, NVS errors, out of memory, task could not be started, `Hardware TX time stamping disabled after repeated errors`.
 
+- Compiled network settings (4.72): `StaticIPAddress "..." with SubnetMask "..." in ESP32TimeServerSettings.h is not valid, DHCP is used`, `Compiled settings in ESP32TimeServerSettings.h are not valid (...): they are used as they are, and the web admin saves only after the value is corrected on the page`
 - Web admin (always): `Settings: compiled defaults` / `saved settings (NVS)` / `one-shot settings of the web admin (valid for this boot only)`, warnings for saved settings that are ignored, `Web admin certificate SHA-256 fingerprint: ...`, `Web admin: https://<fqdn>/ (TCP 443, IPv4 and IPv6)`, `Web admin: the default password is in use - change it on the settings page`, `Web admin: failed login from <address>`, `too many failed logins, all logins blocked for N s`, `password changed`, `allow-list changed`, `settings applied`, `settings saved to NVS`, `network settings confirmed`, `Network settings were not confirmed within 120 s: ...`, `factory reset ...`, the TLS key and certificate creation at the first start. Secrets are never logged.
 - The feature lines at the start (`LED support`, `LCD support`, `Symmetric-key authentication support`, `MQTT support`, `Host name`) now show the state of the boot settings.
 
