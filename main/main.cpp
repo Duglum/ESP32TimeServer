@@ -293,19 +293,8 @@ static constexpr size_t PPS_Discipline_Task_Stack_Size = 3620; // was 3135: the 
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
 
-#if CALCULATE_STACK_SIZES_ENABLED
-
-// For the purposes of calculating stack sizes force DEBUG_ENABLED if any of the stack size calculations are enabled
-// so that the task includes all debug processing is included in the stack size calculations
-#define DEBUG_ENABLED 1
-
-// For the purposes of calculating stack sizes force all MQTT tasks as enabled if MQTT_ENABLED is enabled
-#if MQTT_ENABLED
-#define MQTT_CLIENT_REPORTING_ENABLED 1
-#define MQTT_MEMORY_REPORTING_ENABLED 1
-#define MQTT_HISTORICAL_REPORTING_ENABLED 1
-#endif
-
+// Tasks whose stack use is watched: in the release build each task notes its own stack high water mark (at most every
+// 10 s, see task_stack_checkpoint()) for the diagnostics; with CALCULATE_STACK_SIZES_ENABLED it is also logged
 typedef enum
 {
     Ethernet_Transport_Recovery,
@@ -318,8 +307,63 @@ typedef enum
     NTP_Cache_Purge,
     NTP_Server,
     OTE_Service,
-    PPS_Discipline
+    PPS_Discipline,
+    Watched_Task_Count
 } TaskToPinToCore_t;
+
+struct watched_task_t
+{
+    const char *name;
+    size_t stack_size;
+};
+static constexpr watched_task_t Watched_Tasks[Watched_Task_Count] = {
+    {"eth_recovery", Ethernet_Transport_Recovery_Task_Stack_Size}, // also the recovery worker
+    {"gnss_recovery", GNSS_Recovery_Task_Stack_Size},
+    {"gnss_uart", GNSS_UART_Reader_Task_Stack_Size},
+    {"gnss_time_sync", GNSS_Time_Sync_Task_Stack_Size},
+    {"hardware_ntp", Hardware_NTP_Server_Task_Stack_Size},
+    {"LED_LCD_Button", LED_LCD_Button_Task_Stack_Size},
+    {"mqtt_service", MQTT_Service_Task_Stack_Size},
+    {"ntp_cache_purge", NTP_Cache_Purge_Task_Stack_Size},
+    {"ntp_server", NTP_Server_Task_Stack_Size},
+    {"ote_service", OTE_Service_Task_Stack_Size},
+    {"pps_discipline", PPS_Discipline_Task_Stack_Size},
+};
+static constexpr uint32_t Task_Stack_Note_Interval = 9766; // 10 s in units of 1.024 ms (uptime in us >> 10)
+static std::atomic<uint32_t> s_task_stack_least_free[Watched_Task_Count]; // bytes never used so far + 1; 0 = not noted yet
+static std::atomic<uint32_t> s_task_stack_noted[Watched_Task_Count];      // uptime in 1.024 ms units (wraps after 50
+                                                                          // days; the difference is taken modulo 2^32)
+
+// Notes the stack high water mark of the calling task (the bytes it has never used since its start). The painted
+// stack is scanned from its end, a few us for some kB; called from the task loops, so the interval limits the cost.
+// Two tasks share Ethernet_Transport_Recovery (the same stack size): the smaller value is kept.
+__attribute__((noinline)) static void note_task_stack(TaskToPinToCore_t task_id)
+{
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() >> 10);
+    if (s_task_stack_least_free[task_id].load(std::memory_order_relaxed) != 0 &&
+        now - s_task_stack_noted[task_id].load(std::memory_order_relaxed) < Task_Stack_Note_Interval)
+        return;
+    s_task_stack_noted[task_id].store(now, std::memory_order_relaxed);
+    const uint32_t free_bytes = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) + 1; // + 1: 0 means not noted
+    uint32_t least = s_task_stack_least_free[task_id].load(std::memory_order_relaxed);
+    while ((least == 0 || free_bytes < least) &&
+           !s_task_stack_least_free[task_id].compare_exchange_weak(least, free_bytes, std::memory_order_relaxed))
+    {
+    }
+}
+
+#if CALCULATE_STACK_SIZES_ENABLED
+
+// For the purposes of calculating stack sizes force DEBUG_ENABLED if any of the stack size calculations are enabled
+// so that the task includes all debug processing is included in the stack size calculations
+#define DEBUG_ENABLED 1
+
+// For the purposes of calculating stack sizes force all MQTT tasks as enabled if MQTT_ENABLED is enabled
+#if MQTT_ENABLED
+#define MQTT_CLIENT_REPORTING_ENABLED 1
+#define MQTT_MEMORY_REPORTING_ENABLED 1
+#define MQTT_HISTORICAL_REPORTING_ENABLED 1
+#endif
 
 static size_t Highest_Ethernet_Transport_Recovery_Task_Stack_Size = 0;
 static size_t Highest_GNSS_Recovery_Task_Stack_Size = 0;
@@ -571,6 +615,15 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
 }
 
 #endif
+
+// Called in the task loops: the high water mark for the diagnostics, and the log of the stack size calculation
+static inline void task_stack_checkpoint(TaskToPinToCore_t task_id)
+{
+#if CALCULATE_STACK_SIZES_ENABLED
+    report_current_task_stack_usage(task_id);
+#endif
+    note_task_stack(task_id);
+}
 
 #ifndef UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
 #define UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED 1
@@ -3661,9 +3714,7 @@ static void ntp_cache_purge_task(void *parameter)
         vTaskDelay(pdMS_TO_TICKS(60000));
         ntp_cache_purge_expired();
 
-#if CALCULATE_STACK_SIZES_ENABLED
-        report_current_task_stack_usage(NTP_Cache_Purge);
-#endif
+        task_stack_checkpoint(NTP_Cache_Purge);
     }
 }
 
@@ -3685,9 +3736,7 @@ static void hardware_ntp_server_task(void *parameter)
                                              ntp_request.netif, &ntp_request.rx_timestamp, ipv6);
             else
                 release_hardware_ntp_request_buffer(ntp_request.frame);
-#if CALCULATE_STACK_SIZES_ENABLED
-            report_current_task_stack_usage(Hardware_NTP_Server);
-#endif
+            task_stack_checkpoint(Hardware_NTP_Server);
         }
     }
 }
@@ -3868,9 +3917,7 @@ static void ethernet_recovery_worker_task(void *parameter)
 {
     const TaskHandle_t supervisor = static_cast<TaskHandle_t>(parameter);
     const ethernet_recovery_result_t result = restart_ethernet_transport();
-#if CALCULATE_STACK_SIZES_ENABLED
-    report_current_task_stack_usage(Ethernet_Transport_Recovery);
-#endif
+    task_stack_checkpoint(Ethernet_Transport_Recovery);
     xTaskNotify(supervisor, static_cast<uint32_t>(result) + 1, eSetValueWithOverwrite);
     vTaskDelete(nullptr);
 }
@@ -4057,9 +4104,7 @@ static void ethernet_transport_recovery_task(void *parameter)
             else
                 consecutive_rx_unavailable_recoveries = 0;
         }
-#if CALCULATE_STACK_SIZES_ENABLED
-        report_current_task_stack_usage(Ethernet_Transport_Recovery);
-#endif
+        task_stack_checkpoint(Ethernet_Transport_Recovery);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -4314,9 +4359,7 @@ static bool start_gnss_uart(uint32_t baud)
     config.task_stack = GNSS_UART_Reader_Task_Stack_Size;
     config.task_priority = 10; // below the timing tasks (PPS 14, GNSS time sync 15, NTP 17 / 20)
     config.task_core = 0;
-#if CALCULATE_STACK_SIZES_ENABLED
-    config.loop_hook = []() { report_current_task_stack_usage(GNSS_UART_Reader); };
-#endif
+    config.loop_hook = []() { task_stack_checkpoint(GNSS_UART_Reader); };
     return gnss_uart_start(config);
 }
 
@@ -6575,9 +6618,7 @@ static void pps_discipline_task(void *parameter)
             }
         }
 
-#if CALCULATE_STACK_SIZES_ENABLED
-        report_current_task_stack_usage(PPS_Discipline);
-#endif
+        task_stack_checkpoint(PPS_Discipline);
     }
 }
 
@@ -8020,9 +8061,7 @@ static void mqtt_service_task(void *parameter)
         }
         vTaskDelay(pdMS_TO_TICKS(MQTT_QUEUED_PUBLISH_DELAY_MS));
 
-#if CALCULATE_STACK_SIZES_ENABLED
-        report_current_task_stack_usage(MQTT_Service);
-#endif
+        task_stack_checkpoint(MQTT_Service);
     }
 }
 
@@ -9227,9 +9266,7 @@ static void ote_service_task(void *parameter)
         if (should_reboot)
             controlled_restart("over_the_ethernet_update");
 
-#if CALCULATE_STACK_SIZES_ENABLED
-        report_current_task_stack_usage(OTE_Service);
-#endif
+        task_stack_checkpoint(OTE_Service);
     }
 }
 
@@ -9485,9 +9522,7 @@ static void gnss_runtime_recovery_task(void *parameter)
 
     setup_gnss();
 
-#if CALCULATE_STACK_SIZES_ENABLED
-    report_current_task_stack_usage(GNSS_Recovery);
-#endif
+    task_stack_checkpoint(GNSS_Recovery);
 
     s_gnss_recovery_in_progress.store(false);
     xTaskNotifyGive(sync_task_handle);
@@ -9747,9 +9782,7 @@ static void gnss_time_sync_task(void *parameter)
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
-#if CALCULATE_STACK_SIZES_ENABLED
-        report_current_task_stack_usage(GNSS_Time_Sync);
-#endif
+        task_stack_checkpoint(GNSS_Time_Sync);
     }
 }
 
@@ -9947,9 +9980,7 @@ static void ntp_server_task(void *parameter)
 #if DEBUG_ENABLED
             ESP_LOGW(TAG, "NTP socket select failed: errno %d", errno);
 #endif
-#if CALCULATE_STACK_SIZES_ENABLED
-            report_current_task_stack_usage(NTP_Server);
-#endif
+            task_stack_checkpoint(NTP_Server);
             continue;
         }
         if (ready == 0)
@@ -9966,9 +9997,7 @@ static void ntp_server_task(void *parameter)
             int sock = sockets[index];
             if (sock < 0 || !FD_ISSET(sock, &read_fds))
             {
-#if CALCULATE_STACK_SIZES_ENABLED
-                report_current_task_stack_usage(NTP_Server);
-#endif
+                task_stack_checkpoint(NTP_Server);
                 continue;
             }
 
@@ -9985,17 +10014,13 @@ static void ntp_server_task(void *parameter)
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
                     {
-#if CALCULATE_STACK_SIZES_ENABLED
-                        report_current_task_stack_usage(NTP_Server);
-#endif
+                        task_stack_checkpoint(NTP_Server);
                         break;
                     }
 #if DEBUG_ENABLED
                     ESP_LOGW(TAG, "recvfrom failed: errno %d", errno);
 #endif
-#if CALCULATE_STACK_SIZES_ENABLED
-                    report_current_task_stack_usage(NTP_Server);
-#endif
+                    task_stack_checkpoint(NTP_Server);
                     break;
                 }
 
@@ -10015,9 +10040,7 @@ static void ntp_server_task(void *parameter)
                         s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
                     }
 #endif
-#if CALCULATE_STACK_SIZES_ENABLED
-                    report_current_task_stack_usage(NTP_Server);
-#endif
+                    task_stack_checkpoint(NTP_Server);
                     continue;
                 }
 
@@ -10038,9 +10061,7 @@ static void ntp_server_task(void *parameter)
                         s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
                     }
 #endif
-#if CALCULATE_STACK_SIZES_ENABLED
-                    report_current_task_stack_usage(NTP_Server);
-#endif
+                    task_stack_checkpoint(NTP_Server);
                     continue;
                 }
 
@@ -10194,21 +10215,13 @@ static void ntp_server_task(void *parameter)
                 if (format_socket_address(source_addr, source_address, sizeof(source_address)))
                     ESP_LOGI(TAG, "NTP -> %s", source_address);
 #endif
-#if CALCULATE_STACK_SIZES_ENABLED
-                report_current_task_stack_usage(NTP_Server);
-#endif
+                task_stack_checkpoint(NTP_Server);
             }
-#if CALCULATE_STACK_SIZES_ENABLED
-            report_current_task_stack_usage(NTP_Server);
-#endif
+            task_stack_checkpoint(NTP_Server);
         }
-#if CALCULATE_STACK_SIZES_ENABLED
-        report_current_task_stack_usage(NTP_Server);
-#endif
+        task_stack_checkpoint(NTP_Server);
     }
-#if CALCULATE_STACK_SIZES_ENABLED
-    report_current_task_stack_usage(NTP_Server);
-#endif
+    task_stack_checkpoint(NTP_Server);
 }
 
 #if STARTUP_HEALTH_TEST_ENABLED
@@ -11110,9 +11123,7 @@ static void update_LED_LCD_Button_task(void *parameter)
 
         vTaskDelay(pdMS_TO_TICKS(50));
 
-#if CALCULATE_STACK_SIZES_ENABLED
-        report_current_task_stack_usage(LED_LCD_Button);
-#endif
+        task_stack_checkpoint(LED_LCD_Button);
     }
 }
 
@@ -11408,6 +11419,19 @@ void app_get_diag(web_diag_t &diag)
         }
     }
 #endif
+
+    // Stack reserve of the tasks (review E-14): only tasks that run in this configuration and noted it already
+    static_assert(Watched_Task_Count < WEB_DIAG_TASKS, "room for the web admin task");
+    for (size_t i = 0; i < Watched_Task_Count; ++i)
+    {
+        const uint32_t least = s_task_stack_least_free[i].load(std::memory_order_relaxed);
+        if (least != 0)
+            diag.tasks[diag.task_count++] = {Watched_Tasks[i].name, static_cast<uint32_t>(Watched_Tasks[i].stack_size), least - 1};
+    }
+    // Internal heap: free and lowest free are counters; the largest block walks the free list once
+    diag.heap_free = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    diag.heap_min_free = static_cast<uint32_t>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    diag.heap_largest_block = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
     diag.uart_overflows = gnss_uart_overflows();
     diag.first_resolved_s = -1;

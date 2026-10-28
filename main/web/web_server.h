@@ -63,6 +63,14 @@ static constexpr size_t WEB_DIAG_TAUS = 11;     // tau = 1, 2, 4, ..., 1024 s
 static constexpr size_t WEB_DIAG_ISR_BINS = 6;  // excess up to 0.25, 0.5, 1, 2, 5 us and above
 static constexpr size_t WEB_DIAG_RMC_BINS = 10; // 100 ms each within the first second after the PPS edge
 static constexpr size_t WEB_DIAG_TX_PHASE_BINS = 10; // 100 ms each of the second of the basic mode T3
+static constexpr size_t WEB_DIAG_TASKS = 12;         // the watched tasks of the firmware and the web admin task
+
+struct web_diag_task_t
+{
+    const char *name;    // a string literal
+    uint32_t stack_size; // bytes
+    uint32_t least_free; // bytes never used since the task started (stack high water mark)
+};
 
 struct web_diag_t
 {
@@ -171,6 +179,12 @@ struct web_diag_t
     uint16_t rf_noise_per_ms;
     uint16_t rf_agc_count;        // 0 to 8191
     uint8_t rf_jam_indicator;     // CW jamming indicator, 0 to 255
+    // Device: stack reserve of the tasks that noted it, and the internal heap
+    web_diag_task_t tasks[WEB_DIAG_TASKS];
+    uint8_t task_count;
+    uint32_t heap_free;
+    uint32_t heap_min_free;       // lowest free size since the start
+    uint32_t heap_largest_block;
 };
 
 // Starts the web admin in its own task (TLS identity, password hash, HTTPS server). Call once the Ethernet

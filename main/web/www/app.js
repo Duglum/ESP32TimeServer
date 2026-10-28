@@ -1044,6 +1044,22 @@
     }
     fillList('dg-gnss', gnss, '', false);
 
+    // Internal heap and the stack reserve of the tasks, the tightest first (review E-14)
+    const kb = (bytes) => num(bytes / 1024, 1);
+    $('dg-heap').textContent = t('free {free} kB, lowest since the start {min} kB, largest block {block} kB',
+      { free: kb(d.heap_free), min: kb(d.heap_min_free), block: kb(d.heap_largest_block) });
+    const tasks = (d.tasks || []).slice().sort((x, y) => x.free / x.size - y.free / y.size);
+    const stacks = $('dg-stacks');
+    stacks.replaceChildren();
+    for (const task of tasks) {
+      const li = document.createElement('li');
+      li.textContent = t('{name}: at least {free} of {size} B free ({p})',
+        { name: task.name, free: task.free, size: task.size, p: percent(task.free, task.size) });
+      if (task.free < task.size / 10) li.className = 'bad';
+      stacks.appendChild(li);
+    }
+    diagRow('dg-stacks', tasks.length > 0);
+
     // Core dump of the last crash (review E-07)
     const crash = d.crash || {};
     $('dg-crash').textContent = crash.present

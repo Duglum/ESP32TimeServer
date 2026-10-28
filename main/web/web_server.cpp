@@ -1390,6 +1390,8 @@ namespace
         if (d == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
         app_get_diag(*d);
+        if (d->task_count < WEB_DIAG_TASKS) // this task: the web admin (TLS, JSON)
+            d->tasks[d->task_count++] = {"httpd", static_cast<uint32_t>(TASK_STACK), static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr))};
 
         cJSON *root = cJSON_CreateObject();
         cJSON_AddBoolToObject(root, "servo", d->servo);
@@ -1461,6 +1463,18 @@ namespace
         cJSON_AddNumberToObject(root, "tx_delay_v6_samples", d->tx_delay_v6_samples);
         cJSON_AddItemToObject(root, "tx_delay_min_ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_min_ns), 2));
         cJSON_AddItemToObject(root, "tx_delay_max_ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_max_ns), 2));
+        cJSON *tasks = cJSON_AddArrayToObject(root, "tasks");
+        for (size_t i = 0; i < d->task_count; ++i)
+        {
+            cJSON *row = cJSON_CreateObject();
+            cJSON_AddStringToObject(row, "name", d->tasks[i].name);
+            cJSON_AddNumberToObject(row, "size", d->tasks[i].stack_size);
+            cJSON_AddNumberToObject(row, "free", d->tasks[i].least_free);
+            cJSON_AddItemToArray(tasks, row);
+        }
+        cJSON_AddNumberToObject(root, "heap_free", d->heap_free);
+        cJSON_AddNumberToObject(root, "heap_min_free", d->heap_min_free);
+        cJSON_AddNumberToObject(root, "heap_largest_block", d->heap_largest_block);
         cJSON *phase = cJSON_AddArrayToObject(root, "tx_delay_phase");
         for (size_t family = 0; family < 2; ++family)
         {
