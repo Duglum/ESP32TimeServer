@@ -49,6 +49,7 @@ static constexpr uint32_t GNSS_UBX_CFG_TP_POL_TP1 = 0x1005000b;          // L: 1
 static constexpr uint32_t GNSS_UBX_CFG_TP_TIMEGRID_TP1 = 0x2005000c;     // E1: 0 UTC, 1 GPS, 2 GLONASS, 3 BeiDou, 4 Galileo
 static constexpr uint32_t GNSS_UBX_CFG_TP_FREQ_TP1 = 0x40050024;         // U4, Hz (without lock)
 static constexpr uint32_t GNSS_UBX_CFG_TP_FREQ_LOCK_TP1 = 0x40050025;    // U4, Hz
+static constexpr uint32_t GNSS_UBX_CFG_ITFM_ENABLE = 0x1041000d;         // L: interference (jamming) detection
 
 // Dynamic platform models (CFG-NAVSPG-DYNMODEL)
 static constexpr uint8_t GNSS_UBX_DYNMODEL_PORTABLE = 0;

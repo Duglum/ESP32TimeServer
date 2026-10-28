@@ -7099,6 +7099,32 @@ static void configure_gnss_dynamic_model()
                  after == 255 ? "nothing (no answer)" : gnss_dynamic_model_name(after));
 }
 
+// U-Blox UBX protocol: the interference monitor of the receiver is switched on, so MON-RF reports a jamming state
+// (off by default on the M10: the state stays "unknown"). Only in RAM: the receiver's default comes back after a power
+// cycle and is set again at the next start; it only watches the RF input and does not change the time pulse.
+static void configure_gnss_interference_monitor()
+{
+    static constexpr uint32_t timeout_ms = 1100;
+    const auto read_enabled = []() -> int
+    {
+        uint32_t value = 0;
+        return gnss_ubx_val_get(GNSS_UBX_CFG_ITFM_ENABLE, GNSS_UBX_LAYER_RAM, &value, timeout_ms) ? (value != 0 ? 1 : 0) : -1;
+    };
+    const int before = read_enabled();
+    if (before == 1)
+    {
+        ESP_LOGI(TAG, "GNSS interference monitor: on");
+        return;
+    }
+    const gnss_ubx_cfg_item_t enable{GNSS_UBX_CFG_ITFM_ENABLE, 1};
+    const bool written = gnss_ubx_val_set(&enable, 1, GNSS_UBX_LAYER_RAM, timeout_ms);
+    if (read_enabled() == 1)
+        ESP_LOGI(TAG, "GNSS interference monitor: on (switched on in RAM, read back)");
+    else
+        ESP_LOGW(TAG, "GNSS interference monitor: switching it on %s; the jamming state of MON-RF stays unknown",
+                 written ? "was acknowledged but not taken over" : "failed");
+}
+
 // Time pulse configuration (CFG-TP, read at the setup) and RF status (MON-RF, polled by the GNSS time sync task) of a
 // u-blox receiver, for the log, the status page and the diagnostics (review G-03). s_gnss_info_mutex guards both.
 struct gnss_timepulse_info_t
@@ -7317,6 +7343,7 @@ static void setup_gnss()
     if (s_gnss_ublox && !s_use_nmea_fallback)
     {
         configure_gnss_dynamic_model();
+        configure_gnss_interference_monitor();
         read_gnss_time_pulse();
     }
     else if (s_gnss_ublox)

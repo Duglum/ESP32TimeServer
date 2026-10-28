@@ -95,6 +95,7 @@ Contents
 | 66 | **One year threshold for the GNSS date, from the build date** (2026-10-28, review Z-23) | NMEA and UBX refuse a GNSS date before the year of the build (before: 2022 and 2025) |
 | 67 | **NTP time stamps rounded instead of truncated** (2026-10-28, review Z-14) | the ns to 2^-32 s conversion of T2, T3 and the TX delay no longer has a bias of -0.116 ns |
 | 68 | **PPS task on the core of the PPS interrupt** (2026-10-28, review Z-17) | the PPS task is woken on its own core and no longer runs beside the hardware NTP task on core 1 |
+| 69 | **Interference monitor of the u-blox receiver switched on** (2026-10-28, review 6.2) | MON-RF reports a jamming state (OK, warning, critical) instead of *unknown* |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1062,6 +1063,15 @@ Review Z-17. The PPS task (priority 14) had no core affinity, so FreeRTOS ran it
 - On core 0 the task can be delayed by higher-priority tasks there (esp_timer, lwIP, GNSS time sync, the system event task), as it could before on that core; its deadline is the next edge, about 1 s.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet.
 
+### 4.68 Interference monitor of the u-blox receiver switched on (2026-10-28)
+
+Review 6.2 (point 5). The board test with the M10 showed the jamming state of MON-RF as *unknown* (4.44): the interference monitor of the receiver is off by default, so it reports no state.
+
+- New `configure_gnss_interference_monitor()` after the dynamic model (UBX protocol only): reads `CFG-ITFM-ENABLE` (key 0x1041000d) from RAM; if it is off, sets it in **RAM only** (no BBR, no flash) and reads it back. The receiver's default returns after a power cycle and the firmware sets it again at the next start. Nothing is sent to NMEA receivers (GT-U16).
+- Console: `GNSS interference monitor: on`, `... on (switched on in RAM, read back)`, or a warning `... switching it on was acknowledged but not taken over` / `failed`; the jamming state then stays *unknown*.
+- The monitor only watches the RF input (CW and broadband interference); the time pulse and the navigation are unchanged. The MON-RF line of the diagnostics (4.54) shows the state without a change of the page.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1298,6 +1308,7 @@ Always printed (brief):
 - Firmware update (4.47): `New firmware after an update: it is kept once ...`, `Firmware update checked: the new firmware is kept`, `Firmware update check failed (...): starting the previous firmware`, `Firmware update: the new firmware is kept (restart requested on the web admin page)`
 - Core dump (4.46): `A core dump of a crash is stored: task ..., PC 0x..., ...`, `No core dump partition: crashes are not recorded (flash the partition table once over USB)`
 - U-Blox UBX protocol (4.44): `GNSS time pulse: on, period ..., length ..., rising edge, UTC grid, cable delay ... ns, user delay ... ns` and the warnings for the time pulse configuration
+- U-Blox UBX protocol (4.68): `GNSS interference monitor: on`, `... on (switched on in RAM, read back)` or a warning that it could not be switched on
 - `PTP clock: 80 MHz PLL source, time stamp steps of 13 ns` or a warning that names the failed step (4.52): `PTP clock: the 80 MHz PLL source could not be switched on (...)`, `... the EMAC refused the 80 MHz PLL source (...)` or `... the 80 MHz PLL source does not run at its rate (n ns in m ns)`, each `using the 40 MHz crystal (40 ns steps)`; firmware before 4.52: `... does not work ...`
 - `PTP clock: free-running and frequency disciplined, measured against the PPS by software readings` or `PTP PPS loopback on GPIO n: the PTP clock is measured against the PPS in hardware` (at the Ethernet start)
 - Loopback problems: `PTP PPS loopback: PPS output on GPIO n failed ...`, `... capture channel on GPIO n failed ...`, `... GPIO n cannot be used ...`, `PTP PPS loopback on GPIO n: no usable pulses (...); is the pin free and unconnected?`
@@ -1384,6 +1395,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - PPS without valid GNSS time (4.43): built, not on the board yet. Check with the M10 (time pulse also without fix, if it can be set) or by unplugging the GNSS antenna while the PPS keeps running: console `PPS not followed`, stratum 1 for the PPS holdover time, then as set; after the antenna is back `PPS followed again` and a ramp instead of a step in chrony. With the GT-U16 nothing changes in normal operation. Board test 2026-10-27 with the GT-U16, the UART RX line disconnected while the PPS kept running: `PPS not followed: GNSS time not valid (holdover)`, after reconnecting `PPS followed again: GNSS time valid for 5 s` 21 s later, *Last holdover* +301.7 ns.
 - Diagnostics (4.42): built, formulas checked in Python, page tested against a mock, not on the board yet. Check: open the *Diagnostics* panel; with the loopback the measurement says *PTP PPS loopback*, the innovation RMS after a minute is a few ns, ADEV at 1 s some 1e-9 to 1e-8 and falling with tau, TDEV a few ns at 1 s; the hardware path shows nearly 100 % interleaved for the chrony client; MQTT reports carry `time_quality`. Measure the stacks of the PPS task, `ntp_server` and the MQTT task once with `CALCULATE_STACK_SIZES_ENABLED 1` (frames +16, +16 and +112 B). Board test 2026-10-26: PTP PPS loopback, innovation RMS about 9 ns (GT-U16) and 10 ns (M10), noise 7 ns, ADEV(1 s) 1.4e-8 falling to 1.3e-9 at 16 s and then flat (crystal); stacks measured. MQTT `time_quality` not checked (MQTT off; 2026-10-28: not pursued).
 - Native NMEA reader (4.36): built and modelled, page tested against a mock, not tested on the board yet. Check with the GT-U16: synchronisation and stratum 1 as before (RMC only), then with GGA enabled (`$CFGMSG,0,0,1`): satellites and fix quality on the status page, the RMC phase (stable, some 10 to a few 100 ms), the minimum satellites setting (e.g. 30: stratum 16 after a few seconds; back to 0: stratum 1), and the stack of the `gnss_nmea` task with `CALCULATE_STACK_SIZES_ENABLED 1`. Board test 2026-10-26 with the GT-U16: synchronisation and stratum 1, with GGA 23 satellites and fix quality 1, RMC 36 to 67 ms after the PPS; stack of the reader measured (`43658df`).
+- Interference monitor (4.68): with the M10 the console shows `GNSS interference monitor: on (switched on in RAM, read back)` and the diagnostics MON-RF line `jamming OK` instead of *unknown*; the innovation RMS of the PTP clock is unchanged.
 - PPS task on core 0 (4.67): the diagnostics show the same innovation RMS (about 9 to 10 ns), no growth of the loopback rejections or of the filter outliers, and the PPS interrupt histogram as before.
 - IPv6 rate limit per /64 (4.64): a local IPv6 client (same /64) at `minpoll -4` keeps its replies; requests from a remote /64 with changing addresses are held to the limit together.
 - IPv6 own addresses (4.63): chrony over IPv6 keeps `Interleaved: Yes` and `TX timestamping: Hardware` (global and, if used, link-local address); after a change of the prefix (router) the new address is answered by the hardware path within about a second.
