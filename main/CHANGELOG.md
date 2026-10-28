@@ -104,6 +104,7 @@ Contents
 | 75 | **Cppcheck over all sources** (2026-10-28, review S-16) | no defect found; the 153 messages are false positives or style |
 | 76 | **Host tests and fuzzing of the GNSS parsers and the NTP client cache** (2026-10-28, review S-16) | `testing/host`: 842 checks and two libFuzzer targets with AddressSanitizer and UndefinedBehaviorSanitizer on the PC; no defect found |
 | 77 | **Restart after a receive hang of the EMAC** (2026-10-28, board flood test) | an NTP flood of 15000 requests per second could stop the Ethernet receive path for good (no NTP, ping or web page until a power cycle); the device now detects it and restarts |
+| 78 | **Load shedding from 10000 requests per second** (2026-10-28) | the threshold of 14500 per second (chip revision above 1.3) was above what the board can receive; the board answers at most 10000 per second |
 
 No memory leak was found in the review (section 4.13).
 
@@ -291,7 +292,7 @@ This is the mode before the follow-up; it is kept as an option. The default is t
 ### 4.15 Stability, memory, task stacks (review)
 
 - Memory leaks: none found (checked: every path of `ntp_ethernet_input`, request buffer pool, one-shot tasks, MQTT/TF queue, NTP cache, LCD).
-- `ntp_ethernet_input` (EMAC RX task, up to 14500 frames per second): no mutex, no address string copies and no `inet_pton` per NTP frame any more (only needed before "open for business"; requests of the device to itself never arrive through the EMAC).
+- `ntp_ethernet_input` (EMAC RX task, up to 14500 frames per second at the time; about 10600 measured in 4.76): no mutex, no address string copies and no `inet_pton` per NTP frame any more (only needed before "open for business"; requests of the device to itself never arrive through the EMAC).
 - Seqlock fences added for the NTP sync state; the PTP compensation has its own seqlock.
 - MQTT report: `len += snprintf(...)` could move past the end of the buffer and corrupt memory on long reports; replaced by `json_append()`. A queued TF-card file larger than a report is deleted instead of being read into the heap.
 - `ntp_auth.cpp`: each PSA hash step is checked (a failed setup/update was stored as `PSA_SUCCESS`); a log line with missing printf arguments was removed.
@@ -1168,6 +1169,16 @@ Change (`ethernet_transport_recovery_task()`):
 - Stack: frame of the recovery task 224 -> 240 bytes (task 2535 bytes, at least 30 % free in the board test of 4.73).
 - Verified: build (-O2, no warning). Not on the board yet.
 
+### 4.77 Load shedding from 10000 requests per second (2026-10-28)
+
+The global load shedding (`admit_ntp_request()`: at most a tenth of the threshold per 100 ms window, the rest is dropped before the reply) started at 14500 requests per second on chip revisions above 1.3 (8500 up to 1.3), values taken over from upstream. The flood test of 4.76 showed that the board never gets there: of 14915 requests per second the EMAC delivered about 10600 per second, the rest was lost in the receive DMA and the Rx FIFO before any software saw it, and only 602 of 53222 requests were shed.
+
+- `NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion_above_1_3` 14500 -> 10000 (on the request of the owner). Chip revisions up to 1.3 keep 8500 (not measured).
+- Effect: in an overload the board answers at most 10000 requests per second and sheds the rest; replies, hardware TX time stamps and cache updates of the shed requests are saved. The status shows load shedding (LED/LCD warning, diagnostics counter) as soon as the threshold is passed.
+- Not an effect: the receive hang of 4.76 happens in the EMAC before the load shedding sees a frame, so this change does not prevent it.
+- Console at the start: `NTP load shedding threshold set to 10000 requests per second`.
+- Verified: build (-O2, no warning). Not on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1199,7 +1210,7 @@ Everything else is handed to lwIP, which applies its own rules (broadcast reques
 ### 5.3 Exposure
 
 - Amplification: none worth mentioning (mode 3 → mode 4, same size; no mode 6/7).
-- Flooding: global load shedding (8500 or 14500 requests per second depending on the chip revision) and the Ethernet recovery task; a flood above the receive capacity of the EMAC can hang its receive path, which restarts the device (4.76). A single host flooding above the global threshold still triggers drops for all clients; a flood with spoofed sources pushes real clients out of the interleaved cache (fallback to basic mode) only at about 1000 to 2000 answered requests per poll interval of the client (exchange map, 4.29; before 4.29 one spoofed request with the client's address was enough). Per-client rate limit (4.26, default 20 requests per second per IP address): a single host below the global threshold gets at most its limit answered, the rest is dropped before the reply path. Since 4.30 requests with a T2 cookie (the interleaved requests of the real client) have a bucket of their own, so a host sending with a client's address cannot exhaust it.
+- Flooding: global load shedding (8500 or 10000 requests per second depending on the chip revision, 14500 before 4.77) and the Ethernet recovery task; a flood above the receive capacity of the EMAC can hang its receive path, which restarts the device (4.76). A single host flooding above the global threshold still triggers drops for all clients; a flood with spoofed sources pushes real clients out of the interleaved cache (fallback to basic mode) only at about 1000 to 2000 answered requests per poll interval of the client (exchange map, 4.29; before 4.29 one spoofed request with the client's address was enough). Per-client rate limit (4.26, default 20 requests per second per IP address): a single host below the global threshold gets at most its limit answered, the rest is dropped before the reply path. Since 4.30 requests with a T2 cookie (the interleaved requests of the real client) have a bucket of their own, so a host sending with a client's address cannot exhaust it.
 - Time spoofing: possible on the path without authentication; NTPv4 symmetric keys are available (SHA-256 truncated to 160 bit, constant time comparison). Unauthenticated requests are still answered when authentication is enabled (by design).
 - OTE (if enabled, 4.24): upload over TLS with the login of the page or, for scripts, the web admin password (HTTP Basic, throttled like the login, refused while the factory password is in use, 4.27); the image is checked for project and chip revision and verified, but not signed: whoever knows the web admin password can replace the firmware. Use a long random password, keep OTE off when it is not needed, consider Secure Boot V2 and flash encryption.
 - MQTT (if enabled): `mqtt://` sends the credentials in clear text; prefer `mqtts://` (the broker certificate is checked against the ESP-IDF CA bundle).

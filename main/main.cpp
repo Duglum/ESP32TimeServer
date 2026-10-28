@@ -176,8 +176,9 @@ static char s_lcd_title[WEB_LCD_TITLE_SIZE] = "";     // protected by s_live_set
 static char s_time_zone[WEB_TZ_SIZE] = "";            // protected by s_live_settings_mutex
 
 // the following is used to determine the NTP load shedding threshold based on the ESP32-P4 chip version
+// (above 1.3: 14500 upstream; the board test of 4.76 received at most about 10600 frames per second, see CHANGELOG 4.77)
 static constexpr uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion1_3 = 8500;
-static constexpr uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion_above_1_3 = 14500;
+static constexpr uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion_above_1_3 = 10000;
 static uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold = 0;
 
 // Optional startup health test
