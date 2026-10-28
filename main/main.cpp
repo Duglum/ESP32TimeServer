@@ -2654,8 +2654,12 @@ static bool gnss_identity_matches(const gnss_nvs_data_t &stored, const gnss_iden
 }
 
 #if UPTIME_RESTART_BUTTON_ENABLED
+static bool s_button_ready = false; // the GPIO of the button is set up (setup_the_button)
+
 static bool check_uptime_request()
 {
+    if (!s_button_ready)
+        return false;
 
     static bool button_was_pressed = false;
     static uint32_t button_press_start_ms = 0;
@@ -4855,16 +4859,46 @@ static void setup_pps_input()
     if (s_pps_semaphore == nullptr || s_pps_timestamp_queue == nullptr || s_pps_sync_timestamp_queue == nullptr)
         ESP_LOGE(TAG, "PPS input: out of memory for the PPS queues");
 
+    // A failure leaves the PPS input off instead of aborting (review E-08): an abort restarts the board, the same
+    // failure comes again, and the web admin, where the PPS pin can be changed, is never reachable. Without PPS
+    // edges the server answers as after a PPS loss (stratum 16 or no answer, as set).
+    bool channel_enabled = false;
+    bool timer_enabled = false;
+    const auto pps_input_failed = [&](const char *step, esp_err_t err)
+    {
+        ESP_LOGE(TAG, "PPS input on GPIO %d: %s failed (%s); running without PPS, check the PPS pin in the web admin",
+                 static_cast<int>(s_cfg->gnss_pps_pin), step, esp_err_to_name(err));
+        if (s_pps_capture_channel != nullptr)
+        {
+            if (channel_enabled)
+                mcpwm_capture_channel_disable(s_pps_capture_channel);
+            mcpwm_del_capture_channel(s_pps_capture_channel);
+            s_pps_capture_channel = nullptr;
+        }
+        if (s_pps_capture_timer != nullptr)
+        {
+            if (timer_enabled)
+                mcpwm_capture_timer_disable(s_pps_capture_timer);
+            mcpwm_del_capture_timer(s_pps_capture_timer);
+            s_pps_capture_timer = nullptr;
+        }
+    };
+
     mcpwm_capture_timer_config_t timer_config{};
     timer_config.group_id = 0;
     timer_config.clk_src = MCPWM_CAPTURE_CLK_SRC_DEFAULT;
     timer_config.resolution_hz = PPS_CAPTURE_RESOLUTION_HZ;
-    ESP_ERROR_CHECK(mcpwm_new_capture_timer(&timer_config, &s_pps_capture_timer));
+    esp_err_t err = mcpwm_new_capture_timer(&timer_config, &s_pps_capture_timer);
+    if (err != ESP_OK)
+    {
+        s_pps_capture_timer = nullptr;
+        pps_input_failed("capture timer", err);
+        return;
+    }
 
     // Query the actual resolution: the driver may differ from the requested value
     uint32_t actual_hz = 0;
-    ESP_ERROR_CHECK(mcpwm_capture_timer_get_resolution(s_pps_capture_timer, &actual_hz));
-    if (actual_hz == 0)
+    if (mcpwm_capture_timer_get_resolution(s_pps_capture_timer, &actual_hz) != ESP_OK || actual_hz == 0)
         actual_hz = PPS_CAPTURE_RESOLUTION_HZ;
     s_pps_capture_hz = actual_hz;
 #if DEBUG_ENABLED
@@ -4876,14 +4910,42 @@ static void setup_pps_input()
     channel_config.gpio_num = s_cfg->gnss_pps_pin;
     channel_config.prescale = 1;
     channel_config.flags.pos_edge = true;
-    ESP_ERROR_CHECK(mcpwm_new_capture_channel(s_pps_capture_timer, &channel_config, &s_pps_capture_channel));
+    err = mcpwm_new_capture_channel(s_pps_capture_timer, &channel_config, &s_pps_capture_channel);
+    if (err != ESP_OK)
+    {
+        s_pps_capture_channel = nullptr;
+        pps_input_failed("capture channel", err);
+        return;
+    }
 
     mcpwm_capture_event_callbacks_t callbacks{};
     callbacks.on_cap = pps_capture_callback;
-    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(s_pps_capture_channel, &callbacks, nullptr));
-    ESP_ERROR_CHECK(mcpwm_capture_channel_enable(s_pps_capture_channel));
-    ESP_ERROR_CHECK(mcpwm_capture_timer_enable(s_pps_capture_timer));
-    ESP_ERROR_CHECK(mcpwm_capture_timer_start(s_pps_capture_timer));
+    err = mcpwm_capture_channel_register_event_callbacks(s_pps_capture_channel, &callbacks, nullptr);
+    if (err != ESP_OK)
+    {
+        pps_input_failed("capture callback", err);
+        return;
+    }
+    err = mcpwm_capture_channel_enable(s_pps_capture_channel);
+    if (err != ESP_OK)
+    {
+        pps_input_failed("capture channel enable", err);
+        return;
+    }
+    channel_enabled = true;
+    err = mcpwm_capture_timer_enable(s_pps_capture_timer);
+    if (err != ESP_OK)
+    {
+        pps_input_failed("capture timer enable", err);
+        return;
+    }
+    timer_enabled = true;
+    err = mcpwm_capture_timer_start(s_pps_capture_timer);
+    if (err != ESP_OK)
+    {
+        pps_input_failed("capture timer start", err);
+        return;
+    }
     s_pps_isr_core = static_cast<BaseType_t>(xPortGetCoreID());
 }
 
@@ -9114,7 +9176,12 @@ static void setup_the_button()
     config.pull_up_en = GPIO_PULLUP_ENABLE;
     config.pull_down_en = GPIO_PULLDOWN_DISABLE;
     config.intr_type = GPIO_INTR_DISABLE;
-    ESP_ERROR_CHECK(gpio_config(&config));
+    if (gpio_config(&config) != ESP_OK) // review E-08: no abort at the start
+    {
+        ESP_LOGE(TAG, "Restart button on GPIO %d could not be set up: the button is not used", static_cast<int>(upTimeRestartPin));
+        return;
+    }
+    s_button_ready = true;
 
     // Recovery of a forgotten web admin password: holding the button for 10 s while the device starts erases the
     // web settings, the password and the allow-list (like the factory reset on the page) and restarts
@@ -9935,7 +10002,7 @@ void setup_the_gnss()
     xTaskCreatePinnedToCore(pps_discipline_task, "pps_discipline", PPS_Discipline_Task_Stack_Size, nullptr, 14, nullptr, s_pps_isr_core);
 
 #if PPS_ISR_LATENCY_AUTO
-    if (!s_pps_isr_latency_known)
+    if (!s_pps_isr_latency_known && s_pps_capture_channel != nullptr) // no measurement without a PPS input (E-08)
     {
         // Run the measurement on the other core than the PPS interrupt, like a real PPS edge arrives
         const BaseType_t measure_core = (configNUM_CORES > 1 && s_pps_isr_core != tskNO_AFFINITY)

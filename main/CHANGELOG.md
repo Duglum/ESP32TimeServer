@@ -96,6 +96,7 @@ Contents
 | 67 | **NTP time stamps rounded instead of truncated** (2026-10-28, review Z-14) | the ns to 2^-32 s conversion of T2, T3 and the TX delay no longer has a bias of -0.116 ns |
 | 68 | **PPS task on the core of the PPS interrupt** (2026-10-28, review Z-17) | the PPS task is woken on its own core and no longer runs beside the hardware NTP task on core 1 |
 | 69 | **Interference monitor of the u-blox receiver switched on** (2026-10-28, review 6.2) | MON-RF reports a jamming state (none, warning, critical) instead of *unknown* |
+| 70 | **No abort when the PPS input or the button cannot be set up** (2026-10-28, review E-08) | the board starts without PPS (stratum 16 or no answer, as set) and the web admin stays reachable, instead of restarting in a loop |
 
 No memory leak was found in the review (section 4.13).
 
@@ -1072,6 +1073,16 @@ Review 6.2 (point 5). The board test with the M10 showed the jamming state of MO
 - The monitor only watches the RF input (CW and broadband interference); the time pulse and the navigation are unchanged. The MON-RF line of the diagnostics (4.54) shows the state without a change of the page.
 - Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet.
 
+### 4.69 No abort when the PPS input or the button cannot be set up (2026-10-28)
+
+Review E-08. The setup still had `ESP_ERROR_CHECK` in two places: the seven calls of the PPS capture (`setup_pps_input()`: MCPWM capture timer and channel on the PPS pin) and the GPIO of the restart button. A failure aborted the start; the board restarted, failed again, and the web admin, where a wrong PPS pin could be changed, was never reachable (with a new image the update check of 4.47 would roll it back, otherwise the loop went on).
+
+- `setup_pps_input()`: each step is checked; on a failure the console says `PPS input on GPIO n: <step> failed (<error>); running without PPS, check the PPS pin in the web admin`, the channel and the timer created so far are disabled and deleted, and the start goes on. Without PPS edges the server answers as after a PPS loss (holdover settings: stratum 16 or no answer), the web admin and the status page work. The PTP loopback is not set up without the capture timer (as before), and the ISR latency measurement is not started without a PPS input.
+- Restart button: if its GPIO cannot be set up, `Restart button on GPIO n could not be set up: the button is not used`, and the button is not read (an unconfigured pin could read as pressed and restart the board).
+- No other `ESP_ERROR_CHECK` is left in `main/`. The pins are still checked by the settings (reserved and duplicate pins are refused), so these failures need a driver or hardware fault.
+- Stack: `app_main()` 304 B (was 320 B; `setup_pps_input()` is inlined). No time path change.
+- Verified: build (-O2, no warning), compile check with `CALCULATE_STACK_SIZES_ENABLED 1`. Not on the board yet.
+
 ## 5. Security and open ports
 
 ### 5.1 Open ports
@@ -1308,6 +1319,7 @@ Always printed (brief):
 - Firmware update (4.47): `New firmware after an update: it is kept once ...`, `Firmware update checked: the new firmware is kept`, `Firmware update check failed (...): starting the previous firmware`, `Firmware update: the new firmware is kept (restart requested on the web admin page)`
 - Core dump (4.46): `A core dump of a crash is stored: task ..., PC 0x..., ...`, `No core dump partition: crashes are not recorded (flash the partition table once over USB)`
 - U-Blox UBX protocol (4.44): `GNSS time pulse: on, period ..., length ..., rising edge, UTC grid, cable delay ... ns, user delay ... ns` and the warnings for the time pulse configuration
+- Setup failures (4.69): `PPS input on GPIO n: ... failed (...); running without PPS, check the PPS pin in the web admin`, `Restart button on GPIO n could not be set up: the button is not used`
 - U-Blox UBX protocol (4.68): `GNSS interference monitor: on`, `... on (switched on in RAM, read back)` or a warning that it could not be switched on
 - `PTP clock: 80 MHz PLL source, time stamp steps of 13 ns` or a warning that names the failed step (4.52): `PTP clock: the 80 MHz PLL source could not be switched on (...)`, `... the EMAC refused the 80 MHz PLL source (...)` or `... the 80 MHz PLL source does not run at its rate (n ns in m ns)`, each `using the 40 MHz crystal (40 ns steps)`; firmware before 4.52: `... does not work ...`
 - `PTP clock: free-running and frequency disciplined, measured against the PPS by software readings` or `PTP PPS loopback on GPIO n: the PTP clock is measured against the PPS in hardware` (at the Ethernet start)
@@ -1395,6 +1407,7 @@ The transmit delay compensation of basic mode responses was measured on the boar
 - PPS without valid GNSS time (4.43): built, not on the board yet. Check with the M10 (time pulse also without fix, if it can be set) or by unplugging the GNSS antenna while the PPS keeps running: console `PPS not followed`, stratum 1 for the PPS holdover time, then as set; after the antenna is back `PPS followed again` and a ramp instead of a step in chrony. With the GT-U16 nothing changes in normal operation. Board test 2026-10-27 with the GT-U16, the UART RX line disconnected while the PPS kept running: `PPS not followed: GNSS time not valid (holdover)`, after reconnecting `PPS followed again: GNSS time valid for 5 s` 21 s later, *Last holdover* +301.7 ns.
 - Diagnostics (4.42): built, formulas checked in Python, page tested against a mock, not on the board yet. Check: open the *Diagnostics* panel; with the loopback the measurement says *PTP PPS loopback*, the innovation RMS after a minute is a few ns, ADEV at 1 s some 1e-9 to 1e-8 and falling with tau, TDEV a few ns at 1 s; the hardware path shows nearly 100 % interleaved for the chrony client; MQTT reports carry `time_quality`. Measure the stacks of the PPS task, `ntp_server` and the MQTT task once with `CALCULATE_STACK_SIZES_ENABLED 1` (frames +16, +16 and +112 B). Board test 2026-10-26: PTP PPS loopback, innovation RMS about 9 ns (GT-U16) and 10 ns (M10), noise 7 ns, ADEV(1 s) 1.4e-8 falling to 1.3e-9 at 16 s and then flat (crystal); stacks measured. MQTT `time_quality` not checked (MQTT off; 2026-10-28: not pursued).
 - Native NMEA reader (4.36): built and modelled, page tested against a mock, not tested on the board yet. Check with the GT-U16: synchronisation and stratum 1 as before (RMC only), then with GGA enabled (`$CFGMSG,0,0,1`): satellites and fix quality on the status page, the RMC phase (stable, some 10 to a few 100 ms), the minimum satellites setting (e.g. 30: stratum 16 after a few seconds; back to 0: stratum 1), and the stack of the `gnss_nmea` task with `CALCULATE_STACK_SIZES_ENABLED 1`. Board test 2026-10-26 with the GT-U16: synchronisation and stratum 1, with GGA 23 satellites and fix quality 1, RMC 36 to 67 ms after the PPS; stack of the reader measured (`43658df`).
+- No abort at the setup (4.69): hard to provoke on a working board; a normal start must look as before (`PTP PPS loopback on GPIO 23 ...`, PPS lock, the button works).
 - Interference monitor (4.68): with the M10 the console shows `GNSS interference monitor: on (switched on in RAM, read back)` and the diagnostics MON-RF line `jamming none` instead of *unknown*; the innovation RMS of the PTP clock is unchanged.
 - PPS task on core 0 (4.67): the diagnostics show the same innovation RMS (about 9 to 10 ns), no growth of the loopback rejections or of the filter outliers, and the PPS interrupt histogram as before.
 - IPv6 rate limit per /64 (4.64): a local IPv6 client (same /64) at `minpoll -4` keeps its replies; requests from a remote /64 with changing addresses are held to the limit together.
