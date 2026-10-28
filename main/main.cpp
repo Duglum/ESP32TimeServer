@@ -114,6 +114,7 @@ extern "C"
 #include "esp_mac.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "soc/emac_dma_struct.h"
 #include "soc/emac_mac_struct.h"
 #include "esp_ipc.h"
 #include "mqtt_client.h"
@@ -3947,6 +3948,17 @@ static void enable_receive_all_multicast(esp_eth_handle_t handle)
         ESP_LOGW(TAG, "Unable to switch the Ethernet MAC to receive all multicast frames");
 }
 
+// The receive DMA keeps a frame in the Rx FIFO while no receive descriptor is free, instead of flushing it (DMA
+// operation mode bit DFF; ESP-IDF sets flushing). With flushing, an NTP flood (15000 requests per second) left the Rx
+// FIFO read controller in "reading frame status" for good and no frame arrived any more (CHANGELOG 4.76, 4.78); without
+// it 14 floods in the board test passed. The driver issues a receive poll demand whenever it frees descriptors, so a
+// kept frame is read once there is room; frames arriving meanwhile are dropped by the full Rx FIFO. Set after every
+// esp_eth_start() (the driver does not change the bit, but it sets it at its initialisation).
+static void keep_received_frames_without_descriptor()
+{
+    EMAC_DMA.dmaoperation_mode.dis_flush_recv_frames = 1;
+}
+
 enum class physical_link_status_t : uint8_t
 {
     up,
@@ -4008,6 +4020,7 @@ static ethernet_recovery_result_t restart_ethernet_transport()
         return ethernet_recovery_result_t::driver_failed;
     }
     enable_receive_all_multicast(handle);
+    keep_received_frames_without_descriptor();
 
     // The PTP clock is enabled and set again under the time mutex: the PPS phase correction and the time
     // synchronization write the same clock
@@ -8958,6 +8971,7 @@ static bool start_ethernet_driver()
     if (result != ESP_OK)
         return failed("esp_eth_start", result);
     enable_receive_all_multicast(s_eth_handle);
+    keep_received_frames_without_descriptor();
     return true;
 }
 
