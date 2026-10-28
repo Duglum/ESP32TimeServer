@@ -118,11 +118,13 @@ def connect(host, port, family, context):
 
 
 def early_answer(connection):
-    """The answer of the device before the image is sent (a refusal), or None when it waits for the image.
+    """The answer of the device before the rest of the image is sent (a refusal), or None when it reads the image.
 
-    The device refuses (factory password, wrong password, lock-out, updates off) as soon as it has the headers and
-    closes the connection without reading the image. If image data is still unread then, its TCP stack resets the
-    connection and Windows drops the answer that has already arrived; so the image is only sent when no answer came.
+    The device refuses (factory password, wrong password, lock-out, updates off) as soon as its HTTP server calls the
+    handler, i.e. after the headers and the first byte of the body (the server waits for that byte; without it the
+    request times out with 408), and closes the connection without reading the image. If image data is still unread
+    then, its TCP stack resets the connection and Windows drops the answer that has already arrived; so only the first
+    byte goes with the headers, and the rest is only sent when no answer came.
     """
     connection.sock.settimeout(EARLY_ANSWER_WAIT)
     try:
@@ -183,11 +185,11 @@ def main():
     connection.putheader("Content-Type", "application/octet-stream")
     connection.putheader("Content-Length", str(len(image)))
     connection.putheader("Connection", "close")
-    connection.endheaders()
+    connection.endheaders(image[:1])  # the first byte: the device checks the request when it has it
     password = None
     credentials = None
 
-    sent = 0
+    sent = 1
     send_error = None
     try:
         response = early_answer(connection)
