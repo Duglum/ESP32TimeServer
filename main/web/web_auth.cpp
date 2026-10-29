@@ -38,7 +38,7 @@ namespace
     constexpr uint32_t PBKDF2_ITERATIONS = 10000;
     constexpr size_t SALT_SIZE = 16;
     constexpr size_t HASH_SIZE = 32;
-    constexpr char FACTORY_PASSWORD[] = "password";
+    constexpr char DEFAULT_PASSWORD[] = "password";
 
     struct password_record_t
     {
@@ -369,7 +369,7 @@ void web_auth_init()
 
 bool web_auth_default_password_active()
 {
-    return !s_password_stored && strcmp(WebAdminPassword, FACTORY_PASSWORD) == 0;
+    return !s_password_stored && strcmp(WebAdminPassword, DEFAULT_PASSWORD) == 0;
 }
 
 uint32_t web_auth_login_wait_seconds(const sockaddr_storage &source)

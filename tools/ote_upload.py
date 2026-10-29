@@ -3,7 +3,7 @@
 The image (ESP32TimeServer.bin of the build folder, not the merged flash image) is sent to
 POST https://<device>/api/ote of the web admin server. The web admin password of the device is sent with
 HTTP Basic authentication inside the TLS connection (the device ignores the user name). The device refuses
-scripted uploads while its web admin password is the factory default.
+scripted uploads while its web admin password is the default.
 
 The device is addressed by an IP address or by a fully qualified name that is looked up in the DNS
 (A and AAAA records, unicast). Names under .local and single-label names are refused: the operating system
@@ -120,7 +120,7 @@ def connect(host, port, family, context):
 def early_answer(connection):
     """The answer of the device before the rest of the image is sent (a refusal), or None when it reads the image.
 
-    The device refuses (factory password, wrong password, lock-out, updates off) as soon as its HTTP server calls the
+    The device refuses (default password, wrong password, lock-out, updates off) as soon as its HTTP server calls the
     handler, i.e. after the headers and the first byte of the body (the server waits for that byte; without it the
     request times out with 408), and closes the connection without reading the image. If image data is still unread
     then, its TCP stack resets the connection and Windows drops the answer that has already arrived; so only the first

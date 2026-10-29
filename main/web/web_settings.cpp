@@ -651,7 +651,7 @@ void web_settings_defaults(web_settings_t &out)
 // The compiled settings are not checked when ESP32TimeServerSettings.h is edited: a static IPv4 address with an
 // unusable address or subnet mask falls back to DHCP, and an incomplete set (for example no gateway) is used as it is
 // while the page refuses every save until the value is corrected. Both are said at a start that uses the compiled
-// settings (nothing saved yet, after a factory reset, or with the web admin disabled).
+// settings (nothing saved yet, after a reset to defaults, or with the web admin disabled).
 static void check_compiled_settings(const web_settings_t &defaults)
 {
     if (StaticIPAddress[0] != '\0' && defaults.ipv4_dhcp)

@@ -23,8 +23,8 @@
     'Dark mode (click for light mode)': 'Dunkler Modus (klicken für hellen Modus)',
     'Light mode (click for dark mode)': 'Heller Modus (klicken für dunklen Modus)',
     'Log out': 'Abmelden',
-    'The factory default password is in use. Anyone on the network can change the settings of this server. Change the password in the Security section.':
-      'Das Standardpasswort ab Werk ist aktiv. Jeder im Netzwerk kann die Einstellungen dieses Servers ändern. Ändern Sie das Passwort im Abschnitt Sicherheit.',
+    'The default password is in use. Anyone on the network can change the settings of this server. Change the password in the Security section.':
+      'Das Standardpasswort ist aktiv. Jeder im Netzwerk kann die Einstellungen dieses Servers ändern. Ändern Sie das Passwort im Abschnitt Sicherheit.',
     'Network change pending.': 'Netzwerkänderung ausstehend.',
     'Confirm within': 'Innerhalb von',
     's or the previous settings come back.': 's bestätigen, sonst werden die vorherigen Einstellungen wiederhergestellt.',
@@ -445,9 +445,9 @@
     'Restart the device': 'Gerät neu starten',
     'Reboot': 'Neu starten',
     'Back to the compiled settings': 'Zurück zu den einkompilierten Einstellungen',
-    'Factory reset': 'Werkseinstellungen',
-    '<strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Factory reset:</strong> back to the compiled settings and the compiled password (the TLS certificate is kept).':
-      '<strong>Übernehmen:</strong> sofort wirksam, nicht gespeichert. <strong>Einstellungen speichern:</strong> Die Einstellungen werden in NVS (Flash) gespeichert und bei jedem Start geladen. <strong>Neu starten:</strong> startet mit den gespeicherten Einstellungen neu. <strong>Werkseinstellungen:</strong> zurück zu den einkompilierten Einstellungen und dem einkompilierten Passwort (das TLS-Zertifikat bleibt erhalten).',
+    'Reset to defaults': 'Auf Standard zurücksetzen',
+    '<strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the compiled settings and the compiled password (the TLS certificate is kept).':
+      '<strong>Übernehmen:</strong> sofort wirksam, nicht gespeichert. <strong>Einstellungen speichern:</strong> Die Einstellungen werden in NVS (Flash) gespeichert und bei jedem Start geladen. <strong>Neu starten:</strong> startet mit den gespeicherten Einstellungen neu. <strong>Auf Standard zurücksetzen:</strong> zurück zu den einkompilierten Einstellungen und dem einkompilierten Passwort (das TLS-Zertifikat bleibt erhalten).',
     'This erases the saved settings, the web admin password and the allow-list, then restarts the device.':
       'Dies löscht die gespeicherten Einstellungen, das Web-Admin-Passwort und die Allow-List und startet das Gerät dann neu.',
     'Current password': 'Aktuelles Passwort',
@@ -465,8 +465,8 @@
     'Then the image can be sent over HTTPS (TCP 443) in two ways:': 'Dann kann das Image auf zwei Wegen über HTTPS (TCP 443) gesendet werden:',
     '<strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload.':
       '<strong>Mit dieser Seite:</strong> Wählen Sie das Image unter <em>Upload</em> und drücken Sie <em>Hochladen und neu starten</em>. Ihre Anmeldung an dieser Seite berechtigt den Upload.',
-    '<strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the factory default password is in use, the device refuses the script.':
-      '<strong>Mit dem Skript auf einem PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (der Fingerprint steht unter <em>Status</em>). Das Skript löst den Namen über DNS auf (A- und AAAA-Records, kein mDNS) und berechtigt den Upload mit dem Web-Admin-Passwort, das es aus der Umgebungsvariable <code>WEB_ADMIN_PASSWORD</code> nimmt oder abfragt; eine Anmeldung ist nicht nötig. Solange das Werkspasswort verwendet wird, lehnt das Gerät das Skript ab.',
+    '<strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the default password is in use, the device refuses the script.':
+      '<strong>Mit dem Skript auf einem PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (der Fingerprint steht unter <em>Status</em>). Das Skript löst den Namen über DNS auf (A- und AAAA-Records, kein mDNS) und berechtigt den Upload mit dem Web-Admin-Passwort, das es aus der Umgebungsvariable <code>WEB_ADMIN_PASSWORD</code> nimmt oder abfragt; eine Anmeldung ist nicht nötig. Solange das Standardpasswort verwendet wird, lehnt das Gerät das Skript ab.',
     '<strong>Which file:</strong> <code>ESP32TimeServer.bin</code> from the build folder, built with the profile for this board\'s chip revision (<span id="ote-chip"></span>), not the merged flash image. The device refuses images of another project or chip revision.':
       '<strong>Welche Datei:</strong> <code>ESP32TimeServer.bin</code> aus dem Build-Ordner, gebaut mit dem Profil für die Chip-Revision dieses Boards (<span id="ote-chip"></span>), nicht das zusammengeführte Flash-Image. Das Gerät lehnt Images eines anderen Projekts oder einer anderen Chip-Revision ab.',
     '<strong>What happens:</strong> the device writes the image into its spare firmware slot, checks the complete image and only then selects it for the next start; until then the running firmware stays untouched. It restarts 5 s after the upload: reload this page after about a minute. During the upload (at most 5 min) this page pauses its other requests.':
@@ -542,7 +542,7 @@
     'Confirmation failed': 'Bestätigung fehlgeschlagen',
     'Erase all saved settings, the password and the allow-list, and restart?':
       'Alle gespeicherten Einstellungen, das Passwort und die Allow-List löschen und neu starten?',
-    'Factory reset failed': 'Zurücksetzen auf Werkseinstellungen fehlgeschlagen',
+    'Reset to defaults failed': 'Zurücksetzen auf Standard fehlgeschlagen',
     'The two new passwords differ.': 'Die beiden neuen Passwörter stimmen nicht überein.',
     'The new password needs 12 to 128 characters.': 'Das neue Passwort braucht 12 bis 128 Zeichen.',
     'Password change failed': 'Passwortänderung fehlgeschlagen',
@@ -573,7 +573,7 @@
     'Refused: your own address would not be allowed any more': 'Abgelehnt: Ihre eigene Adresse wäre nicht mehr erlaubt',
     'Allow-list cleared: every source address may connect.': 'Allow-List geleert: Jede Quelladresse darf sich verbinden.',
     'Allow-list stored and active.': 'Allow-List gespeichert und aktiv.',
-    'Factory reset done. The device restarts with the compiled settings.': 'Auf Werkseinstellungen zurückgesetzt. Das Gerät startet mit den einkompilierten Einstellungen neu.',
+    'Reset to defaults done. The device restarts with the compiled settings.': 'Auf Standard zurückgesetzt. Das Gerät startet mit den einkompilierten Einstellungen neu.',
     'Network settings confirmed. Use Save to keep them after a restart.': 'Netzwerkeinstellungen bestätigt. Mit Einstellungen speichern bleiben sie nach einem Neustart erhalten.',
     'Password changed and stored. All other sessions were closed.': 'Passwort geändert und gespeichert. Alle anderen Sitzungen wurden beendet.',
     'The device restarts now and accepts firmware updates until its next restart.': 'Das Gerät startet jetzt neu und nimmt Firmware-Updates bis zu seinem nächsten Neustart an.',

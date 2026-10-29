@@ -34,7 +34,7 @@ struct web_allow_entry_t
 // Loads the password hash and the allow-list (call once after nvs_flash_init)
 void web_auth_init();
 
-// true while the compiled password is in use and it is the factory value "password"
+// true while the compiled password is in use and it is the default "password"
 bool web_auth_default_password_active();
 
 // ---- Login throttling (per source address and global) ----
@@ -43,7 +43,7 @@ uint32_t web_auth_login_wait_seconds(const sockaddr_storage &source);
 // Verifies the password (constant time). Records the result for the throttling.
 bool web_auth_check_password(const sockaddr_storage &source, const char *password, size_t length);
 // Verifies the password without touching the throttling state of a successful login (used for the
-// password change and the factory reset; failures still count)
+// password change and the reset to defaults; failures still count)
 bool web_auth_verify_current_password(const sockaddr_storage &source, const char *password, size_t length);
 // Records a failed check without a password to verify (unreadable credentials of a scripted firmware upload)
 void web_auth_record_failed_check(const sockaddr_storage &source);

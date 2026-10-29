@@ -1136,7 +1136,7 @@ namespace
             return send_error(req, "400 Bad Request", err);
         }
         // Network settings are only saved once they work: apply and confirm them first (a lock-out would need
-        // the factory reset otherwise)
+        // the reset to defaults otherwise)
         if (web_settings_network_differs(sets->candidate, sets->running))
         {
             delete sets;
@@ -1175,8 +1175,8 @@ namespace
         if (web_settings_factory_reset() != ESP_OK)
             return send_error(req, "500 Internal Server Error", "NVS could not be erased");
         web_auth_end_all_sessions();
-        ESP_LOGW(TAG, "Web admin: factory reset (settings, password and allow-list erased), restarting");
-        const esp_err_t err = send_ok(req, "Factory reset done. The device restarts with the compiled settings.");
+        ESP_LOGW(TAG, "Web admin: reset to defaults (settings, password and allow-list erased), restarting");
+        const esp_err_t err = send_ok(req, "Reset to defaults done. The device restarts with the compiled settings.");
         schedule_restart("web_admin_factory_reset");
         return err;
     }
@@ -1276,7 +1276,7 @@ namespace
     // Firmware upload (Over The Ethernet update, see web_ote.h). Two ways to authenticate:
     //  - the page: session cookie, same origin and the CSRF header, as every other state changing request
     //  - scripts (tools/ote_upload.py): HTTP Basic authentication with the web admin password (any user name),
-    //    inside the TLS connection. Refused while the factory password is in use; wrong passwords count for the
+    //    inside the TLS connection. Refused while the default password is in use; wrong passwords count for the
     //    login throttling like failed logins.
     // The body is the raw application image (Content-Type application/octet-stream).
     esp_err_t handle_ote(httpd_req_t *req)
@@ -1291,7 +1291,7 @@ namespace
                 return send_error(req, "400 Bad Request", "No peer address");
             if (web_auth_default_password_active())
             {
-                send_error(req, "403 Forbidden", "Scripted uploads are refused while the web admin password is the factory default");
+                send_error(req, "403 Forbidden", "Scripted uploads are refused while the web admin password is the default");
                 return ESP_FAIL; // closes the connection (the body is not read)
             }
             const uint32_t wait_s = web_auth_login_wait_seconds(peer);

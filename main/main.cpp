@@ -9311,7 +9311,7 @@ static void setup_the_button()
     s_button_ready = true;
 
     // Recovery of a forgotten web admin password: holding the button for 10 s while the device starts erases the
-    // web settings, the password and the allow-list (like the factory reset on the page) and restarts
+    // web settings, the password and the allow-list (like the reset to defaults on the page) and restarts
     vTaskDelay(pdMS_TO_TICKS(20));
     if (gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) != 0)
         return;

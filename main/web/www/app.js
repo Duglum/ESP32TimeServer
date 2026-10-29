@@ -1268,7 +1268,7 @@
       $('factory-card').hidden = true;
       stopAfterRestart(t('{message} Log in with the compiled password after the restart.', { message: ts(r.data.message) }));
     } else {
-      show(ts(r.data.error) || t('Factory reset failed'), 'error');
+      show(ts(r.data.error) || t('Reset to defaults failed'), 'error');
     }
   });
 

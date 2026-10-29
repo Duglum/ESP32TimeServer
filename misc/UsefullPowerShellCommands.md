@@ -40,7 +40,7 @@ at every start) and sends the web admin password (`WebAdminPassword` in
 `ESP32TimeServerSettingsSecrets.h`, or the one set on the web admin page) with
 HTTP Basic authentication inside the TLS connection. It reads the password from
 the environment variable `WEB_ADMIN_PASSWORD`, otherwise it asks for it. The
-device refuses the script while its web admin password is the factory default
+device refuses the script while its web admin password is the default
 (`password`).
 
 The device is given as an IP address or as a fully qualified DNS name; the

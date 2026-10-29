@@ -10,7 +10,7 @@
 // LCD, time zone, RGB LED (including the LED_* colours), MQTT, NTP authentication and Over The Ethernet update
 // settings below can also be
 // changed on the page. Settings saved there (NVS) take precedence over the values in this file; the values here
-// are the defaults and are used again after a factory reset. The features LCD, RGB LED, MQTT, NTP
+// are the defaults and are used again after a reset to defaults. The features LCD, RGB LED, MQTT, NTP
 // authentication and OTE updates are always compiled in: their *_ENABLED values below only decide whether they are on
 // by default.
 // DeviceName is the default host name (FQDN) of the page; its first label is the DHCP and mDNS host name.

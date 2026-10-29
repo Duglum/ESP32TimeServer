@@ -5,7 +5,7 @@
 //
 // TLS identity of the web admin page: an ECDSA P-256 key generated on the device (hardware RNG) and a self-signed
 // certificate, both stored in NVS (namespace "webtls"). The key never leaves the device and is not part of the
-// firmware. The factory reset keeps it. The certificate is issued again (same key) when the FQDN changes.
+// firmware. The reset to defaults keeps it. The certificate is issued again (same key) when the FQDN changes.
 
 #pragma once
 

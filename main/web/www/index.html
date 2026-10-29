@@ -30,7 +30,7 @@
 
 <main>
   <div id="banner-default-pw" class="banner danger" hidden>
-    The factory default password is in use. Anyone on the network can change the settings of this server.
+    The default password is in use. Anyone on the network can change the settings of this server.
     Change the password in the Security section.
   </div>
   <div id="banner-network" class="banner warn" hidden>
@@ -418,14 +418,14 @@
           <button type="button" class="primary" id="btn-apply" title="In effect now, not stored">Apply</button>
           <button type="button" id="btn-save" title="Stored in NVS (flash), loaded at every boot">Save Settings</button>
           <button type="button" id="btn-reboot" title="Restart the device">Reboot</button>
-          <button type="button" class="danger" id="btn-factory" title="Back to the compiled settings">Factory reset</button>
+          <button type="button" class="danger" id="btn-factory" title="Back to the compiled settings">Reset to defaults</button>
         </div>
-        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Factory reset:</strong> back to the compiled settings and the compiled password (the TLS certificate is kept).</p>
+        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the compiled settings and the compiled password (the TLS certificate is kept).</p>
       </div>
     </form>
 
     <section class="card" id="factory-card" hidden>
-      <h2>Factory reset</h2>
+      <h2>Reset to defaults</h2>
       <p>This erases the saved settings, the web admin password and the allow-list, then restarts the device.</p>
       <form id="factory-form" class="stack">
         <label><span class="lt">Current password</span><input type="password" id="factory-password" autocomplete="current-password" maxlength="128" required></label>
@@ -449,7 +449,7 @@
           <p>Then the image can be sent over HTTPS (TCP 443) in two ways:</p>
           <ol>
             <li><strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload.</li>
-            <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the factory default password is in use, the device refuses the script.</li>
+            <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the default password is in use, the device refuses the script.</li>
           </ol>
           <p><strong>Which file:</strong> <code>ESP32TimeServer.bin</code> from the build folder, built with the profile for this board's chip revision (<span id="ote-chip"></span>), not the merged flash image. The device refuses images of another project or chip revision.</p>
           <p><strong>What happens:</strong> the device writes the image into its spare firmware slot, checks the complete image and only then selects it for the next start; until then the running firmware stays untouched. It restarts 5 s after the upload: reload this page after about a minute. During the upload (at most 5 min) this page pauses its other requests.</p>

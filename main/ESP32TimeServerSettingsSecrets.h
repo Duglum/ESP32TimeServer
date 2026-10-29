@@ -5,10 +5,10 @@
 //
 
 // Password of the web admin page (https://<address>/), used until a new one is set on the page (it is then
-// stored in NVS as a salted PBKDF2 hash). While the factory value "password" is in use the page shows a warning.
-// The factory reset (page or button) returns to this password.
+// stored in NVS as a salted PBKDF2 hash). While the default "password" is in use the page shows a warning.
+// The reset to defaults (page or button) returns to this password.
 // Firmware uploads with tools/ote_upload.py authenticate with this password as well (HTTP Basic authentication
-// inside the HTTPS connection); they are refused while it is the factory value. To update many devices with one
+// inside the HTTPS connection); they are refused while it is the default. To update many devices with one
 // script run, give them the same password here.
 static constexpr char WebAdminPassword[] = "password";
 
