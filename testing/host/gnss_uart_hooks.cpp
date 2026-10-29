@@ -14,6 +14,13 @@ void host_gnss_uart_reset(bool running)
     gnss_uart_reset_traffic();
 }
 
+void host_gnss_uart_console_capture(bool capture)
+{
+    // As the reader task does at the start of a pass (the console has to be open for entries to be kept)
+    s_console_capture = capture;
+    s_console_line_length = 0;
+}
+
 void host_gnss_uart_feed(const uint8_t *data, size_t length, uint32_t generation)
 {
     for (size_t i = 0; i < length; ++i)

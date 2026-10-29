@@ -48,12 +48,44 @@ Request bodies are limited to 4096 bytes, except the firmware upload. Errors com
 | `/api/ote/once` | POST | cookie + CSRF | Restarts once with firmware updates (OTE) switched on, until the next restart |
 | `/api/ote` | POST | cookie + CSRF (page) **or** HTTP Basic (script) | Firmware upload. The body is the raw application image (`ESP32TimeServer.bin`, `application/octet-stream`). `403` while OTE updates are switched off. See below |
 | `/api/coredump/erase` | POST | cookie + CSRF | Erases the stored core dump |
+| `/api/gnss/command` | POST | cookie + CSRF | GNSS console: sends one command to the GNSS receiver. See below |
+| `/api/gnss/console` | GET | cookie | GNSS console: the recorded traffic after `?after=<seq>`. See below |
 
 Notes on `/api/apply`:
 - A network change must be confirmed within 120 s, otherwise the previous network settings are restored.
 - A change of a restart field (FQDN, pins, LED module, MQTT, ...) writes a one-shot set and restarts once with it.
 
 **Static files** need no login; only the allow-list applies: `/`, `/app.js`, `/app.css`, `/i18n.js`, `/favicon.ico`.
+
+## GNSS console (`/api/gnss/command`, `/api/gnss/console`)
+
+The *GNSS console* sub-panel of *GNSS and PPS* sends commands typed by the user to the GNSS receiver. The firmware itself sends nothing through it.
+
+**`POST /api/gnss/command`**, body `{"mode": "text" | "ubx", "command": "...", "checksum": true, "crlf": true}`:
+- `text` sends the command as typed (1 to 200 printable ASCII characters). The two options are independent:
+  - `checksum` appends `*hh`: the XOR of the characters after a leading `$` or `!`, or of all characters without one. A command that already contains `*` is refused while this is on.
+  - `crlf` appends CR LF.
+- `ubx` takes hexadecimal bytes. Spaces, commas, colons, dashes and `0x` are allowed.
+  - `<class> <ID> <payload>`: the sync bytes, the length and the checksum are added. The payload has at most 100 bytes.
+  - Or a whole frame starting with `B5 62`: it is sent only if its length and checksum are right.
+  - It is sent between the firmware's own UBX commands. It is only allowed with the protocol U-Blox UBX (`409` otherwise).
+- The answer is `{"ok": true, "sent": "<the command as recorded>"}`.
+- Errors:
+  - `400` an invalid command (the reason in `error`);
+  - `409` UART not running, or UBX without the u-blox protocol;
+  - `429` more than 4 commands per second;
+  - `503` receiver busy for 2 s, or out of memory.
+- Every command is logged on the serial console with the source address.
+
+**`GET /api/gnss/console?after=<seq>`** returns the entries after the sequence number `seq`. Each call keeps the recording on for 10 s; without calls the reader records nothing. The answer:
+- `entries`: a list of `{"seq", "kind", "periodic", "text"}`.
+  - `kind` is `sent` (a command), `text` (a received text line, any printable line) or `ubx` (a received UBX frame: class-ID, ACK/NAK, the MON-VER strings or the payload in hex).
+  - `periodic` marks the per-second messages: the standard NMEA sentences (RMC, GGA, GSV, ...), UBX NAV and TIM-TP.
+- `last`: the sequence number for the next call.
+- `skipped`: older entries were overwritten (the ring keeps 48).
+- `reset`: the number was from before a restart, so the list starts again.
+- `running`: the GNSS UART runs.
+- `ublox`: the protocol is U-Blox UBX.
 
 ## Firmware upload from a script (`/api/ote`)
 

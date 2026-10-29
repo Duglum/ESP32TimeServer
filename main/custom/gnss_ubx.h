@@ -87,6 +87,9 @@ struct gnss_ubx_cfg_item_t
 
 // CFG-VALSET of up to 8 items in the given layers (GNSS_UBX_LAYER_*). true = ACK.
 bool gnss_ubx_val_set(const gnss_ubx_cfg_item_t *items, size_t count, uint8_t layers, uint32_t timeout_ms);
+// A frame of the console of the web page (payload at most 100 bytes): sent between the firmware's own commands, the
+// answer is not awaited (the console shows it). false if the receiver is busy for wait_ms or the frame is too long.
+bool gnss_ubx_send_raw(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t length, uint32_t wait_ms);
 // CFG-VALGET of one key from one layer (GNSS_UBX_LAYER_RAM = 0 in the poll). false = NAK or no answer.
 bool gnss_ubx_val_get(uint32_t key, uint8_t layer, uint32_t *value, uint32_t timeout_ms);
 

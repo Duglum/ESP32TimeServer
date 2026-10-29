@@ -29,7 +29,9 @@ $fuzz = @('-fsanitize-coverage=inline-8bit-counters,pc-table,trace-cmp', '-DHOST
 # name = test program, sources (C files are compiled as C11)
 $targets = [ordered]@{
     gnss_test      = @("$here\stubs\host_stubs.c", "$here\gnss_uart_hooks.cpp", "$here\gnss_test.cpp",
-        "$main\custom\gnss_nmea.cpp", "$main\custom\gnss_ubx.cpp")
+        "$main\custom\gnss_nmea.cpp", "$main\custom\gnss_ubx.cpp", "$main\custom\gnss_console.cpp")
+    gnss_console_test = @("$here\stubs\host_stubs.c", "$here\gnss_uart_hooks.cpp", "$here\gnss_console_test.cpp",
+        "$main\custom\gnss_nmea.cpp", "$main\custom\gnss_ubx.cpp", "$main\custom\gnss_console.cpp")
     ntp_cache_test = @("$here\stubs\host_stubs.c", "$main\custom\ntp_cache.c", "$here\ntp_cache_test.cpp")
 }
 

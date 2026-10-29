@@ -273,6 +273,30 @@
             </label>
             </div>
           </details>
+          <details class="pins" id="gnss-console">
+            <summary><span class="pins-title">GNSS console</span><span class="pins-changed" hidden></span><span class="pins-note">send commands to the receiver</span></summary>
+            <p class="callout">Commands go to the receiver as typed and can change what the time depends on: the baud rate, the protocol, the RMC sentence, the time pulse (PPS), the antenna cable delay, or a restart of the receiver. A wrong command can stop the time synchronisation until the receiver is set back. Changes are lost at the receiver's next power cycle unless you save them in the receiver (e.g. <code>$CFGSAVE</code> on Unicore receivers, CFG-VALSET into BBR or flash on u-blox). With the U-Blox UBX protocol the firmware sets some values in the receiver's RAM at every start (UART1 protocols, message rates, dynamic model, interference monitor).</p>
+            <div class="console-mode">
+              <label class="radio"><input type="radio" name="console-mode" id="console-mode-text" value="text" checked> Text (NMEA, Unicore)</label>
+              <label class="radio"><input type="radio" name="console-mode" id="console-mode-ubx" value="ubx"> UBX (hexadecimal)</label>
+            </div>
+            <div class="console-options" id="console-text-options">
+              <label class="switch"><input type="checkbox" id="console-checksum" checked> Append the checksum (*hh)</label>
+              <label class="switch"><input type="checkbox" id="console-crlf" checked> Append CR LF</label>
+            </div>
+            <div class="console-input">
+              <input type="text" id="console-command" maxlength="400" spellcheck="false" autocomplete="off" placeholder="$CFGMSG,0,4,1">
+              <button type="button" id="console-send">Send</button>
+            </div>
+            <small class="note" id="console-hint-text">The checksum is the XOR of the characters after a leading <code>$</code> (of all characters without it). Example (Unicore): <code>$CFGMSG,0,4,1</code> switches RMC on.</small>
+            <small class="note" id="console-hint-ubx" hidden>Class, ID and payload in hexadecimal; the sync bytes, the length and the checksum are added. Example: <code>0A 04</code> polls MON-VER. A whole frame starting with <code>B5 62</code> is sent as it is if its length and checksum are right.</small>
+            <small class="note bad" id="console-ubx-off" hidden>UBX commands need the protocol U-Blox UBX.</small>
+            <pre class="console-output" id="console-output" aria-live="polite"></pre>
+            <div class="console-options">
+              <label class="switch"><input type="checkbox" id="console-periodic"> Show periodic messages (RMC, GGA, GSV, UBX NAV, TIM-TP, …)</label>
+              <button type="button" id="console-clear">Clear</button>
+            </div>
+          </details>
         </details>
       </section>
 

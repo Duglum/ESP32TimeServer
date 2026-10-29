@@ -451,6 +451,18 @@ bool gnss_ubx_val_set(const gnss_ubx_cfg_item_t *items, size_t count, uint8_t la
     return ok;
 }
 
+bool gnss_ubx_send_raw(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t length, uint32_t wait_ms)
+{
+    if (s_command_mutex == nullptr || (length > 0 && payload == nullptr))
+        return false;
+    // Between the commands of the firmware: its answers are not taken for this one and the other way round
+    if (xSemaphoreTake(s_command_mutex, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
+        return false;
+    const bool sent = send_frame(cls, id, payload, length);
+    xSemaphoreGive(s_command_mutex);
+    return sent;
+}
+
 bool gnss_ubx_val_get(uint32_t key, uint8_t layer, uint32_t *value, uint32_t timeout_ms)
 {
     const size_t size = key_value_size(key);

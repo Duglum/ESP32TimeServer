@@ -326,6 +326,18 @@ details.pins > summary:focus-visible { outline: 2px solid var(--accent); outline
 .pins-changed.bad { color: var(--danger); }
 details.pins[open] > summary { margin-bottom: .6rem; }
 
+/* GNSS console (sub-panel of GNSS and PPS) */
+.console-mode, .console-options { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1.25rem; margin: .5rem 0; }
+label.radio { flex-direction: row; align-items: center; gap: .45rem; }
+input[type="radio"] { width: 1.05rem; height: 1.05rem; accent-color: var(--accent); }
+.console-options button { margin-left: auto; }
+.console-input { display: flex; gap: .5rem; margin: .5rem 0 .3rem; }
+.console-input input { flex: 1; min-width: 0; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.console-output { height: 16rem; overflow: auto; margin: .6rem 0 0; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: 8px; background: var(--input); color: var(--text); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .8rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.console-output .sent { color: var(--accent); font-weight: 600; }
+.console-output .ubx { color: var(--changed); }
+.console-output .gap { color: var(--muted); font-style: italic; }
+
 @media (max-width: 680px) {
   .grid, .status-groups { grid-template-columns: 1fr; }
   .addr { white-space: normal; overflow-wrap: anywhere; }

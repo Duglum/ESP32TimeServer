@@ -9,6 +9,8 @@
 
 #include "web_server.h"
 #include "custom/crash_dump.h"
+#include "custom/gnss_uart.h"
+#include "custom/gnss_ubx.h"
 #include "web_auth.h"
 #include "web_net.h"
 #include "web_ote.h"
@@ -1572,6 +1574,128 @@ namespace
         return send_ok(req, "Core dump erased.");
     }
 
+    // ---- GNSS console (sub-panel of GNSS and PPS) ----
+    // A command typed by the user goes to the receiver as text or as a UBX frame; the reader of the UART records the
+    // answers while the page asks for them (custom/gnss_console.h). The firmware itself sends nothing here.
+    constexpr int64_t GNSS_COMMAND_INTERVAL_US = 250000; // at most 4 commands per second
+    int64_t s_last_gnss_command_us = 0;                  // only the server task
+
+    esp_err_t handle_gnss_command(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        cJSON *root = read_json(req);
+        if (root == nullptr)
+            return ESP_OK;
+        const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+        const cJSON *command = cJSON_GetObjectItemCaseSensitive(root, "command");
+        const bool ubx = cJSON_IsString(mode) && strcmp(mode->valuestring, "ubx") == 0;
+        const bool text = cJSON_IsString(mode) && strcmp(mode->valuestring, "text") == 0;
+        const bool checksum = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "checksum"));
+        const bool crlf = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "crlf"));
+        char typed[GNSS_CONSOLE_COMMAND_MAX * 2 + 2] = "";
+        const bool valid = (ubx || text) && cJSON_IsString(command) && strlen(command->valuestring) < sizeof(typed);
+        if (valid)
+            strlcpy(typed, command->valuestring, sizeof(typed));
+        cJSON_Delete(root);
+        if (!valid)
+            return send_error(req, "400 Bad Request", "Fields mode (text or ubx) and command expected");
+        if (!gnss_uart_running())
+            return send_error(req, "409 Conflict", "The UART of the GNSS receiver is not running");
+        if (ubx && !web_settings_boot().gnss_ublox)
+            return send_error(req, "409 Conflict", "UBX commands need the protocol U-Blox UBX");
+        const int64_t now_us = esp_timer_get_time();
+        if (s_last_gnss_command_us != 0 && now_us - s_last_gnss_command_us < GNSS_COMMAND_INTERVAL_US)
+            return send_error(req, "429 Too Many Requests", "Too many commands, please wait a moment");
+        if (!gnss_uart_console_open())
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+
+        // Checked and built first, then recorded and sent (the answer comes after the entry of the command)
+        char shown[GNSS_CONSOLE_TEXT_SIZE];
+        const char *error = nullptr;
+        uint8_t bytes[GNSS_CONSOLE_COMMAND_MAX + 5];
+        size_t length = 0;
+        uint8_t cls = 0;
+        uint8_t id = 0;
+        uint16_t payload_length = 0;
+        if (ubx)
+        {
+            if (!gnss_console_parse_ubx(typed, &cls, &id, bytes, &payload_length, &error))
+                return send_error(req, "400 Bad Request", error);
+            gnss_console_describe_ubx(cls, id, bytes, payload_length, shown, sizeof(shown));
+        }
+        else
+        {
+            if (!gnss_console_build_text(typed, checksum, crlf, bytes, sizeof(bytes), &length, &error))
+                return send_error(req, "400 Bad Request", error);
+            snprintf(shown, sizeof(shown), "%.*s%s", static_cast<int>(crlf ? length - 2 : length),
+                     reinterpret_cast<const char *>(bytes), crlf ? " <CR><LF>" : "");
+        }
+        s_last_gnss_command_us = now_us;
+        gnss_uart_console_add(GNSS_CONSOLE_SENT, false, shown);
+        const bool sent = ubx ? gnss_ubx_send_raw(cls, id, bytes, payload_length, 2000) : gnss_uart_write(bytes, length);
+        struct sockaddr_storage peer{};
+        char address[INET6_ADDRSTRLEN] = "?";
+        if (peer_address(req, peer, false))
+            format_address(peer, address, sizeof(address));
+        if (!sent)
+        {
+            gnss_uart_console_add(GNSS_CONSOLE_SENT, false, "(not sent: the receiver was busy)");
+            return send_error(req, "503 Service Unavailable", "Not sent: the receiver was busy, please try again");
+        }
+        ESP_LOGI(TAG, "Web admin: GNSS console command from %s: %s", address, shown);
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddStringToObject(reply, "sent", shown);
+        return send_json(req, "200 OK", reply);
+    }
+
+    // Entries of the console after the sequence number "after" (query); keeps the recording on for 10 s
+    esp_err_t handle_gnss_console(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, false, token) != gate_t::passed)
+            return ESP_OK;
+        uint32_t after = 0;
+        char query[48];
+        char value[16];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+            httpd_query_key_value(query, "after", value, sizeof(value)) == ESP_OK)
+            after = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+        if (!gnss_uart_console_open())
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+
+        // A number from before a restart of the device: from the start of the ring
+        const uint32_t last = gnss_uart_console_last_seq();
+        const bool reset = after > last;
+        if (reset)
+            after = 0;
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "running", gnss_uart_running());
+        cJSON_AddBoolToObject(root, "ublox", web_settings_boot().gnss_ublox);
+        cJSON_AddBoolToObject(root, "reset", reset);
+        cJSON *list = cJSON_AddArrayToObject(root, "entries");
+        static const char *const kinds[] = {"sent", "text", "ubx"};
+        bool skipped = false;
+        gnss_console_entry_t entry{};
+        for (size_t count = 0; count < GNSS_CONSOLE_ENTRIES && gnss_uart_console_next(after, &entry); ++count)
+        {
+            if (count == 0 && after > 0 && entry.seq > after + 1)
+                skipped = true; // the page was too slow: older entries were overwritten
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "seq", entry.seq);
+            cJSON_AddStringToObject(item, "kind", entry.kind < 3 ? kinds[entry.kind] : "text");
+            cJSON_AddBoolToObject(item, "periodic", entry.periodic);
+            cJSON_AddStringToObject(item, "text", entry.text);
+            cJSON_AddItemToArray(list, item);
+            after = entry.seq;
+        }
+        cJSON_AddBoolToObject(root, "skipped", skipped);
+        cJSON_AddNumberToObject(root, "last", after);
+        return send_json(req, "200 OK", root);
+    }
+
     esp_err_t handle_info(httpd_req_t *req)
     {
         char hostname[WEB_HOSTNAME_MAX_LEN + 1];
@@ -1653,6 +1777,8 @@ namespace
             {"/api/diag", HTTP_GET, handle_diag},
             {"/api/coredump", HTTP_GET, handle_coredump},
             {"/api/coredump/erase", HTTP_POST, handle_coredump_erase},
+            {"/api/gnss/command", HTTP_POST, handle_gnss_command},
+            {"/api/gnss/console", HTTP_GET, handle_gnss_console},
         };
         for (const route_t &route : routes)
         {
@@ -1712,7 +1838,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 22; // 21 routes in use
+        config.max_uri_handlers = 24; // 23 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

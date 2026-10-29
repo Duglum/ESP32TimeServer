@@ -9,6 +9,8 @@
 
 // UART reader: parser state cleared, gnss_uart_running() as given (commands need it), traffic counters reset
 void host_gnss_uart_reset(bool running);
+// Console recording of the reader on or off for the following bytes (the reader task decides it once per pass)
+void host_gnss_uart_console_capture(bool capture);
 // Bytes as read from the driver, with the flush generation of the read
 void host_gnss_uart_feed(const uint8_t *data, size_t length, uint32_t generation);
 

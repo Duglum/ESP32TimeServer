@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 
 #include "driver/uart.h"
@@ -18,6 +19,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 namespace
@@ -43,6 +45,17 @@ namespace
     gnss_uart_traffic_t s_traffic{}; // counters of valid sentences and frames, sample (s_traffic_lock)
     std::atomic<uint32_t> s_traffic_bytes{0};
     std::atomic<bool> s_sample_full{false};
+
+    // Console of the web page (see gnss_uart.h)
+    static constexpr int64_t CONSOLE_OPEN_US = 10LL * 1000000LL;
+    std::atomic<gnss_console_ring_t *> s_console{nullptr};
+    std::atomic<int64_t> s_console_open_until_us{0};
+    SemaphoreHandle_t s_console_mutex = nullptr;
+    // Only used by the reader task
+    bool s_console_capture = false;
+    char s_console_line[GNSS_CONSOLE_TEXT_SIZE];
+    size_t s_console_line_length = 0;
+    char s_console_frame_text[GNSS_CONSOLE_TEXT_SIZE];
 
     // Parser state, only used by the reader task
     enum class ubx_state_t : uint8_t
@@ -97,6 +110,38 @@ namespace
         else
             s_sample_full.store(true, std::memory_order_relaxed);
         taskEXIT_CRITICAL(&s_traffic_lock);
+    }
+
+    // Adds an entry to the console ring; a busy ring (the web server copying) is not waited for long
+    void console_push(uint8_t kind, bool periodic, const char *text)
+    {
+        gnss_console_ring_t *ring = s_console.load(std::memory_order_acquire);
+        if (ring == nullptr || xSemaphoreTake(s_console_mutex, pdMS_TO_TICKS(5)) != pdTRUE)
+            return;
+        gnss_console_ring_add(*ring, kind, periodic, text);
+        xSemaphoreGive(s_console_mutex);
+    }
+
+    // Any printable line for the console (also lines without '$', e.g. answers of the receiver)
+    void console_text_byte(uint8_t byte)
+    {
+        if (byte == '\r' || byte == '\n')
+        {
+            if (s_console_line_length > 0)
+            {
+                s_console_line[s_console_line_length] = '\0';
+                console_push(GNSS_CONSOLE_TEXT, gnss_console_line_is_periodic(s_console_line), s_console_line);
+            }
+            s_console_line_length = 0;
+            return;
+        }
+        if (byte < 32 || byte > 126)
+        {
+            s_console_line_length = 0; // binary data (UBX) or noise
+            return;
+        }
+        if (s_console_line_length < sizeof(s_console_line) - 1)
+            s_console_line[s_console_line_length++] = static_cast<char>(byte);
     }
 
     void ubx_add_checksum(uint8_t byte)
@@ -160,6 +205,12 @@ namespace
                 s_traffic.ubx_frames++;
                 taskEXIT_CRITICAL(&s_traffic_lock);
                 gnss_ubx_process_frame(s_ubx_cls, s_ubx_id, s_ubx_payload, s_ubx_length, s_ubx_generation);
+                if (s_console_capture)
+                {
+                    gnss_console_describe_ubx(s_ubx_cls, s_ubx_id, s_ubx_payload, s_ubx_length, s_console_frame_text,
+                                              sizeof(s_console_frame_text));
+                    console_push(GNSS_CONSOLE_UBX, gnss_console_ubx_is_periodic(s_ubx_cls, s_ubx_id), s_console_frame_text);
+                }
             }
             break;
         }
@@ -181,6 +232,8 @@ namespace
             process_ubx_byte(byte, generation);
             return;
         }
+        if (s_console_capture)
+            console_text_byte(byte);
 
         const char ch = static_cast<char>(byte);
         if (byte == 0xB5)
@@ -242,6 +295,15 @@ namespace
                 xQueueReset(s_events);
                 reset_parsers();
                 continue;
+            }
+
+            // Console of the web page open or closed for this pass
+            const bool capture = s_console.load(std::memory_order_acquire) != nullptr &&
+                                 esp_timer_get_time() < s_console_open_until_us.load(std::memory_order_relaxed);
+            if (capture != s_console_capture)
+            {
+                s_console_capture = capture;
+                s_console_line_length = 0;
             }
 
             for (;;)
@@ -398,4 +460,49 @@ void gnss_uart_get_traffic(gnss_uart_traffic_t *traffic)
 uint32_t gnss_uart_overflows(void)
 {
     return s_overflows.load(std::memory_order_relaxed);
+}
+
+bool gnss_uart_console_open(void)
+{
+    // Only the web server task opens the console: the mutex is made before the ring is published
+    if (s_console.load(std::memory_order_acquire) == nullptr)
+    {
+        if (s_console_mutex == nullptr)
+            s_console_mutex = xSemaphoreCreateMutex();
+        if (s_console_mutex == nullptr)
+            return false;
+        auto *ring = static_cast<gnss_console_ring_t *>(calloc(1, sizeof(gnss_console_ring_t)));
+        if (ring == nullptr)
+            return false;
+        gnss_console_ring_t *expected = nullptr;
+        if (!s_console.compare_exchange_strong(expected, ring, std::memory_order_acq_rel))
+            free(ring);
+    }
+    s_console_open_until_us.store(esp_timer_get_time() + CONSOLE_OPEN_US, std::memory_order_relaxed);
+    return true;
+}
+
+void gnss_uart_console_add(uint8_t kind, bool periodic, const char *text)
+{
+    console_push(kind, periodic, text);
+}
+
+bool gnss_uart_console_next(uint32_t after, gnss_console_entry_t *entry)
+{
+    gnss_console_ring_t *ring = s_console.load(std::memory_order_acquire);
+    if (ring == nullptr || entry == nullptr || xSemaphoreTake(s_console_mutex, pdMS_TO_TICKS(50)) != pdTRUE)
+        return false;
+    const bool found = gnss_console_ring_next(*ring, after, entry);
+    xSemaphoreGive(s_console_mutex);
+    return found;
+}
+
+uint32_t gnss_uart_console_last_seq(void)
+{
+    gnss_console_ring_t *ring = s_console.load(std::memory_order_acquire);
+    if (ring == nullptr || xSemaphoreTake(s_console_mutex, pdMS_TO_TICKS(50)) != pdTRUE)
+        return 0;
+    const uint32_t last = ring->last_seq;
+    xSemaphoreGive(s_console_mutex);
+    return last;
 }

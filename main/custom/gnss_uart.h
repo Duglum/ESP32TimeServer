@@ -9,10 +9,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "gnss_console.h"
+
 // ---- UART of the GNSS receiver (ESP-IDF driver) ----
 // A task reads the UART (2 kB receive buffer) and splits the bytes into NMEA sentences ("$...\r\n", handed to
 // custom/gnss_nmea) and UBX frames (sync B5 62, class, ID, length, payload, Fletcher checksum, handed to
-// custom/gnss_ubx). Only the UBX functions write to the receiver; with the NMEA protocol nothing is sent.
+// custom/gnss_ubx). Only the UBX functions and the console of the web page (commands typed by the user) write to the
+// receiver; with the NMEA protocol the firmware itself sends nothing.
 
 struct gnss_uart_config_t
 {
@@ -55,3 +58,19 @@ void gnss_uart_get_traffic(gnss_uart_traffic_t *traffic);
 
 // Receive buffer or FIFO overflows (data lost) since the start
 uint32_t gnss_uart_overflows(void);
+
+// ---- Console of the web page (custom/gnss_console.h) ----
+// While the console is open (gnss_uart_console_open() within the last 10 s) the reader also keeps every received
+// text line (any printable line, not only NMEA) and a summary of every UBX frame in a ring of the last
+// GNSS_CONSOLE_ENTRIES entries; the web server adds the commands it sends. The ring (about 8 kB) is allocated at the
+// first opening and locked with a mutex (no critical section: interrupts stay on). Closed, the reader only checks one
+// flag per read pass.
+
+// Opens the console (or keeps it open for 10 s more). Returns false if the ring could not be allocated.
+bool gnss_uart_console_open(void);
+// Adds an entry (the web server: a command it sent)
+void gnss_uart_console_add(uint8_t kind, bool periodic, const char *text);
+// The oldest entry with a sequence number above after; false if there is none
+bool gnss_uart_console_next(uint32_t after, gnss_console_entry_t *entry);
+// Sequence number of the latest entry (0 = none)
+uint32_t gnss_uart_console_last_seq(void);

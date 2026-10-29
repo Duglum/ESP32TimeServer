@@ -12,6 +12,7 @@
   let refreshTimer = 0;
   let countdownTimer = 0;
   let diagTimer = 0; // Diagnostics panel: refreshed while it is open
+  let consoleTimer = 0; // GNSS console: new lines are fetched while it is open
   let formDirty = false; // the settings form was edited since it was filled
 
   // ---- Language: English unless German was chosen with the button (cookie "lang"; German texts in i18n.js) ----
@@ -183,6 +184,7 @@
     clearInterval(refreshTimer);
     clearInterval(countdownTimer);
     clearInterval(diagTimer);
+    clearInterval(consoleTimer);
     $('app').hidden = true;
     $('logout').hidden = true;
     for (const id of ['banner-default-pw', 'banner-network', 'banner-oneshot', 'banner-unsaved']) $(id).hidden = true;
@@ -1088,6 +1090,120 @@
     if (!$('diag-panel').open) return;
     loadDiag();
     diagTimer = setInterval(loadDiag, 10000);
+  });
+
+  // ---- GNSS console (sub-panel of GNSS and PPS) ----
+  // While it is open (and its panel) the page asks for new lines every second; the device records them only then
+  const CONSOLE_KEEP = 500;  // lines kept on the page
+  const consoleLines = [];   // { kind: 'sent' | 'text' | 'ubx' | 'gap', periodic, text }
+  const consoleHistory = []; // commands sent, for the arrow keys
+  let consoleHistoryIndex = 0;
+  let consoleAfter = 0;      // sequence number of the latest entry received
+  let consoleBusy = false;
+  let consoleUblox = false;
+
+  const consoleOpen = () => $('gnss-console').open && $('gnss-console').closest('details.panel').open;
+  const consoleMode = () => ($('console-mode-ubx').checked ? 'ubx' : 'text');
+
+  function updateConsoleMode() {
+    const ubx = consoleMode() === 'ubx';
+    $('console-text-options').hidden = ubx;
+    $('console-hint-text').hidden = ubx;
+    $('console-hint-ubx').hidden = !ubx;
+    $('console-ubx-off').hidden = !ubx || consoleUblox;
+    $('console-command').placeholder = ubx ? '0A 04' : '$CFGMSG,0,4,1';
+  }
+
+  function addConsoleLine(kind, periodic, text) {
+    consoleLines.push({ kind: kind, periodic: periodic, text: text });
+    if (consoleLines.length > CONSOLE_KEEP) consoleLines.splice(0, consoleLines.length - CONSOLE_KEEP);
+  }
+
+  function renderConsole() {
+    const out = $('console-output');
+    const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 24;
+    const periodic = $('console-periodic').checked;
+    const fragment = document.createDocumentFragment();
+    for (const line of consoleLines) {
+      if (line.periodic && !periodic) continue;
+      const span = document.createElement('span');
+      span.className = line.kind;
+      span.textContent = (line.kind === 'sent' ? '> ' : '') + line.text + '\n';
+      fragment.appendChild(span);
+    }
+    out.replaceChildren(fragment);
+    if (atBottom) out.scrollTop = out.scrollHeight;
+  }
+
+  async function loadConsole() {
+    if (!state || !consoleOpen() || consoleBusy) return;
+    consoleBusy = true;
+    const r = await api('/api/gnss/console?after=' + consoleAfter);
+    consoleBusy = false;
+    if (r.status !== 200) return;
+    const d = r.data;
+    const entries = d.entries || [];
+    if (d.reset && consoleAfter > 0) addConsoleLine('gap', false, t('(the device was restarted)'));
+    if (d.skipped) addConsoleLine('gap', false, t('(older lines were overwritten: some are missing here)'));
+    for (const e of entries) addConsoleLine(e.kind, !!e.periodic, e.text);
+    consoleAfter = d.last || 0;
+    if (consoleUblox !== !!d.ublox) {
+      consoleUblox = !!d.ublox;
+      updateConsoleMode();
+    }
+    if (entries.length > 0 || d.skipped || d.reset) renderConsole();
+  }
+
+  async function sendConsoleCommand() {
+    const input = $('console-command');
+    const command = input.value.trim();
+    if (!command || $('console-send').disabled) return;
+    $('console-send').disabled = true;
+    const r = await api('/api/gnss/command', {
+      mode: consoleMode(), command: command, checksum: $('console-checksum').checked, crlf: $('console-crlf').checked
+    });
+    $('console-send').disabled = false;
+    if (r.status === 200) {
+      if (consoleHistory[consoleHistory.length - 1] !== command) consoleHistory.push(command);
+      if (consoleHistory.length > 20) consoleHistory.shift();
+      consoleHistoryIndex = consoleHistory.length;
+      input.value = '';
+      await loadConsole();
+    } else {
+      addConsoleLine('gap', false, t('Not sent: {error}', { error: ts(r.data.error) || r.status }));
+      renderConsole();
+    }
+  }
+
+  $('gnss-console').addEventListener('toggle', () => {
+    clearInterval(consoleTimer);
+    if (!$('gnss-console').open) return;
+    updateConsoleMode();
+    loadConsole();
+    consoleTimer = setInterval(loadConsole, 1000);
+  });
+  // The console is not part of the settings: its fields do not mark the form as changed
+  for (const type of ['input', 'change']) {
+    $('gnss-console').addEventListener(type, (e) => {
+      e.stopPropagation();
+      if (e.target.name === 'console-mode') updateConsoleMode();
+      if (e.target.id === 'console-periodic') renderConsole();
+    });
+  }
+  $('console-send').addEventListener('click', sendConsoleCommand);
+  $('console-clear').addEventListener('click', () => {
+    consoleLines.length = 0;
+    renderConsole();
+  });
+  $('console-command').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendConsoleCommand();
+    } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && consoleHistory.length > 0) {
+      e.preventDefault();
+      consoleHistoryIndex = Math.max(0, Math.min(consoleHistory.length, consoleHistoryIndex + (e.key === 'ArrowUp' ? -1 : 1)));
+      e.target.value = consoleHistory[consoleHistoryIndex] || '';
+    }
   });
 
   function renderPending(p) {
