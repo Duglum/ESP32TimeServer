@@ -12,9 +12,9 @@ to:
 
 In the examples below:
 
-- The device name, `ESP32TimeServer`, is set as `DeviceName` in
-  `ESP32TimeServerSettings.h` (default FQDN of the device; its first label is
-  also the DHCP and mDNS host name).
+- The device name, `ESP32TimeServer`, is the default host name and domain (FQDN)
+  of the device, set on the web admin page (section *Network*); its first label
+  is also the DHCP and mDNS host name.
 - `timeserver1.example.net` is the DNS name (A and / or AAAA record) of the
   ESP32-P4 running the ESP32 time server software.
 - `x.x.x.x` is the IP address of the ESP32-P4 running the ESP32 time server
@@ -25,9 +25,7 @@ In the examples below:
 The firmware image is uploaded over the HTTPS web admin server (TCP 443), either on
 the web admin page (section *Firmware update*) or with `tools\ote_upload.py`.
 Over The Ethernet updates have to be switched on (web admin page, section
-*Over The Ethernet updates*, or `OTE_UPDATES_ENABLED` in
-`ESP32TimeServerSettings.h`) and the web admin server has to be enabled
-(`WEB_ADMIN_ENABLED`).
+*Over The Ethernet updates*).
 
 Upload the application image of the build folder (`ESP32TimeServer.bin`), not the
 merged flash image. Use the build profile that matches the chip revision of the
@@ -36,8 +34,7 @@ another project or for another chip revision before it writes anything.
 
 The script checks the self-signed certificate of the device by its SHA-256
 fingerprint (shown on the web admin page under *Status* and on the serial console
-at every start) and sends the web admin password (`WebAdminPassword` in
-`ESP32TimeServerSettingsSecrets.h`, or the one set on the web admin page) with
+at every start) and sends the web admin password (the one set on the web admin page) with
 HTTP Basic authentication inside the TLS connection. It reads the password from
 the environment variable `WEB_ADMIN_PASSWORD`, otherwise it asks for it. The
 device refuses the script while its web admin password is the default

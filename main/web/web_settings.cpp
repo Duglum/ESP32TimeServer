@@ -14,8 +14,6 @@
 #include <iterator>
 #include <new>
 
-#include "ESP32TimeServerSettings.h"
-
 extern "C"
 {
 #include "esp_log.h"
@@ -38,7 +36,7 @@ namespace
     constexpr char AUTH_NVS_NAMESPACE[] = "webauth"; // admin password hash and allow-list (see web_auth.cpp)
 
     constexpr uint32_t BLOB_MAGIC = 0x57534554u; // "WSET"
-    // Increase when web_settings_t changes: a saved set of another version is ignored (compiled defaults are used)
+    // Increase when web_settings_t changes: a saved set of another version is ignored (the defaults are used)
     // 2: GNSS protocol and LED colours added; 3: Over The Ethernet update settings added; 4: up to 8 NTP keys;
     // 5: MAC address, MQTT topic / QoS / retain / period / report contents / TF client limit, TF card pins;
     // 6: PPS holdover in the place of the former OTE port, behaviour after the holdover appended at the end
@@ -48,16 +46,18 @@ namespace
     // 9: minimum GNSS fix age before stratum 1 appended at the end (versions 5 to 8 are still read the same way);
     // 10: minimum satellites in use before stratum 1 appended at the end (versions 5 to 9 are still read the same way);
     // 11: address families and the address shown on the LCD appended at the end (versions 5 to 10 are still read the
-    //     same way).
+    //     same way);
+    // 12: uptime / restart button appended at the end (versions 5 to 11 are still read the same way).
     // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
     // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
-    constexpr uint32_t BLOB_VERSION = 11;
+    constexpr uint32_t BLOB_VERSION = 12;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
     constexpr uint32_t BLOB_VERSION_7 = 7;
     constexpr uint32_t BLOB_VERSION_8 = 8;
     constexpr uint32_t BLOB_VERSION_9 = 9;
     constexpr uint32_t BLOB_VERSION_10 = 10;
+    constexpr uint32_t BLOB_VERSION_11 = 11;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -70,53 +70,27 @@ namespace
     constexpr size_t SETTINGS_SIZE_8 = settings_size_before(offsetof(web_settings_t, gnss_min_fix_age_s));
     constexpr size_t SETTINGS_SIZE_9 = settings_size_before(offsetof(web_settings_t, gnss_min_satellites));
     constexpr size_t SETTINGS_SIZE_10 = settings_size_before(offsetof(web_settings_t, ip_mode));
-    // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 11 may fit into that of the
+    constexpr size_t SETTINGS_SIZE_11 = settings_size_before(offsetof(web_settings_t, button_enabled));
+    // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 12 may fit into that of the
     // version before: the version number tells them apart, and an older set always gets the defaults for the newer
     // fields instead of its padding bytes
     static_assert(SETTINGS_SIZE_5 <= SETTINGS_SIZE_6 && SETTINGS_SIZE_6 <= SETTINGS_SIZE_7 &&
                       SETTINGS_SIZE_7 <= SETTINGS_SIZE_8 && SETTINGS_SIZE_8 <= SETTINGS_SIZE_9 &&
-                      SETTINGS_SIZE_9 <= SETTINGS_SIZE_10 && SETTINGS_SIZE_10 <= sizeof(web_settings_t),
+                      SETTINGS_SIZE_9 <= SETTINGS_SIZE_10 && SETTINGS_SIZE_10 <= SETTINGS_SIZE_11 &&
+                      SETTINGS_SIZE_11 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
-    // ntpHoldoverDurationUs in whole seconds, within the range of the setting
-    uint16_t default_pps_holdover_s()
-    {
-        const int64_t seconds = (ntpHoldoverDurationUs + 500000LL) / 1000000LL;
-        return static_cast<uint16_t>(seconds < 0 ? 0 : seconds > WEB_PPS_HOLDOVER_MAX_S ? WEB_PPS_HOLDOVER_MAX_S : seconds);
-    }
-
-    // ntpHoldoverDispersionPpm within the range of the setting
-    uint16_t default_pps_dispersion_ppm()
-    {
-        return static_cast<uint16_t>(ntpHoldoverDispersionPpm < 1 ? 1
-                                     : ntpHoldoverDispersionPpm > WEB_PPS_DISPERSION_MAX_PPM ? WEB_PPS_DISPERSION_MAX_PPM
-                                                                                             : ntpHoldoverDispersionPpm);
-    }
-
-    // ntpClientRateLimitPerSecond within the range of the setting
-    uint16_t default_ntp_client_rate_limit()
-    {
-        return ntpClientRateLimitPerSecond > WEB_NTP_RATE_LIMIT_MAX ? WEB_NTP_RATE_LIMIT_MAX : ntpClientRateLimitPerSecond;
-    }
-
-    // gnssMinimumFixAgeSeconds within the range of the setting
-    uint16_t default_gnss_min_fix_age_s()
-    {
-        return gnssMinimumFixAgeSeconds > WEB_GNSS_MIN_FIX_AGE_MAX_S ? WEB_GNSS_MIN_FIX_AGE_MAX_S : gnssMinimumFixAgeSeconds;
-    }
-
-    // gnssMinimumSatellites within the range of the setting
-    uint8_t default_gnss_min_satellites()
-    {
-        return gnssMinimumSatellites > WEB_GNSS_MIN_SATELLITES_MAX ? WEB_GNSS_MIN_SATELLITES_MAX : gnssMinimumSatellites;
-    }
-
-    // ntpServeAfterPpsLostMinutes within the range of the setting
-    uint16_t default_pps_lost_serve_min()
-    {
-        return static_cast<uint16_t>(ntpServeAfterPpsLostMinutes > WEB_PPS_LOST_SERVE_MAX_MIN ? WEB_PPS_LOST_SERVE_MAX_MIN
-                                                                                             : ntpServeAfterPpsLostMinutes);
-    }
+    // Defaults of the fields that later blob versions appended (web_settings_defaults() uses them as well)
+    constexpr uint16_t DEFAULT_PPS_HOLDOVER_S = 2;         // see web_settings_defaults()
+    constexpr uint8_t DEFAULT_PPS_LOST_STRATUM = 16;
+    constexpr bool DEFAULT_PPS_LOST_SERVE = true;
+    constexpr uint16_t DEFAULT_PPS_LOST_SERVE_MIN = 60;
+    constexpr uint16_t DEFAULT_PPS_DISPERSION_PPM = 15;
+    constexpr uint16_t DEFAULT_NTP_CLIENT_RATE_LIMIT = 20;
+    constexpr uint16_t DEFAULT_GNSS_MIN_FIX_AGE_S = 0;
+    constexpr uint8_t DEFAULT_GNSS_MIN_SATELLITES = 0;
+    constexpr bool DEFAULT_BUTTON_ENABLED = false;
+    constexpr int8_t DEFAULT_BUTTON_PIN = 3;
 
     struct settings_blob_t
     {
@@ -153,7 +127,7 @@ namespace
         return false;
     }
 
-    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 10) and passes the CRC.
+    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 11) and passes the CRC.
     // *had_ote_fields (optional): the stored set still held the former OTE device name or password (zeroed in blob)
     bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob, bool *had_ote_fields = nullptr)
     {
@@ -191,6 +165,7 @@ namespace
         const bool version_8 = header.version == BLOB_VERSION_8 && header.size == SETTINGS_SIZE_8;
         const bool version_9 = header.version == BLOB_VERSION_9 && header.size == SETTINGS_SIZE_9;
         const bool version_10 = header.version == BLOB_VERSION_10 && header.size == SETTINGS_SIZE_10;
+        const bool version_11 = header.version == BLOB_VERSION_11 && header.size == SETTINGS_SIZE_11;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
@@ -201,9 +176,11 @@ namespace
                                length != HEADER_SIZE + SETTINGS_SIZE_7 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_8 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_9 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_10 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_10 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_11 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
-        else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9 && !version_10) ||
+        else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9 && !version_10 &&
+                                                   !version_11) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -214,38 +191,38 @@ namespace
             memcpy(&blob, raw, HEADER_SIZE + header.size);
             if (version_5)
             {
-                // The holdover field held the former OTE port; the fields of version 6 get the compiled defaults
-                blob.settings.pps_holdover_s = default_pps_holdover_s();
-                blob.settings.pps_lost_stratum = ntpStratumAfterHoldover;
-                blob.settings.pps_lost_serve = ntpServeAfterHoldover;
-                blob.settings.pps_lost_serve_min = default_pps_lost_serve_min();
+                // The holdover field held the former OTE port; the fields of version 6 get the defaults
+                blob.settings.pps_holdover_s = DEFAULT_PPS_HOLDOVER_S;
+                blob.settings.pps_lost_stratum = DEFAULT_PPS_LOST_STRATUM;
+                blob.settings.pps_lost_serve = DEFAULT_PPS_LOST_SERVE;
+                blob.settings.pps_lost_serve_min = DEFAULT_PPS_LOST_SERVE_MIN;
                 ESP_LOGI(TAG, "Stored web settings '%s' of version 5 read; the PPS holdover settings have their defaults", key);
             }
             if (version_5 || version_6)
             {
                 // Appended in version 7
-                blob.settings.pps_dispersion_ppm = default_pps_dispersion_ppm();
+                blob.settings.pps_dispersion_ppm = DEFAULT_PPS_DISPERSION_PPM;
                 if (version_6)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 6 read; the root dispersion growth has its default", key);
             }
             if (version_5 || version_6 || version_7)
             {
                 // Appended in version 8
-                blob.settings.ntp_client_rate_limit = default_ntp_client_rate_limit();
+                blob.settings.ntp_client_rate_limit = DEFAULT_NTP_CLIENT_RATE_LIMIT;
                 ESP_LOGI(TAG, "Stored web settings '%s' of version %lu read; the NTP client rate limit has its default", key,
                          static_cast<unsigned long>(header.version));
             }
             if (version_5 || version_6 || version_7 || version_8)
             {
                 // Appended in version 9
-                blob.settings.gnss_min_fix_age_s = default_gnss_min_fix_age_s();
+                blob.settings.gnss_min_fix_age_s = DEFAULT_GNSS_MIN_FIX_AGE_S;
                 if (version_8)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 8 read; the minimum GNSS fix age has its default", key);
             }
             if (version_5 || version_6 || version_7 || version_8 || version_9)
             {
                 // Appended in version 10
-                blob.settings.gnss_min_satellites = default_gnss_min_satellites();
+                blob.settings.gnss_min_satellites = DEFAULT_GNSS_MIN_SATELLITES;
                 if (version_9)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 9 read; the minimum satellites in use have their default", key);
             }
@@ -254,10 +231,30 @@ namespace
                 // Appended in version 11
                 blob.settings.ip_mode = web_ip_mode_t::dual;
                 blob.settings.lcd_address = web_lcd_address_t::both;
-                blob.version = BLOB_VERSION;
-                blob.size = sizeof(web_settings_t);
                 if (version_10)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 10 read; the address families have their default", key);
+            }
+            if (version_5 || version_6 || version_7 || version_8 || version_9 || version_10 || version_11)
+            {
+                // Appended in version 12
+                blob.settings.button_enabled = DEFAULT_BUTTON_ENABLED;
+                blob.settings.button_pin = DEFAULT_BUTTON_PIN;
+                blob.version = BLOB_VERSION;
+                blob.size = sizeof(web_settings_t);
+                if (version_11)
+                    ESP_LOGI(TAG, "Stored web settings '%s' of version 11 read; the uptime / restart button has its default", key);
+            }
+            // A set that used the keys of the former ESP32TimeServerSettingsSecrets.h: they no longer exist. NTP
+            // authentication without a key would make the whole set invalid, so it is switched off.
+            if (!blob.settings.ntp_key_override)
+            {
+                blob.settings.ntp_key_override = true;
+                blob.settings.ntp_key_count = 0;
+                memset(blob.settings.ntp_keys, 0, sizeof(blob.settings.ntp_keys));
+                if (blob.settings.ntp_auth_enabled)
+                    ESP_LOGW(TAG, "Stored web settings '%s' used the keys of the former settings file: NTP authentication is off "
+                                  "until keys are set on the web page", key);
+                blob.settings.ntp_auth_enabled = false;
             }
             // Former OTE device name and OTE password: no longer used
             const bool had_ote = any_byte_set(blob.settings.ote_name_unused, sizeof(blob.settings.ote_name_unused)) ||
@@ -297,21 +294,6 @@ namespace
             err = nvs_commit(handle);
         nvs_close(handle);
         return err;
-    }
-
-    bool parse_subnet_mask(const char *text, uint8_t *prefix)
-    {
-        uint32_t mask_be = 0;
-        if (!web_parse_ipv4(text, &mask_be))
-            return false;
-        const uint32_t mask = ntohl(mask_be);
-        uint8_t bits = 0;
-        while (bits < 32 && (mask & (0x80000000u >> bits)) != 0)
-            ++bits;
-        if (bits == 32 ? mask != 0xFFFFFFFFu : (mask << bits) != 0) // not contiguous
-            return false;
-        *prefix = bits;
-        return true;
     }
 
     bool is_printable_ascii(const char *text, char lowest, char highest)
@@ -448,8 +430,9 @@ bool web_is_valid_time_zone(const char *tz)
 bool web_is_reserved_gpio(int gpio)
 {
     // Waveshare ESP32-P4-ETH: RMII and SMI of the Ethernet PHY, UART0 (console), strapping pins (34 to 38, partly
-    // RMII as well), USB Serial/JTAG and the LCD I2C bus. The TF card pins are settings of their own (default 39 to
-    // 44, the TF slot of the board) and are checked against the other pins by web_settings_validate().
+    // RMII as well), USB Serial/JTAG and the LCD I2C bus. The TF card pins and the button pin are settings of their
+    // own (TF default 39 to 44, the TF slot of the board) and are checked against the other pins by
+    // web_settings_validate().
     static constexpr int reserved[] = {
         28, 29, 30, 31, 34, 35, 49, 50, 51, 52, // Ethernet RMII, MDC, MDIO, PHY reset, REF_CLK
         36, 37, 38,                             // strapping; 37/38 = UART0 console
@@ -461,10 +444,6 @@ bool web_is_reserved_gpio(int gpio)
     for (int r : reserved)
         if (gpio == r)
             return true;
-#if UPTIME_RESTART_BUTTON_ENABLED
-    if (gpio == upTimeRestartPin)
-        return true;
-#endif
     return false;
 }
 
@@ -537,152 +516,103 @@ bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length)
     return difference == 0;
 }
 
-// RGB value of a colour name of ESP32TimeServerSettings.h (LED_startup ...)
-static uint32_t web_led_colour_rgb(RGB_LED_Colour colour)
-{
-    switch (colour)
-    {
-    case RGB_LED_Colour::red:
-        return 0xFF0000;
-    case RGB_LED_Colour::green:
-        return 0x00FF00;
-    case RGB_LED_Colour::blue:
-        return 0x0000FF;
-    case RGB_LED_Colour::yellow:
-        return 0xFFFF00;
-    case RGB_LED_Colour::white:
-        return 0xFFFFFF;
-    case RGB_LED_Colour::orange:
-        return 0xFFA500;
-    case RGB_LED_Colour::pink:
-        return 0xFFC0CB;
-    case RGB_LED_Colour::off:
-    default:
-        return 0x000000;
-    }
-}
-
 void web_settings_defaults(web_settings_t &out)
 {
     out = web_settings_t{};
 
-    copy_text(out.fqdn, DeviceName);
-
-    uint8_t prefix = 24;
-    out.ipv4_dhcp = StaticIPAddress[0] == '\0' || !web_parse_ipv4(StaticIPAddress, nullptr) || !parse_subnet_mask(SubnetMask, &prefix);
-    if (!out.ipv4_dhcp)
-    {
-        copy_text(out.ipv4_address, StaticIPAddress);
-        copy_text(out.ipv4_gateway, Gateway);
-    }
-    out.ipv4_prefix = prefix;
-
+    // ---- Network: DHCP and SLAAC, both address families, the DNS servers they bring, the hardware MAC ----
+    // The FQDN is the host name of the DHCP request and mDNS (<name>.local) and the name of the certificate
+    copy_text(out.fqdn, "ESP32TimeServer");
     out.ip_mode = web_ip_mode_t::dual;
+    out.ipv4_dhcp = true;
+    out.ipv4_prefix = 24;
     out.ipv6_slaac = true;
     out.ipv6_prefix = 64;
-    copy_text(out.dns[0], PrimaryDNS);
-    copy_text(out.dns[1], SecondaryDNS);
-    // MACAddress: "" = hardware MAC; an invalid value was ignored before as well (hardware MAC)
-    if (MACAddress[0] != '\0' && !web_normalise_mac(MACAddress, out.mac_address))
-        ESP_LOGW(TAG, "MACAddress \"%s\" in ESP32TimeServerSettings.h is not valid, the hardware MAC is used", MACAddress);
-    out.ntp_client_rate_limit = default_ntp_client_rate_limit();
+    // Requests per second and client IP address; requests over the limit are dropped without an answer. A client is
+    // identified by its source address only (chrony uses a new source port for every request, NAT routers rewrite
+    // ports), so all clients behind one NAT address share one limit. Why 20:
+    // - The worst-case single client is chrony with "minpoll -4 maxpoll -4": one request every 62.5 ms, i.e. 16 per
+    //   second. iburst / burst only shorten intervals to 2 s or less and the interleaved mode sends no extra
+    //   requests, so neither raises this rate.
+    // - The limit allows a burst of one second worth of requests, which absorbs network jitter. It cannot absorb a
+    //   lasting rate difference: a limit of exactly 16 would sooner or later drop requests of a 16/s client whose
+    //   clock runs slightly fast compared to this server's (chrony slews by up to 83333 ppm). The 25 % margin covers
+    //   that with room to spare.
+    // - Raise it only if many clients share one NAT address; newer chrony versions also accept minpoll -6 or -7 (64
+    //   or 128 requests per second), such clients are limited to this rate.
+    out.ntp_client_rate_limit = DEFAULT_NTP_CLIENT_RATE_LIMIT;
 
-#ifdef UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
-    out.gnss_ublox = UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED != 0;
-#else
-    out.gnss_ublox = true;
-#endif
-    out.gnss_tx_pin = static_cast<int8_t>(TXPin);
-    out.gnss_rx_pin = static_cast<int8_t>(RXPin);
-    out.gnss_pps_pin = static_cast<int8_t>(PPSPin);
-    out.gnss_baud = baudRateForUbloxNonCompliantGNSSReceiver;
-    out.ptp_loopback_pin = static_cast<int8_t>(PTPPPSLoopbackPin);
-    out.pps_holdover_s = default_pps_holdover_s();
-    out.pps_lost_stratum = ntpStratumAfterHoldover;
-    out.pps_lost_serve = ntpServeAfterHoldover;
-    out.pps_lost_serve_min = default_pps_lost_serve_min();
-    out.pps_dispersion_ppm = default_pps_dispersion_ppm();
-    out.gnss_min_fix_age_s = default_gnss_min_fix_age_s();
-    out.gnss_min_satellites = default_gnss_min_satellites();
+    // ---- GNSS and PPS: NMEA at 921600 baud, the pins of the GNSS header wiring, PTP PPS loopback on GPIO 23 ----
+    // The baud rate only decides how soon the label of a second arrives after the PPS edge (within 950 ms); the
+    // accuracy comes from the PPS. 9600 baud still works with a single RMC sentence per second. The loopback pin is
+    // driven as an output inside the pad (nothing wired), it must be free; it needs an ESP32-P4 of revision v3.0 or
+    // newer.
+    out.gnss_ublox = false;
+    out.gnss_tx_pin = 22;
+    out.gnss_rx_pin = 21;
+    out.gnss_pps_pin = 20;
+    out.gnss_baud = 921600;
+    out.ptp_loopback_pin = 23;
+    // PPS holdover: the PPS counts as lost after 3.5 s without a pulse; for this long after that the server keeps
+    // answering at stratum 1, coasting on the learned rate, with the root dispersion growing by 15 ppm (the frequency
+    // tolerance PHI of RFC 5905; the board test showed about 1 ppb, so this is conservative). A short holdover makes
+    // the clients switch to other servers soon.
+    out.pps_holdover_s = DEFAULT_PPS_HOLDOVER_S;
+    out.pps_dispersion_ppm = DEFAULT_PPS_DISPERSION_PPM;
+    // After the holdover: keep answering for 60 min after the loss at stratum 16 ("not synchronised"), so the clients
+    // stop using the server
+    out.pps_lost_stratum = DEFAULT_PPS_LOST_STRATUM;
+    out.pps_lost_serve = DEFAULT_PPS_LOST_SERVE;
+    out.pps_lost_serve_min = DEFAULT_PPS_LOST_SERVE_MIN;
+    // Off: 750 s (the 12.5 min of the UTC parameters) is recommended for a receiver without backup battery
+    out.gnss_min_fix_age_s = DEFAULT_GNSS_MIN_FIX_AGE_S;
+    out.gnss_min_satellites = DEFAULT_GNSS_MIN_SATELLITES;
 
-    out.lcd_enabled = LIQUID_CRYSTAL_DISPLAY_ENABLED != 0;
-    copy_text(out.lcd_title, lcdTopLineTitle);
-    out.lcd_24_hour = display24HourFormat;
-    out.lcd_pad_hour = displayHoursWithPaddedZero;
-    out.lcd_show_time_zone = displayTimeZone;
+    // ---- LCD Display ----
+    out.lcd_enabled = false;
+    copy_text(out.lcd_title, "ESP32 Time Server");
+    out.lcd_24_hour = true;
+    out.lcd_pad_hour = true;
+    out.lcd_show_time_zone = true;
     out.lcd_address = web_lcd_address_t::both;
-    copy_text(out.time_zone, timeZoneSpec);
+    copy_text(out.time_zone, "CET-1CEST,M3.5.0,M10.5.0/3");
+    out.button_enabled = DEFAULT_BUTTON_ENABLED;
+    out.button_pin = DEFAULT_BUTTON_PIN;
 
-#if RBG_LED_KY_016_MODULE_ENABLED && RBG_LED_WS2812_MODULE_ENABLED
-#error "KY-016 and WS2812 RGB LED modules cannot both be enabled at the same time"
-#endif
-    out.led_type = RBG_LED_KY_016_MODULE_ENABLED ? web_led_type_t::ky016
-                   : RBG_LED_WS2812_MODULE_ENABLED ? web_led_type_t::ws2812
-                                                   : web_led_type_t::none;
-    out.led_brightness_percent = static_cast<uint8_t>(RGB_LED_Brightness_Percent < 0 ? 0 : RGB_LED_Brightness_Percent > 100 ? 100 : RGB_LED_Brightness_Percent);
-    out.led_red_pin = static_cast<int8_t>(LEDRedPin);
-    out.led_green_pin = static_cast<int8_t>(LEDGreenPin);
-    out.led_blue_pin = static_cast<int8_t>(LEDBluePin);
-    out.led_ws2812_pin = static_cast<int8_t>(WS2812DataPin);
-    out.led_rgb[static_cast<size_t>(web_led_state_t::startup)] = web_led_colour_rgb(LED_startup);
-    out.led_rgb[static_cast<size_t>(web_led_state_t::normal)] = web_led_colour_rgb(LED_normal);
-    out.led_rgb[static_cast<size_t>(web_led_state_t::sync)] = web_led_colour_rgb(LED_sync);
-    out.led_rgb[static_cast<size_t>(web_led_state_t::warning)] = web_led_colour_rgb(LED_warning);
-    out.led_rgb[static_cast<size_t>(web_led_state_t::alert)] = web_led_colour_rgb(LED_alert);
-    out.led_rgb[static_cast<size_t>(web_led_state_t::critical)] = web_led_colour_rgb(LED_critical);
-    out.led_rgb[static_cast<size_t>(web_led_state_t::button)] = web_led_colour_rgb(LED_button_push);
+    // ---- RGB LED ----
+    out.led_type = web_led_type_t::none;
+    out.led_brightness_percent = 70;
+    out.led_red_pin = 6;
+    out.led_green_pin = 5;
+    out.led_blue_pin = 4;
+    out.led_ws2812_pin = 4;
+    out.led_rgb[static_cast<size_t>(web_led_state_t::startup)] = 0x0000FF;  // blue
+    out.led_rgb[static_cast<size_t>(web_led_state_t::normal)] = 0x00FF00;   // green
+    out.led_rgb[static_cast<size_t>(web_led_state_t::sync)] = 0xFFFFFF;     // white
+    out.led_rgb[static_cast<size_t>(web_led_state_t::warning)] = 0xFFFF00;  // yellow
+    out.led_rgb[static_cast<size_t>(web_led_state_t::alert)] = 0xFFA500;    // orange
+    out.led_rgb[static_cast<size_t>(web_led_state_t::critical)] = 0xFF0000; // red
+    out.led_rgb[static_cast<size_t>(web_led_state_t::button)] = 0xFFC0CB;   // pink
 
-    out.mqtt_enabled = MQTT_ENABLED != 0;
-    if (MQTTServerIPAddress[0] != '\0')
-    {
-        const bool ipv6 = strchr(MQTTServerIPAddress, ':') != nullptr;
-        snprintf(out.mqtt_uri, sizeof(out.mqtt_uri), ipv6 ? "mqtt://[%s]:%u" : "mqtt://%s:%u", MQTTServerIPAddress,
-                 static_cast<unsigned int>(MQTTPort));
-    }
-    copy_text(out.mqtt_username, MQTTUsername);
-    copy_text(out.mqtt_password, MQTTPassword);
-    copy_text(out.mqtt_topic, MQTTTopic);
-    out.mqtt_qos = static_cast<uint8_t>(MQTT_QOS);
-    out.mqtt_retain = MQTTBrokerRetain != 0;
-    out.mqtt_report_period_s = MQTTReportingPeriod;
-    out.mqtt_client_reporting = MQTT_CLIENT_REPORTING_ENABLED != 0;
-    out.mqtt_memory_reporting = MQTT_MEMORY_REPORTING_ENABLED != 0;
-    out.mqtt_historical_reporting = MQTT_HISTORICAL_REPORTING_ENABLED != 0;
-    out.mqtt_distinguish_auth = MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED != 0;
-    out.mqtt_tf_client_limit = static_cast<uint16_t>(MQTT_TF_Client_Limit);
-    out.tf_cmd_pin = static_cast<int8_t>(TFCardCommandPin);
-    out.tf_clk_pin = static_cast<int8_t>(TFCardClockPin);
-    out.tf_d0_pin = static_cast<int8_t>(TFCardData0Pin);
-    out.tf_d1_pin = static_cast<int8_t>(TFCardData1Pin);
-    out.tf_d2_pin = static_cast<int8_t>(TFCardData2Pin);
-    out.tf_d3_pin = static_cast<int8_t>(TFCardData3Pin);
+    // ---- MQTT (off; no broker) and the TF card slot of the Waveshare ESP32-P4 Ethernet boards ----
+    out.mqtt_enabled = false;
+    copy_text(out.mqtt_topic, "ESP32TimeServer");
+    out.mqtt_qos = 0;
+    out.mqtt_retain = true;
+    out.mqtt_report_period_s = 900;
+    out.mqtt_tf_client_limit = 500;
+    out.tf_cmd_pin = 44;
+    out.tf_clk_pin = 43;
+    out.tf_d0_pin = 39;
+    out.tf_d1_pin = 40;
+    out.tf_d2_pin = 41;
+    out.tf_d3_pin = 42;
 
-    out.ote_enabled = OTE_UPDATES_ENABLED != 0;
-
-    out.ntp_auth_enabled = SYMMETRIC_KEY_AUTHENTICATION_ENABLED != 0;
-    out.ntp_key_override = false; // the keys of ESP32TimeServerSettingsSecrets.h
+    // ---- Over The Ethernet updates and NTP authentication: off, no keys ----
+    out.ote_enabled = false;
+    out.ntp_auth_enabled = false;
+    out.ntp_key_override = true;
     out.ntp_key_count = 0;
-}
-
-// The compiled settings are not checked when ESP32TimeServerSettings.h is edited: a static IPv4 address with an
-// unusable address or subnet mask falls back to DHCP, and an incomplete set (for example no gateway) is used as it is
-// while the page refuses every save until the value is corrected. Both are said at a start that uses the compiled
-// settings (nothing saved yet, after a reset to defaults, or with the web admin disabled).
-static void check_compiled_settings(const web_settings_t &defaults)
-{
-    if (StaticIPAddress[0] != '\0' && defaults.ipv4_dhcp)
-        ESP_LOGW(TAG, "StaticIPAddress \"%s\" with SubnetMask \"%s\" in ESP32TimeServerSettings.h is not valid, DHCP is used",
-                 StaticIPAddress, SubnetMask);
-
-    char error[96] = "";
-    if (!web_settings_validate(defaults, error, sizeof(error)))
-#if WEB_ADMIN_ENABLED
-        ESP_LOGW(TAG, "Compiled settings in ESP32TimeServerSettings.h are not valid (%s): they are used as they are, "
-                      "and the web admin saves only after the value is corrected on the page",
-                 error);
-#else
-        ESP_LOGW(TAG, "Compiled settings in ESP32TimeServerSettings.h are not valid (%s): they are used as they are", error);
-#endif
 }
 
 void web_settings_load_boot()
@@ -691,24 +621,7 @@ void web_settings_load_boot()
         s_mutex = xSemaphoreCreateMutex();
 
     web_settings_defaults(s_boot);
-    const char *source = "compiled defaults";
-    bool compiled = true;
-
-#if !WEB_ADMIN_ENABLED
-    // Web admin disabled: only the compiled settings. Saved settings stay in NVS untouched; a pending one-shot set
-    // (from an Apply just before the firmware change) is discarded.
-    nvs_handle_t disabled_handle = 0;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &disabled_handle) == ESP_OK)
-    {
-        if (nvs_erase_key(disabled_handle, NVS_KEY_ONESHOT) == ESP_OK)
-            nvs_commit(disabled_handle);
-        nvs_close(disabled_handle);
-    }
-    s_running = s_boot;
-    check_compiled_settings(s_boot);
-    ESP_LOGI(TAG, "Settings: compiled settings (web admin disabled, WEB_ADMIN_ENABLED 0)");
-    return;
-#endif
+    const char *source = "defaults";
 
     nvs_handle_t handle = 0;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
@@ -735,10 +648,9 @@ void web_settings_load_boot()
             {
                 s_boot = blob.settings;
                 source = "saved settings (NVS)";
-                compiled = false;
             }
             else
-                ESP_LOGW(TAG, "Saved web settings are not valid for this firmware (%s), compiled defaults are used", error);
+                ESP_LOGW(TAG, "Saved web settings are not valid for this firmware (%s), the defaults are used", error);
         }
 
         // The one-shot set is erased before it is used: if it makes the device crash, the next boot is back on the
@@ -755,7 +667,6 @@ void web_settings_load_boot()
                 s_boot_oneshot = true;
                 s_boot_network_confirm = (blob.flags & 1u) != 0;
                 source = "one-shot settings of the web admin (valid for this boot only)";
-                compiled = false;
             }
             else
                 ESP_LOGW(TAG, "One-shot web settings are not valid (%s), ignored", error);
@@ -769,11 +680,9 @@ void web_settings_load_boot()
         nvs_close(handle);
     }
     else
-        ESP_LOGW(TAG, "NVS namespace %s unavailable (%s), compiled defaults are used", NVS_NAMESPACE, esp_err_to_name(err));
+        ESP_LOGW(TAG, "NVS namespace %s unavailable (%s), the defaults are used", NVS_NAMESPACE, esp_err_to_name(err));
 
     s_running = s_boot;
-    if (compiled)
-        check_compiled_settings(s_boot);
     ESP_LOGI(TAG, "Settings: %s", source);
 }
 
@@ -1017,7 +926,7 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         int pin;
         const char *name;
     };
-    pin_use_t pins[14];
+    pin_use_t pins[15];
     size_t pin_count = 0;
     auto add_pin = [&](int pin, const char *name) -> bool
     {
@@ -1034,6 +943,8 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         FAIL("PPS pin: GPIO %d cannot be used", s.gnss_pps_pin);
     if (s.ptp_loopback_pin != -1 && !add_pin(s.ptp_loopback_pin, "PTP PPS loopback"))
         FAIL("PTP PPS loopback pin: GPIO %d cannot be used", s.ptp_loopback_pin);
+    if (s.button_enabled && !add_pin(s.button_pin, "Button"))
+        FAIL("Button pin: GPIO %d cannot be used", s.button_pin);
     // TF card: always taken (on the Waveshare boards the slot is wired to these pins)
     if (!add_pin(s.tf_cmd_pin, "TF CMD") || !add_pin(s.tf_clk_pin, "TF CLK") || !add_pin(s.tf_d0_pin, "TF D0") ||
         !add_pin(s.tf_d1_pin, "TF D1") || !add_pin(s.tf_d2_pin, "TF D2") || !add_pin(s.tf_d3_pin, "TF D3"))
@@ -1141,9 +1052,9 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
     }
 
     // ---- NTP authentication ----
-    if (s.ntp_key_count > (s.ntp_key_override ? WEB_NTP_MAX_KEYS : 0))
+    if (s.ntp_key_count > WEB_NTP_MAX_KEYS)
         FAIL("NTP keys: at most %u", static_cast<unsigned>(WEB_NTP_MAX_KEYS));
-    if (s.ntp_key_override && s.ntp_auth_enabled && s.ntp_key_count == 0)
+    if (s.ntp_auth_enabled && s.ntp_key_count == 0)
         FAIL("NTP authentication needs at least one key");
     for (size_t i = 0; i < s.ntp_key_count; ++i)
     {
@@ -1199,7 +1110,7 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            strcmp(a.mqtt_username, b.mqtt_username) != 0 ||
            !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.mqtt_password),
                                     reinterpret_cast<const uint8_t *>(b.mqtt_password), WEB_MQTT_CREDENTIAL_SIZE) ||
-           a.ote_enabled != b.ote_enabled;
+           a.ote_enabled != b.ote_enabled || a.button_enabled != b.button_enabled || a.button_pin != b.button_pin;
 }
 
 bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
@@ -1214,6 +1125,6 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
            a.pps_dispersion_ppm == b.pps_dispersion_ppm && a.ntp_client_rate_limit == b.ntp_client_rate_limit &&
            a.gnss_min_fix_age_s == b.gnss_min_fix_age_s && a.gnss_min_satellites == b.gnss_min_satellites &&
            a.ntp_auth_enabled == b.ntp_auth_enabled &&
-           a.ntp_key_override == b.ntp_key_override && a.ntp_key_count == b.ntp_key_count &&
+           a.ntp_key_count == b.ntp_key_count &&
            web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_keys), reinterpret_cast<const uint8_t *>(b.ntp_keys), sizeof(a.ntp_keys));
 }

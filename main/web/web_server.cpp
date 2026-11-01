@@ -27,8 +27,6 @@
 #include <new>
 #include <strings.h>
 
-#include "ESP32TimeServerSettings.h"
-
 extern "C"
 {
 #include "cJSON.h"
@@ -414,6 +412,8 @@ namespace
         cJSON_AddBoolToObject(object, "lcd_24_hour", s.lcd_24_hour);
         cJSON_AddBoolToObject(object, "lcd_pad_hour", s.lcd_pad_hour);
         cJSON_AddBoolToObject(object, "lcd_show_time_zone", s.lcd_show_time_zone);
+        cJSON_AddBoolToObject(object, "button_enabled", s.button_enabled);
+        cJSON_AddNumberToObject(object, "button_pin", s.button_pin);
         cJSON_AddStringToObject(object, "lcd_address", s_lcd_address_names[static_cast<size_t>(s.lcd_address)]);
         cJSON_AddStringToObject(object, "time_zone", s.time_zone);
         cJSON_AddStringToObject(object, "led_type", s.led_type == web_led_type_t::ky016 ? "ky016" : s.led_type == web_led_type_t::ws2812 ? "ws2812" : "none");
@@ -450,7 +450,6 @@ namespace
         cJSON_AddNumberToObject(object, "tf_d2_pin", s.tf_d2_pin);
         cJSON_AddNumberToObject(object, "tf_d3_pin", s.tf_d3_pin);
         cJSON_AddBoolToObject(object, "ntp_auth_enabled", s.ntp_auth_enabled);
-        cJSON_AddBoolToObject(object, "ntp_key_override", s.ntp_key_override);
         // The NTP keys are shown on the page (they have to be entered on the clients); the other secrets are not
         add_ntp_keys(cJSON_AddArrayToObject(object, "ntp_keys"), s.ntp_keys, s.ntp_key_count);
         cJSON_AddBoolToObject(object, "ote_enabled", s.ote_enabled);
@@ -531,6 +530,8 @@ namespace
                   json_bool(root, "lcd_24_hour", s.lcd_24_hour, err, err_size) &&
                   json_bool(root, "lcd_pad_hour", s.lcd_pad_hour, err, err_size) &&
                   json_bool(root, "lcd_show_time_zone", s.lcd_show_time_zone, err, err_size) &&
+                  json_bool(root, "button_enabled", s.button_enabled, err, err_size) &&
+                  json_int(root, "button_pin", s.button_pin, 0, 54, err, err_size) &&
                   json_string(root, "time_zone", s.time_zone, sizeof(s.time_zone), err, err_size) &&
                   json_int(root, "led_brightness", s.led_brightness_percent, 0, 100, err, err_size) &&
                   json_int(root, "led_red_pin", s.led_red_pin, -1, 54, err, err_size) &&
@@ -704,19 +705,9 @@ namespace
         else if (secret[0] != '\0')
             snprintf(s.mqtt_password, sizeof(s.mqtt_password), "%s", secret);
 
-        // NTP keys: "ntp_keys" (list of {id, key}) replaces the keys and switches to the keys of the web settings,
-        // "ntp_key_clear" returns to the compiled keys; neither: unchanged
-        clear = false;
-        if (!json_bool(root, "ntp_key_clear", clear, err, err_size))
-            return false;
+        // NTP keys: "ntp_keys" (list of {id, key}, may be empty) replaces the keys; not sent: unchanged
         cJSON *keys = cJSON_GetObjectItemCaseSensitive(root, "ntp_keys");
-        if (clear)
-        {
-            s.ntp_key_override = false;
-            s.ntp_key_count = 0;
-            memset(s.ntp_keys, 0, sizeof(s.ntp_keys));
-        }
-        else if (keys != nullptr)
+        if (keys != nullptr)
         {
             if (!cJSON_IsArray(keys) || cJSON_GetArraySize(keys) > static_cast<int>(WEB_NTP_MAX_KEYS))
             {
@@ -950,24 +941,13 @@ namespace
         cJSON_AddStringToObject(root, "fingerprint", s_identity.fingerprint);
         settings_to_json(cJSON_AddObjectToObject(root, "settings"), sets->running);
         settings_to_json(cJSON_AddObjectToObject(root, "defaults"), sets->defaults);
-        // Keys of ESP32TimeServerSettingsSecrets.h (shown while no keys are set on the page)
-        cJSON *compiled = cJSON_AddArrayToObject(root, "ntp_compiled_keys");
-        for (const symmetric_key_t &key : symmetric_keys)
-        {
-            cJSON *item = cJSON_CreateObject();
-            cJSON_AddNumberToObject(item, "id", key.key_id);
-            char value[WEB_NTP_KEY_SIZE];
-            snprintf(value, sizeof(value), "%.*s", static_cast<int>(sizeof(key.key_value)), key.key_value);
-            cJSON_AddStringToObject(item, "key", value);
-            cJSON_AddItemToArray(compiled, item);
-        }
         if (saved)
             settings_to_json(cJSON_AddObjectToObject(root, "saved"), sets->saved);
         else
             cJSON_AddNullToObject(root, "saved");
         bool network_confirm = false;
         cJSON_AddBoolToObject(root, "oneshot_boot", web_settings_boot_was_oneshot(&network_confirm));
-        // Settings in use differ from what the next start would load (saved settings, else the compiled defaults)
+        // Settings in use differ from what the next start would load (saved settings, else the defaults)
         cJSON_AddBoolToObject(root, "unsaved_changes", !web_settings_equal(sets->running, saved ? sets->saved : sets->defaults));
         add_confirm_info(root);
 
@@ -1053,7 +1033,6 @@ namespace
         cJSON_AddBoolToObject(status, "link_full_duplex", sets->app.link_full_duplex);
         cJSON_AddNumberToObject(status, "eth_recoveries", sets->app.eth_recoveries);
         cJSON_AddBoolToObject(status, "ntp_auth_available", sets->app.ntp_auth_available);
-        cJSON_AddNumberToObject(status, "ntp_auth_compiled_keys", sets->app.ntp_auth_compiled_keys);
         cJSON_AddNumberToObject(status, "ntp_auth_keys_in_use", sets->app.ntp_auth_keys_in_use);
         cJSON_AddNumberToObject(status, "ntp_rate_limited", sets->app.ntp_rate_limited_requests);
         cJSON_AddNumberToObject(status, "free_heap", sets->app.free_heap);
@@ -1223,7 +1202,7 @@ namespace
             return send_error(req, "500 Internal Server Error", "NVS could not be erased");
         web_auth_end_all_sessions();
         ESP_LOGW(TAG, "Web admin: reset to defaults (settings, password and allow-list erased), restarting");
-        const esp_err_t err = send_ok(req, "Reset to defaults done. The device restarts with the compiled settings.");
+        const esp_err_t err = send_ok(req, "Reset to defaults done. The device restarts with the default settings.");
         schedule_restart("web_admin_factory_reset");
         return err;
     }
@@ -1922,10 +1901,6 @@ bool web_admin_running()
 
 void web_admin_start()
 {
-#if !WEB_ADMIN_ENABLED
-    // WEB_ADMIN_ENABLED 0: no server, no TLS key, no password hash (nothing listens on TCP 443)
-    return;
-#endif
     if (xTaskCreatePinnedToCore(web_admin_start_task, "web_admin_init", START_TASK_STACK, nullptr, TASK_PRIORITY, nullptr, TASK_CORE) != pdPASS)
         ESP_LOGE(TAG, "Web admin: start task could not be created");
 }

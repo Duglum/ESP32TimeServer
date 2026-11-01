@@ -28,7 +28,7 @@ struct web_app_status_t
     bool pps_holdover;            // stratum 1 in the PPS holdover (PPS lost)
     bool gnss_fix_waiting;        // no stratum 1 yet: the minimum GNSS fix age after the start is not reached
     uint32_t gnss_fix_age_s;      // age of the current GNSS fix (0 = none)
-    bool ublox_receiver;          // UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED: the baud rate is detected automatically
+    bool ublox_receiver;          // GNSS protocol U-Blox UBX: the baud rate is detected automatically
     uint32_t gnss_baud_in_use;
     char gnss_dynamic_model[16];  // U-Blox UBX: dynamic platform model read from the receiver ("" = not known)
     int16_t gnss_satellites_used; // NMEA: satellites in use of the latest GGA (-1 = no GGA)
@@ -53,7 +53,6 @@ struct web_app_status_t
     bool link_full_duplex;
     uint32_t eth_recoveries;      // restarts of the Ethernet driver by the recovery since the start
     bool ntp_auth_available;
-    size_t ntp_auth_compiled_keys;
     size_t ntp_auth_keys_in_use;
     uint32_t ntp_rate_limited_requests; // NTP requests dropped by the per-client rate limit since the start
     uint32_t free_heap;
@@ -193,7 +192,7 @@ struct web_diag_t
 // interface exists. If the settings of this boot came from a one-shot set that changed the network, the 120 s
 // confirmation starts as well.
 void web_admin_start();
-// The HTTPS server was started (false with WEB_ADMIN_ENABLED 0)
+// The HTTPS server was started
 bool web_admin_running();
 
 // Implemented in main.cpp

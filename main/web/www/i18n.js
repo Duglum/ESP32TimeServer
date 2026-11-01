@@ -188,8 +188,6 @@
     'dynamic model not known': 'Dynamikmodell unbekannt',
     'on, {n} key of the web settings': 'an, {n} Schlüssel aus den Web-Einstellungen',
     'on, {n} keys of the web settings': 'an, {n} Schlüssel aus den Web-Einstellungen',
-    'on, {n} key compiled in': 'an, {n} einkompilierter Schlüssel',
-    'on, {n} keys compiled in': 'an, {n} einkompilierte Schlüssel',
     'on, but no usable key': 'an, aber kein nutzbarer Schlüssel',
     'connected': 'verbunden',
     'not connected': 'nicht verbunden',
@@ -214,8 +212,8 @@
     'none': 'keine',
 
     // ---- Settings form: general ----
-    'Fields marked <span class="badge restart">restart</span> take effect after a restart: <em>Apply</em> restarts the device once with them. A <span class="def-sample">coloured border</span> marks a value that differs from the compiled default.':
-      'Mit <span class="badge restart">Neustart</span> markierte Felder wirken erst nach einem Neustart: <em>Übernehmen</em> startet das Gerät einmal damit neu. Ein <span class="def-sample">farbiger Rahmen</span> markiert einen Wert, der vom einkompilierten Standard abweicht.',
+    'Fields marked <span class="badge restart">restart</span> take effect after a restart: <em>Apply</em> restarts the device once with them. A <span class="def-sample">coloured border</span> marks a value that differs from the default.':
+      'Mit <span class="badge restart">Neustart</span> markierte Felder wirken erst nach einem Neustart: <em>Übernehmen</em> startet das Gerät einmal damit neu. Ein <span class="def-sample">farbiger Rahmen</span> markiert einen Wert, der vom Standard abweicht.',
     'restart': 'Neustart',
     'GPIO pins': 'GPIO-Pins',
     'Default: {value}': 'Standard: {value}',
@@ -361,6 +359,11 @@
     'IPv6 address': 'IPv6-Adresse',
     'Status of IPv4 and IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)': 'Status von IPv4 und IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)',
     'Empty (privacy)': 'Leer (Privatsphäre)',
+    'Uptime / restart button': 'Uptime-/Neustart-Taster',
+    'Push button from the GPIO to GND (internal pull-up). A press shows the uptime on the LCD for 10 s; held for 10 s it erases the stored GNSS data and restarts the device. Held while the device starts it resets the settings, the password and the allow-list to their defaults (forgotten password).':
+      'Taster vom GPIO nach GND (interner Pull-up). Ein Druck zeigt die Laufzeit 10 s lang auf dem LCD; 10 s gehalten löscht er die gespeicherten GNSS-Daten und startet das Gerät neu. Beim Start gehalten setzt er die Einstellungen, das Passwort und die Allow-List auf ihre Standardwerte zurück (vergessenes Passwort).',
+    'Button pin (GPIO) <span class="badge restart">restart</span>': 'Taster-Pin (GPIO) <span class="badge restart">Neustart</span>',
+    'Button pin': 'Taster-Pin',
     'With IPv4 only or IPv6 only the address of that family is shown. An IPv4 or IPv6 address line shows the other family while the chosen one has no address; IPv6 shows the address of the widest scope (global, unique local, link-local), in two halves.':
       'Bei nur IPv4 oder nur IPv6 wird die Adresse dieser Familie angezeigt. Eine IPv4- oder IPv6-Adresszeile zeigt die andere Familie, solange die gewählte keine Adresse hat; bei IPv6 die Adresse mit dem größten Gültigkeitsbereich (global, Unique Local, Link-Local), in zwei Hälften.',
 
@@ -470,11 +473,9 @@
     'Generate': 'Erzeugen',
     'New random key (32 letters or digits)': 'Neuer Zufallsschlüssel (32 Buchstaben oder Ziffern)',
     'Remove': 'Entfernen',
-    'Use the keys compiled into the firmware (ESP32TimeServerSettingsSecrets.h)': 'Die in die Firmware einkompilierten Schlüssel verwenden (ESP32TimeServerSettingsSecrets.h)',
     'Up to 8 keys (SHA-256, truncated to 160 bit). Enter the same key ID and key on the clients, e.g. <code>1 SHA256 ASCII:&lt;key&gt;</code> in chrony.keys. Generate uses the random generator of the browser. Changed keys take effect at once with Apply; Save Settings keeps them.':
       'Bis zu 8 Schlüssel (SHA-256, auf 160 Bit gekürzt). Tragen Sie dieselbe Key-ID und denselben Schlüssel auf den Clients ein, z. B. <code>1 SHA256 ASCII:&lt;key&gt;</code> in chrony.keys. Erzeugen verwendet den Zufallsgenerator des Browsers. Geänderte Schlüssel wirken sofort mit Übernehmen; Einstellungen speichern behält sie.',
-    'No keys are set on this page: these are the keys compiled into the firmware. Changing them here stores them as keys of the web settings.':
-      'Auf dieser Seite sind keine Schlüssel gesetzt: Dies sind die in die Firmware einkompilierten Schlüssel. Wenn Sie sie hier ändern, werden sie als Schlüssel der Web-Einstellungen gespeichert.',
+    'No keys are set yet.': 'Noch keine Schlüssel gesetzt.',
     'Keys set on this page are in use.': 'Die auf dieser Seite gesetzten Schlüssel sind aktiv.',
     'NTP key {n}: key ID 1 to 65535': 'NTP-Schlüssel {n}: Key-ID 1 bis 65535',
     'NTP key {n}: exactly 32 letters or digits': 'NTP-Schlüssel {n}: genau 32 Buchstaben oder Ziffern',
@@ -486,10 +487,10 @@
     'Save Settings': 'Einstellungen speichern',
     'Restart the device': 'Gerät neu starten',
     'Reboot': 'Neu starten',
-    'Back to the compiled settings': 'Zurück zu den einkompilierten Einstellungen',
+    'Back to the default settings': 'Zurück zu den Standardeinstellungen',
     'Reset to defaults': 'Auf Standard zurücksetzen',
-    '<strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the compiled settings and the compiled password (the TLS certificate is kept).':
-      '<strong>Übernehmen:</strong> sofort wirksam, nicht gespeichert. <strong>Einstellungen speichern:</strong> Die Einstellungen werden in NVS (Flash) gespeichert und bei jedem Start geladen. <strong>Neu starten:</strong> startet mit den gespeicherten Einstellungen neu. <strong>Auf Standard zurücksetzen:</strong> zurück zu den einkompilierten Einstellungen und dem einkompilierten Passwort (das TLS-Zertifikat bleibt erhalten).',
+    '<strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the default settings and the default password (the TLS certificate is kept).':
+      '<strong>Übernehmen:</strong> sofort wirksam, nicht gespeichert. <strong>Einstellungen speichern:</strong> Die Einstellungen werden in NVS (Flash) gespeichert und bei jedem Start geladen. <strong>Neu starten:</strong> startet mit den gespeicherten Einstellungen neu. <strong>Auf Standard zurücksetzen:</strong> zurück zu den Standardeinstellungen und dem Standardpasswort (das TLS-Zertifikat bleibt erhalten).',
     'This erases the saved settings, the web admin password and the allow-list, then restarts the device.':
       'Dies löscht die gespeicherten Einstellungen, das Web-Admin-Passwort und die Allow-List und startet das Gerät dann neu.',
     'Current password': 'Aktuelles Passwort',
@@ -578,7 +579,7 @@
     'Saved.': 'Gespeichert.',
     '{message} Reload this page and log in again in about a minute.': '{message} Laden Sie diese Seite in etwa einer Minute neu und melden Sie sich erneut an.',
     '{message} Reload this page in about a minute.': '{message} Laden Sie diese Seite in etwa einer Minute neu.',
-    '{message} Log in with the compiled password after the restart.': '{message} Melden Sie sich nach dem Neustart mit dem einkompilierten Passwort an.',
+    '{message} Log in with the default password after the restart.': '{message} Melden Sie sich nach dem Neustart mit dem Standardpasswort an.',
     'Restart failed': 'Neustart fehlgeschlagen',
     'Restart the device now? Applied settings that were not saved are discarded.':
       'Das Gerät jetzt neu starten? Übernommene, aber nicht gespeicherte Einstellungen werden verworfen.',
@@ -633,7 +634,7 @@
     'Refused: your own address would not be allowed any more': 'Abgelehnt: Ihre eigene Adresse wäre nicht mehr erlaubt',
     'Allow-list cleared: every source address may connect.': 'Allow-List geleert: Jede Quelladresse darf sich verbinden.',
     'Allow-list stored and active.': 'Allow-List gespeichert und aktiv.',
-    'Reset to defaults done. The device restarts with the compiled settings.': 'Auf Standard zurückgesetzt. Das Gerät startet mit den einkompilierten Einstellungen neu.',
+    'Reset to defaults done. The device restarts with the default settings.': 'Auf Standard zurückgesetzt. Das Gerät startet mit den Standardeinstellungen neu.',
     'Network settings confirmed. Use Save to keep them after a restart.': 'Netzwerkeinstellungen bestätigt. Mit Einstellungen speichern bleiben sie nach einem Neustart erhalten.',
     'Password changed and stored. All other sessions were closed.': 'Passwort geändert und gespeichert. Alle anderen Sitzungen wurden beendet.',
     'The device restarts now and accepts firmware updates until its next restart.': 'Das Gerät startet jetzt neu und nimmt Firmware-Updates bis zu seinem nächsten Neustart an.',
@@ -727,6 +728,7 @@
     ['GNSS TX pin: GPIO %d cannot be used', 'GNSS-TX-Pin: GPIO {1} kann nicht verwendet werden'],
     ['PPS pin: GPIO %d cannot be used', 'PPS-Pin: GPIO {1} kann nicht verwendet werden'],
     ['PTP PPS loopback pin: GPIO %d cannot be used', 'PTP-PPS-Loopback-Pin: GPIO {1} kann nicht verwendet werden'],
+    ['Button pin: GPIO %d cannot be used', 'Taster-Pin: GPIO {1} kann nicht verwendet werden'],
     ['WS2812 data pin: GPIO %d cannot be used', 'WS2812-Daten-Pin: GPIO {1} kann nicht verwendet werden'],
     ['GPIO %d is used twice (%s, %s)', 'GPIO {1} ist doppelt belegt ({2}, {3})'],
     ['LED colour %u is not a 24-bit RGB value', 'LED-Farbe {1} ist kein 24-Bit-RGB-Wert'],

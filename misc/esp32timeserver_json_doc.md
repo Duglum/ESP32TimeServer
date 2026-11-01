@@ -1,7 +1,7 @@
 # ESP32 Time Server MQTT JSON Reporting
 
-The ESP32 Time Server's settings file ( `main/ESP32TimeServerSettings.h` ) is
-use to enable and configure MQTT reporting.
+MQTT reporting is switched on and configured on the web admin page (panel
+*MQTT*).
 
 When MQTT is enabled a JSON message will be published to `<MQTT_TOPIC>/report`
 every `MQTT_Reporting_Period` seconds. Other configuration settings determine
@@ -193,8 +193,8 @@ volatile RAM while the MQTT broker was unavailable.
 
 QoS `0` does not queue reports, so this object is omitted.
 
-Please see the ESP32 Time Server's settings file for more information on
-MQTT_QOS values and the limitations associated with queueing.
+Please see the notes of the MQTT panel on the web admin page for more
+information on the QoS values and the limitations associated with queueing.
 
 ### `this_period.clients` and `this_period.clients_overflown`
 
@@ -216,7 +216,8 @@ Included when `MQTT_CLIENT_REPORTING_ENABLED` is `1` (Enabled).
   will be reset after reporting for the next reporting period.
 
   With a TF card installed the limit to how many client entries can be held for
-  reporting is set in the Settings file (with a default of 500).
+  reporting is set on the web admin page (*Client limit with TF card*, default
+  500).
 
 ### `historical`
 

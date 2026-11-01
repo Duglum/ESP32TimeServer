@@ -10,18 +10,14 @@
 
 1. **Set the ESP32TimeServer up to publish via MQTT**
 
-   In the `ESP32TimeServerSettings.h` file set:
+   On the web admin page (panel *MQTT*) set:
 
-   - `MQTT_ENABLED` to `1` (Enabled)
-   - `MQTT_MEMORY_REPORTING_ENABLED` to `1` (Enabled)
-   - Set the values for:
-     - `MQTTServerIPAddress[]`
-     - `MQTTPort`
-     - `MQTTUsername`
-     - `MQTTPassword`
-     - `MQTTBrokerRetain` to `1`
-     - `MQTTReportingPeriod` to a workable time frame for examining results, 
-        such as `120` (2 minutes)
+   - *Enable MQTT* on
+   - *Memory reporting* on
+   - the broker URI (`mqtt://<address>:<port>`), the user name and the password
+   - *Retain* on
+   - the reporting period to a workable time frame for examining results,
+     such as `120` (2 minutes)
 
 1. **Build, flash and physically set up the ESP32TimeServer**
 
@@ -60,8 +56,8 @@ or /opt/homebrew/bin/mosquitto_sub on Apple Silicon. You can check with:
 which mosquitto_sub
 ```
 
-Where MQTTServerIPAddress, MQTTUsername, and MQTTPassword are the 
-values for these fields in the `ESP32TimeServerSettings.h` file.
+Where MQTTServerIPAddress, MQTTUsername, and MQTTPassword are the broker
+address, user name and password set on the web admin page.
 
 Here too is a python script which may be used to create a comma separated 
 values (.csv) file from the output of the above (for import to program 

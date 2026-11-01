@@ -137,7 +137,7 @@
     </section>
 
     <form id="settings-form" novalidate>
-      <p class="legend">Fields marked <span class="badge restart">restart</span> take effect after a restart: <em>Apply</em> restarts the device once with them. A <span class="def-sample">coloured border</span> marks a value that differs from the compiled default.</p>
+      <p class="legend">Fields marked <span class="badge restart">restart</span> take effect after a restart: <em>Apply</em> restarts the device once with them. A <span class="def-sample">coloured border</span> marks a value that differs from the default.</p>
 
       <section class="card">
         <details class="panel">
@@ -334,6 +334,11 @@
               <small class="note">With IPv4 only or IPv6 only the address of that family is shown. An IPv4 or IPv6 address line shows the other family while the chosen one has no address; IPv6 shows the address of the widest scope (global, unique local, link-local), in two halves.</small>
               <small class="def" data-for="lcd_address"></small>
             </label>
+            <div class="span2 switch-block">
+              <label class="switch"><input type="checkbox" name="button_enabled"> Uptime / restart button <span class="badge restart">restart</span></label>
+              <small class="note">Push button from the GPIO to GND (internal pull-up). A press shows the uptime on the LCD for 10 s; held for 10 s it erases the stored GNSS data and restarts the device. Held while the device starts it resets the settings, the password and the allow-list to their defaults (forgotten password).</small>
+            </div>
+            <label><span class="lt">Button pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="button_pin" min="0" max="54"><small class="def" data-for="button_pin"></small></label>
           </div>
         </details>
       </section>
@@ -453,7 +458,6 @@
           <div class="buttons left key-actions">
             <button type="button" id="ntp-key-add">Add key</button>
           </div>
-          <label class="switch"><input type="checkbox" name="ntp_key_clear"> Use the keys compiled into the firmware (ESP32TimeServerSettingsSecrets.h)</label>
           <p class="hint">Up to 8 keys (SHA-256, truncated to 160 bit). Enter the same key ID and key on the clients, e.g. <code>1 SHA256 ASCII:&lt;key&gt;</code> in chrony.keys. Generate uses the random generator of the browser. Changed keys take effect at once with Apply; Save Settings keeps them.</p>
         </details>
       </section>
@@ -463,9 +467,9 @@
           <button type="button" class="primary" id="btn-apply" title="In effect now, not stored">Apply</button>
           <button type="button" id="btn-save" title="Stored in NVS (flash), loaded at every boot">Save Settings</button>
           <button type="button" id="btn-reboot" title="Restart the device">Reboot</button>
-          <button type="button" class="danger" id="btn-factory" title="Back to the compiled settings">Reset to defaults</button>
+          <button type="button" class="danger" id="btn-factory" title="Back to the default settings">Reset to defaults</button>
         </div>
-        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the compiled settings and the compiled password (the TLS certificate is kept).</p>
+        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the default settings and the default password (the TLS certificate is kept).</p>
       </div>
     </form>
 

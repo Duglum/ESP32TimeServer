@@ -379,15 +379,12 @@
     checkKeyRow(row);
   }
 
-  // compiled: the keys shown are the ones of ESP32TimeServerSettingsSecrets.h
-  function setNtpKeys(keys, compiled) {
+  function setNtpKeys(keys) {
     ntpKeyRows.forEach((row) => row.elements.forEach((el) => el.remove()));
     ntpKeyRows = [];
     for (const k of keys || []) addKeyRow(k.id, k.key);
     ntpKeysChanged = false;
-    $('ntp-key-state').textContent = compiled
-      ? t('No keys are set on this page: these are the keys compiled into the firmware. Changing them here stores them as keys of the web settings.')
-      : t('Keys set on this page are in use.');
+    $('ntp-key-state').textContent = ntpKeyRows.length ? t('Keys set on this page are in use.') : t('No keys are set yet.');
     $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
   }
 
@@ -435,6 +432,8 @@
       lcd_pad_hour: s.lcd_pad_hour,
       lcd_show_time_zone: s.lcd_show_time_zone,
       lcd_address: s.lcd_address,
+      button_enabled: s.button_enabled,
+      button_pin: String(s.button_pin),
       time_zone: s.time_zone,
       led_type: s.led_type,
       led_brightness: String(s.led_brightness),
@@ -485,8 +484,7 @@
     setColours(s.led_colors);
     f.mqtt_password.value = '';
     f.mqtt_password_clear.checked = false;
-    f.ntp_key_clear.checked = false;
-    setNtpKeys(s.ntp_key_override ? s.ntp_keys : state.ntp_compiled_keys, !s.ntp_key_override);
+    setNtpKeys(s.ntp_keys);
     $('mqtt-password-state').textContent = s.mqtt_password_set ? t('A password is set.') : t('No password is set.');
     updateDependent();
     markDefaults();
@@ -536,7 +534,7 @@
     markPanels();
   }
 
-  // Collapsed settings panels: the heading row shows how many visible values inside differ from the compiled default
+  // Collapsed settings panels: the heading row shows how many visible values inside differ from the default
   // and whether a warning inside is shown, as the GPIO pin areas do (a note on the state of the device, such as
   // "updates are off", is no warning about a setting)
   function markPanels() {
@@ -562,7 +560,7 @@
     for (let d = el.closest('details'); d; d = d.parentElement.closest('details')) d.open = true;
   }
 
-  // Collapsed GPIO pin areas: the summary shows how many visible pin values differ from the compiled default and
+  // Collapsed GPIO pin areas: the summary shows how many visible pin values differ from the default and
   // whether a warning inside is shown, so nothing changed stays hidden
   function markPinAreas() {
     document.querySelectorAll('details.pins').forEach((area) => {
@@ -604,9 +602,8 @@
     $('mqtt-buffer-note').textContent = f.mqtt_client_reporting.checked && Number.isInteger(limit) && limit >= 50 && limit <= 1000
       ? t('Report buffer: {kb} kB of RAM (1426 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.', { kb: lang === 'de' ? kilobytes.replace('.', ',') : kilobytes })
       : (f.mqtt_client_reporting.checked ? t('50 to 1000.') : t('Only used with client activity reporting.'));
-    const compiledOnly = f.ntp_key_clear.checked;
-    document.querySelectorAll('#ntp-keys input, #ntp-keys button').forEach((el) => { el.disabled = compiledOnly; });
-    $('ntp-key-add').disabled = compiledOnly || ntpKeyRows.length >= 8;
+    $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
+    f.button_pin.disabled = !f.button_enabled.checked;
     syncPasswordEyes();
     if (state) {
       $('ptp-chip-warning').hidden = state.status.ptp_loopback_supported || f.ptp_loopback_pin.value.trim() === '';
@@ -674,6 +671,8 @@
       lcd_pad_hour: f.lcd_pad_hour.checked,
       lcd_show_time_zone: f.lcd_show_time_zone.checked,
       lcd_address: f.lcd_address.value,
+      button_enabled: f.button_enabled.checked,
+      button_pin: pin('button_pin', 'Button pin'),
       time_zone: f.time_zone.value.trim(),
       led_type: f.led_type.value,
       led_brightness: Number(f.led_brightness.value),
@@ -703,11 +702,10 @@
       tf_d2_pin: pin('tf_d2_pin', 'TF card D2 pin'),
       tf_d3_pin: pin('tf_d3_pin', 'TF card D3 pin'),
       ntp_auth_enabled: f.ntp_auth_enabled.checked,
-      ntp_key_clear: f.ntp_key_clear.checked,
       ote_enabled: f.ote_enabled.checked
     };
-    // NTP keys: only sent when they were changed (otherwise the compiled keys stay in use if they are)
-    if (!body.ntp_key_clear && ntpKeysChanged) {
+    // NTP keys: only sent when they were changed (an empty list removes all keys)
+    if (ntpKeysChanged) {
       body.ntp_keys = [];
       ntpKeyRows.forEach((row, i) => {
         const id = Number(row.id.value);
@@ -857,9 +855,7 @@
     fillList('st-gnss', gnss, '', false);
     const keys = st.ntp_auth_keys_in_use;
     $('st-auth').textContent = st.ntp_auth_available
-      ? (state.settings.ntp_key_override
-        ? t(keys === 1 ? 'on, {n} key of the web settings' : 'on, {n} keys of the web settings', { n: keys })
-        : t(keys === 1 ? 'on, {n} key compiled in' : 'on, {n} keys compiled in', { n: keys }))
+      ? t(keys === 1 ? 'on, {n} key of the web settings' : 'on, {n} keys of the web settings', { n: keys })
       : (state.settings.ntp_auth_enabled ? t('on, but no usable key') : t('off'));
     // Requests dropped by the per-client rate limit since the start (also those dropped before it was switched off)
     const limit = state.settings.ntp_client_rate_limit;
@@ -1408,7 +1404,7 @@
     syncPasswordEyes();
     if (r.status === 200) {
       $('factory-card').hidden = true;
-      stopAfterRestart(t('{message} Log in with the compiled password after the restart.', { message: ts(r.data.message) }));
+      stopAfterRestart(t('{message} Log in with the default password after the restart.', { message: ts(r.data.message) }));
     } else {
       show(ts(r.data.error) || t('Reset to defaults failed'), 'error');
     }

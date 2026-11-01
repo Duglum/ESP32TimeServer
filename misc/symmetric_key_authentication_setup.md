@@ -16,11 +16,13 @@ W32Time (Windows) and macOS's built-in automated time service (`timed` on modern
 
 ## Set up ESP32TimeServer
 
-1. Set `SYMMETRIC_KEY_AUTHENTICATION_ENABLED` to `1` in `main/ESP32TimeServerSettings.h`.
-2. In `main/ESP32TimeServerSettingsSecret.h` contains the symmetric-key authentication key ids and secrets in 
-the form `{key_id, "key_value"}`. There must be between one and four such entries defined. If there are multiple entries, they should be unique. A `key_id` must be from 1 to 65535 and unique. `key_value` (the secret) must contain exactly 32 alphanumeric characters. Multiple clients may use the same symmetric-key authentication key ids and secrets.
+Everything is set on the web admin page, panel *NTP authentication*:
 
-1. Generate a new random 32-character alphanumeric secret for each key ID. The PowerShell script below outputs a series of characters which can be placed between the quotes in `key_value` field:
+1. Switch on *Answer authenticated NTPv4 requests*.
+2. Add one to eight keys. A key ID must be from 1 to 65535 and unique; the key (the secret) must contain exactly 32 letters or digits. Multiple clients may use the same key ID and key. *Generate* fills in a random key from the random generator of the browser.
+3. *Apply* uses the keys at once, *Save Settings* keeps them after a restart.
+
+1. To make a key yourself instead of *Generate*: the PowerShell script below outputs a random 32-character alphanumeric secret that can be pasted into the key field:
 
    ```powershell
    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.ToCharArray()
@@ -41,49 +43,43 @@ the form `{key_id, "key_value"}`. There must be between one and four such entrie
    -join $characters
    ```
 
-   Example output to copy and paste into `key_value` (without quotes):
+   Example output to copy and paste into the key field:
    ```text
    V04ORr3XZwSzO06MUeObebAeJ3Yn0qyo
    ```
 
-   Place the output inside the quotes of the corresponding `symmetric_keys` entry.
-   Do not commit settings containing live keys to a public repository. Limit
-   access to the settings header, firmware image, build output, and client key
-   files to trusted administrators. The secret is recoverable from firmware and
-   build materials and files on client systems, so it is not a protection against
-   extraction.
+   Limit access to the web admin page, exported configuration files and client
+   key files to trusted administrators. The keys are shown on the page (the
+   clients need them) and are part of an exported configuration file.
 
-2. Build and flash the selected ESP32-P4 board configuration.
-
-3. When the server displays its 'Open for business' message in the console log,
+2. When the server displays its 'Open for business' message in the console log,
    the client-specific key-file entry will be visible ( a few lines above the `Open 
    business` message) as `Authorization key(s) for use with Meinberg/Chrony ...`. 
    The content lines differ only in their client-file encoding. 
    Treat these console log values as shared secrets: do not publish, retain, or 
    transmit them insecurely.
 
-The key settings are compiled into the application and are not stored in NVS. A
-reset-button GNSS-state cleanup does not alter it, but flashing an image built
-without that key does. Keep an encrypted, access-controlled backup outside the
-repository.
+The keys are stored with the web settings in NVS. A firmware update keeps them;
+*Reset to defaults* (page or button) erases them. Keep an encrypted,
+access-controlled backup, for example an exported configuration file.
 
 ### Add, rotate, and revoke keys
 
-To add an entry, add one new entry with a unique `key_id` and `key_value`,
-build, and flash. 
+To add a key, add one with a unique key ID on the page, then *Apply* and
+*Save Settings*. 
 Existing clients can continue using their old entry/entries while the 
 new key is active. Add separate keys for staged rotation or client isolation, 
 not because Meinberg and chrony require different key lists.
 
-To rotate a entry, add the replacement entry first, deploy it, update and verify
-each client, then remove the old entry in a later build.
-Do not change  `key_value` under an existing Key ID during a staged rotation:
-that immediately breaks clients still using the old secret.
+To rotate a key, add the replacement key first, apply and save it, update and
+verify each client, then remove the old key.
+Do not change the key under an existing key ID during a staged rotation: that
+immediately breaks clients still using the old secret.
 
-To revoke a compromised entry, remove it, rebuild, flash, and replace 
-the entry on every affected client. The removal takes effect only after the newly
-built firmware is running. Never publish the entries found in the source control,
-logs, packet captures, etc. (for example in support requests).
+To revoke a compromised key, remove it on the page (*Apply* takes it out of use
+at once, *Save Settings* keeps that) and replace it on every affected client.
+Never publish keys found in logs, configuration files, packet captures, etc.
+(for example in support requests).
 
 ## Windows: Meinberg NTP
 
@@ -110,8 +106,8 @@ example above, the relevant `ntp.keys` line is:
 > With the real contents copied from line(s) below "Authorization key(s) for use with Meinberg" in the ESP32 console log.
 
  Copy the value after `Authorization key(s) for use with Meinberg ...` from the server's console log as
-into the `ntp.keys` file. **Do not copy `key_value` directly into `ntp.keys`:
-the console log entry is the client format.**
+into the `ntp.keys` file. **Do not copy the key of the page directly into
+`ntp.keys`: the console log entry is the client format.**
 
 Restart the Meinberg NTP Daemon after any configuration or key-file change.
 

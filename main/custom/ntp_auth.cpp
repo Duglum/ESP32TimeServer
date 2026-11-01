@@ -5,12 +5,9 @@
 //
 
 #include "ntp_auth.h"
-#include "ESP32TimeServerSettings.h"
 
 #include <atomic>
-#include <cinttypes>
 #include <cstring>
-#include <iterator>
 #include <mutex>
 
 #include "esp_log.h"
@@ -23,16 +20,12 @@ namespace
     static constexpr size_t SYMMETRIC_KEY_LENGTH = 32;
     static const char *TAG = "ntp_auth";
 
-    static constexpr unsigned int number_of_symmetric_keys = std::size(symmetric_keys);
-
     struct key_set_t
     {
         size_t count;
         ntp_auth_key_t keys[NTP_AUTH_MAX_KEYS];
     };
 
-    // Keys of ESP32TimeServerSettingsSecrets.h (validated once)
-    static key_set_t s_compiled{};
     // Key set in use. Written by ntp_auth_configure() (web admin or start), read for every authenticated NTP
     // request: seqlock, so the NTP path never blocks and never sees a half written key.
     static key_set_t s_active{};
@@ -145,71 +138,28 @@ bool ntp_auth_initialize()
 
     s_initialized = true;
 
-    if (number_of_symmetric_keys < 1 || number_of_symmetric_keys > NTP_AUTH_MAX_KEYS)
-    {
-        ESP_LOGE(TAG, "Invalid number of symmetric keys: %u (1 to %u are supported)", number_of_symmetric_keys,
-                 static_cast<unsigned int>(NTP_AUTH_MAX_KEYS));
-    }
-    else
-    {
-        for (size_t index = 0; index < number_of_symmetric_keys; ++index)
-        {
-            const symmetric_key_t &source = symmetric_keys[index];
-            bool valid = true;
-            if (source.key_id < 1 || source.key_id > 65535)
-            {
-                ESP_LOGE(TAG, "Symmetric key %zu: key_id must be between 1 and 65535 (inclusive)(got %" PRIu32 ")", index + 1, source.key_id);
-                valid = false;
-            }
-            if (!key_value_is_valid(source.key_value, sizeof(source.key_value)))
-            {
-                ESP_LOGE(TAG, "Symmetric key %zu: key_value must contain exactly %zu letters or digits", index + 1, SYMMETRIC_KEY_LENGTH);
-                valid = false;
-            }
-            for (size_t other = 0; other < s_compiled.count; ++other)
-            {
-                if (s_compiled.keys[other].key_id == source.key_id)
-                {
-                    ESP_LOGE(TAG, "Symmetric key %zu: duplicate key_id %" PRIu32, index + 1, source.key_id);
-                    valid = false;
-                    break;
-                }
-            }
-            if (!valid)
-                continue;
-
-            ntp_auth_key_t &key = s_compiled.keys[s_compiled.count++];
-            key = {source.key_id, NTP_AUTH_ALGORITHM_SHA256_160, static_cast<uint8_t>(SYMMETRIC_KEY_LENGTH), NTP_AUTH_KEY_ACTIVE, {}};
-            memcpy(key.key, source.key_value, SYMMETRIC_KEY_LENGTH);
-        }
-    }
     s_crypto_ready = psa_crypto_init() == PSA_SUCCESS;
     return s_crypto_ready;
 }
 
-bool ntp_auth_configure(bool enabled, bool use_override_keys, const ntp_auth_key_input_t *keys, size_t count)
+bool ntp_auth_configure(bool enabled, const ntp_auth_key_input_t *keys, size_t count)
 {
     key_set_t next{};
-    if (use_override_keys)
+    for (size_t i = 0; keys != nullptr && i < count && next.count < NTP_AUTH_MAX_KEYS; ++i)
     {
-        for (size_t i = 0; keys != nullptr && i < count && next.count < NTP_AUTH_MAX_KEYS; ++i)
+        bool duplicate = false;
+        for (size_t k = 0; k < next.count; ++k)
+            duplicate = duplicate || next.keys[k].key_id == keys[i].key_id;
+        if (keys[i].key_id < 1 || keys[i].key_id > 65535 || keys[i].key == nullptr || duplicate ||
+            !key_value_is_valid(keys[i].key, SYMMETRIC_KEY_LENGTH + 1))
         {
-            bool duplicate = false;
-            for (size_t k = 0; k < next.count; ++k)
-                duplicate = duplicate || next.keys[k].key_id == keys[i].key_id;
-            if (keys[i].key_id < 1 || keys[i].key_id > 65535 || keys[i].key == nullptr || duplicate ||
-                !key_value_is_valid(keys[i].key, SYMMETRIC_KEY_LENGTH + 1))
-            {
-                ESP_LOGE(TAG, "NTP key %u of the web settings is not valid and is not used", static_cast<unsigned int>(i + 1));
-                continue;
-            }
-            ntp_auth_key_t &key = next.keys[next.count++];
-            key = {keys[i].key_id, NTP_AUTH_ALGORITHM_SHA256_160, static_cast<uint8_t>(SYMMETRIC_KEY_LENGTH), NTP_AUTH_KEY_ACTIVE, {}};
-            memcpy(key.key, keys[i].key, SYMMETRIC_KEY_LENGTH);
+            ESP_LOGE(TAG, "NTP key %u of the web settings is not valid and is not used", static_cast<unsigned int>(i + 1));
+            continue;
         }
+        ntp_auth_key_t &key = next.keys[next.count++];
+        key = {keys[i].key_id, NTP_AUTH_ALGORITHM_SHA256_160, static_cast<uint8_t>(SYMMETRIC_KEY_LENGTH), NTP_AUTH_KEY_ACTIVE, {}};
+        memcpy(key.key, keys[i].key, SYMMETRIC_KEY_LENGTH);
     }
-    else
-        next = s_compiled;
 
     const bool available = enabled && s_crypto_ready && next.count != 0;
     {
@@ -230,11 +180,6 @@ bool ntp_auth_configure(bool enabled, bool use_override_keys, const ntp_auth_key
 bool ntp_auth_available()
 {
     return s_available.load(std::memory_order_acquire);
-}
-
-size_t ntp_auth_compiled_key_count()
-{
-    return s_compiled.count;
 }
 
 size_t ntp_auth_key_count()

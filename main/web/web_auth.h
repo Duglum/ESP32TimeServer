@@ -34,7 +34,7 @@ struct web_allow_entry_t
 // Loads the password hash and the allow-list (call once after nvs_flash_init)
 void web_auth_init();
 
-// true while the compiled password is in use and it is the default "password"
+// true while no password was set on the page: the default "password" is in use
 bool web_auth_default_password_active();
 
 // ---- Login throttling (per source address and global) ----

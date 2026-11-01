@@ -5,8 +5,8 @@
 //
 // Run-time settings of the web admin page.
 //
-// Order of precedence at boot: compiled defaults (ESP32TimeServerSettings.h / ESP32TimeServerSettingsSecrets.h),
-// then the settings saved in NVS (namespace "webcfg", key "saved"), then a one-shot set written by "Apply" for
+// All settings are made on the web page; there is no settings file. Order of precedence at boot: the defaults
+// (web_settings_defaults), then the settings saved in NVS (namespace "webcfg", key "saved"), then a one-shot set written by "Apply" for
 // settings that need a restart (key "oneshot", erased at the boot that uses it, so the next boot returns to the
 // saved state).
 
@@ -35,6 +35,7 @@ static constexpr uint16_t WEB_GNSS_MIN_FIX_AGE_MAX_S = 3600;  // minimum GNSS fi
 static constexpr uint8_t WEB_GNSS_MIN_SATELLITES_MAX = 50;    // minimum satellites in use before stratum 1 (0 = off)
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MIN = 50;   // MQTT_CLIENT_LIMIT (report queue in RAM)
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MAX = 1000; // report buffer about 77 kB (no PSRAM)
+static constexpr uint32_t WEB_BUTTON_HOLD_S = 10;              // uptime / restart button: hold time for a restart or reset
 static constexpr size_t WEB_MAC_TEXT_SIZE = 18;     // "xx:xx:xx:xx:xx:xx" + NUL
 static constexpr size_t WEB_NTP_KEY_SIZE = 33;      // 32 characters + NUL
 static constexpr size_t WEB_NTP_MAX_KEYS = 8;       // NTP_AUTH_MAX_KEYS
@@ -74,7 +75,7 @@ struct web_ntp_key_t
     char key[WEB_NTP_KEY_SIZE];
 };
 
-// States shown by the RGB LED; each has a colour in the settings (LED_startup ... LED_button_push)
+// States shown by the RGB LED; each has a colour in the settings
 enum class web_led_state_t : uint8_t
 {
     startup = 0,
@@ -152,8 +153,10 @@ struct web_settings_t
 
     // NTP symmetric-key authentication
     bool ntp_auth_enabled;
-    bool ntp_key_override;   // false = the keys of ESP32TimeServerSettingsSecrets.h are used
-    uint8_t ntp_key_count;   // keys of the web settings (ntp_key_override)
+    // Always true since the settings files were removed. false in a set of an older firmware: the keys of the former
+    // ESP32TimeServerSettingsSecrets.h were used, which no longer exist (such a set is read with no keys)
+    bool ntp_key_override;
+    uint8_t ntp_key_count;   // keys of the web settings
     web_ntp_key_t ntp_keys[WEB_NTP_MAX_KEYS]; // secret (shown on the page: the clients need them)
 
     // Over The Ethernet updates (firmware upload over the web admin server, see web_ote.h)
@@ -162,7 +165,7 @@ struct web_settings_t
     // layout of the saved settings (blob versions 5 to 8).
     char ote_name_unused[WEB_OTE_NAME_SIZE];
     // PPS holdover in s after the PPS counts as lost (0 to WEB_PPS_HOLDOVER_MAX_S, takes effect at once). Stored in the
-    // place of the former ArduinoOTA port (same layout as blob version 5, which is read with the compiled default).
+    // place of the former ArduinoOTA port (same layout as blob version 5, which is read with the default).
     uint16_t pps_holdover_s;
     // Former OTE password (scripted uploads now use the web admin password). Always zero, like ote_name_unused; a
     // password still stored there is erased from NVS at boot.
@@ -194,9 +197,15 @@ struct web_settings_t
     // added in version 11, they replace the former compiled setting PreferIPvX
     web_ip_mode_t ip_mode;
     web_lcd_address_t lcd_address;
+
+    // Uptime / restart button to GND, internal pull-up (needs a restart; added in version 12): a press shows the
+    // uptime on the LCD; held for WEB_BUTTON_HOLD_S it restarts the device (GNSS data erased), held while the device
+    // starts it resets the settings and the password to their defaults
+    bool button_enabled;
+    int8_t button_pin;
 };
 
-// Compiled defaults
+// Defaults of all settings (the state after a reset to defaults)
 void web_settings_defaults(web_settings_t &out);
 
 // Loads the settings of this boot (call once, after nvs_flash_init and before anything uses them).
@@ -219,7 +228,7 @@ bool web_settings_get_saved(web_settings_t &out);
 esp_err_t web_settings_save(const web_settings_t &in);
 esp_err_t web_settings_save_oneshot(const web_settings_t &in, bool network_confirm_required);
 
-// Erases the saved settings, the one-shot set and the web admin password and allow-list.
+// Erases the saved settings, the one-shot set and the web admin password and allow-list (back to the defaults).
 // The TLS identity and the calibration namespaces are kept.
 esp_err_t web_settings_factory_reset();
 

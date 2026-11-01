@@ -85,8 +85,6 @@ Release/
 testing/drift/DoNotPublish
 testing/RFC_9769_compliance/background
 
-# personalize settings
-ESP32TimeServerSettings -*.h
 _switch*.bat
 
 

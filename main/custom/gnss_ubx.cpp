@@ -6,7 +6,6 @@
 
 #include "gnss_ubx.h"
 #include "gnss_uart.h"
-#include "ESP32TimeServerSettings.h"
 
 #include <algorithm>
 #include <atomic>

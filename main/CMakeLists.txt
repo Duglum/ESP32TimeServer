@@ -1,5 +1,5 @@
-# The optional features (LCD, KY-016 / WS2812 LED, MQTT, NTP authentication) are always compiled in: the *_ENABLED
-# values of ESP32TimeServerSettings.h are their run-time defaults, the web admin page switches them.
+# All settings are made on the web admin page (there is no settings file). The optional features (LCD, KY-016 / WS2812
+# LED, MQTT, NTP authentication, button) are always compiled in; the web admin page switches them.
 set(MAIN_SOURCES
         "main.cpp"
         "custom/app_metadata.cpp"
@@ -92,4 +92,7 @@ target_compile_definitions(${COMPONENT_TARGET} PRIVATE
     APP_BUILD_DATE="${BUILD_DATE}"
     APP_BUILD_TIME="${BUILD_TIME}"
     APP_GIT_SHA="${GIT_SHA}"
+    # Debug log lines on the console (UART0 at CONFIG_ESP_CONSOLE_UART_BAUDRATE): 0 = off, 1 = on. 1 degrades the
+    # accuracy and the performance during periods of high volume NTP requests.
+    DEBUG_ENABLED=0
 )

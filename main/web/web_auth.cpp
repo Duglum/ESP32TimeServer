@@ -11,7 +11,6 @@
 #include <cstdio>
 #include <cstring>
 
-#include "ESP32TimeServerSettings.h"
 
 extern "C"
 {
@@ -352,11 +351,11 @@ void web_auth_init()
 
     if (!s_password_stored)
     {
-        // Compiled password: hashed with a random salt at every boot, so it is checked exactly like a stored one
+        // Default password: hashed with a random salt at every boot, so it is checked exactly like a stored one
         s_password.magic = PASSWORD_MAGIC;
         s_password.iterations = PBKDF2_ITERATIONS;
         esp_fill_random(s_password.salt, SALT_SIZE);
-        if (!pbkdf2_sha256(WebAdminPassword, strlen(WebAdminPassword), s_password.salt, SALT_SIZE, PBKDF2_ITERATIONS, s_password.hash))
+        if (!pbkdf2_sha256(DEFAULT_PASSWORD, strlen(DEFAULT_PASSWORD), s_password.salt, SALT_SIZE, PBKDF2_ITERATIONS, s_password.hash))
         {
             ESP_LOGE(TAG, "Web admin: the password hash could not be computed, logins are impossible");
             esp_fill_random(s_password.hash, HASH_SIZE); // nothing matches
@@ -372,7 +371,7 @@ void web_auth_init()
 
 bool web_auth_default_password_active()
 {
-    return !s_password_stored && strcmp(WebAdminPassword, DEFAULT_PASSWORD) == 0;
+    return !s_password_stored;
 }
 
 uint32_t web_auth_login_wait_seconds(const sockaddr_storage &source)

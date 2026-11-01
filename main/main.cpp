@@ -55,7 +55,6 @@
 #include <string>
 #include <vector>
 
-#include "ESP32TimeServerSettings.h"
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
 #include "esp_ota_ops.h"
@@ -64,30 +63,21 @@
 #include "web/web_settings.h"
 
 // ---- Features that can be switched on the web admin page ----
-// The *_ENABLED values below in ESP32TimeServerSettings.h are only the run-time defaults now (see
-// web/web_settings.cpp). The code of these features is always compiled in; the settings of this boot decide at run
-// time whether a feature is started (s_lcd_on, s_led_type, s_mqtt_on, s_ote_on, ntp_auth_configure()). A feature that is off
-// has no task, no driver and no buffers. The MQTT report contents (client, memory, historical, authenticated /
-// unauthenticated) are switched by s_mqtt_client_reporting ... s_mqtt_distinguish_auth.
-#undef LIQUID_CRYSTAL_DISPLAY_ENABLED
+// All settings are made on the web page (web/web_settings.cpp has the defaults); there is no settings file. The code
+// of the optional features is always compiled in (the *_ENABLED macros below mark it); the settings of this boot
+// decide at run time whether a feature is started (s_lcd_on, s_led_type, s_mqtt_on, s_ote_on, s_button_on,
+// ntp_auth_configure()). A feature that is off has no task, no driver and no buffers. The MQTT report contents
+// (client, memory, historical, authenticated / unauthenticated) are switched by s_mqtt_client_reporting ...
+// s_mqtt_distinguish_auth. DEBUG_ENABLED (debug log lines) is a build switch in main/CMakeLists.txt.
 #define LIQUID_CRYSTAL_DISPLAY_ENABLED 1
-#undef RBG_LED_KY_016_MODULE_ENABLED
 #define RBG_LED_KY_016_MODULE_ENABLED 1
-#undef RBG_LED_WS2812_MODULE_ENABLED
 #define RBG_LED_WS2812_MODULE_ENABLED 1
-#undef MQTT_ENABLED
 #define MQTT_ENABLED 1
-#undef SYMMETRIC_KEY_AUTHENTICATION_ENABLED
 #define SYMMETRIC_KEY_AUTHENTICATION_ENABLED 1
-#undef OTE_UPDATES_ENABLED
 #define OTE_UPDATES_ENABLED 1
-#undef MQTT_CLIENT_REPORTING_ENABLED
 #define MQTT_CLIENT_REPORTING_ENABLED 1
-#undef MQTT_MEMORY_REPORTING_ENABLED
 #define MQTT_MEMORY_REPORTING_ENABLED 1
-#undef MQTT_HISTORICAL_REPORTING_ENABLED
 #define MQTT_HISTORICAL_REPORTING_ENABLED 1
-#undef MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED
 #define MQTT_DISTINGUISH_AUTHENTICATED_REPORTING_ENABLED 1
 
 #include "custom/gnss_nmea.h"
@@ -165,6 +155,8 @@ static bool s_mqtt_historical_reporting = false;
 static bool s_mqtt_distinguish_auth = false;
 static bool s_ote_on = false;                         // Over The Ethernet updates enabled for this boot
 static bool s_gnss_ublox = true;                      // GNSS protocol of this boot: true = u-blox UBX, false = NMEA
+static bool s_button_on = false;                      // uptime / restart button used in this boot
+static int s_button_pin = -1;                         // its GPIO (set up by setup_the_button)
 static web_led_type_t s_led_type = web_led_type_t::none; // RGB LED module of this boot
 static std::atomic<uint8_t> s_led_brightness_percent{0};
 static std::atomic<uint32_t> s_led_rgb[WEB_LED_STATE_COUNT] = {}; // 0xRRGGBB per LED state (web_led_state_t)
@@ -359,6 +351,7 @@ __attribute__((noinline)) static void note_task_stack(TaskToPinToCore_t task_id)
 
 // For the purposes of calculating stack sizes force DEBUG_ENABLED if any of the stack size calculations are enabled
 // so that the task includes all debug processing is included in the stack size calculations
+#undef DEBUG_ENABLED
 #define DEBUG_ENABLED 1
 
 // For the purposes of calculating stack sizes force all MQTT tasks as enabled if MQTT_ENABLED is enabled
@@ -628,9 +621,25 @@ static inline void task_stack_checkpoint(TaskToPinToCore_t task_id)
     note_task_stack(task_id);
 }
 
-#ifndef UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED
-#define UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED 1
-#endif
+// LCD: 20 x 4 characters (HD44780) with a PCF8574 I2C backpack at one of its two usual addresses
+static constexpr int lcdColumns = 20;
+static constexpr int lcdRows = 4;
+static constexpr int lcdI2CAddressPrimary = 0x27;
+static constexpr int lcdI2CAddressSecondary = 0x3F;
+
+// Uptime / restart button (setting of the LCD Display panel): the uptime stays on the LCD this long after a press
+static constexpr int upTimeDisplayWillStayActiveForThisManySeconds = 10;
+
+// GNSS internals
+// Processing for receivers other than the u-blox M10 (non / cloned / older u-blox modules): the NMEA fallback when
+// the UBX setup gets no fix. The accuracy stays fine as long as the PPS is disciplined.
+static constexpr bool allowFallbackProcessing = true;
+// Resync with the GNSS time every 5 minutes (the time sync is stale after three of these periods)
+static constexpr uint32_t periodicGNSSRefreshEveryThisNumberOfMinutes = 5UL;
+// A new GNSS reading must differ by less than this from the last one (sanity check); when it does not, the system
+// restarts (rebootIfSanityCheckFails) or shows '**' on the LCD and keeps its own time
+static constexpr time_t safeguardThresholdInSeconds = 1;
+static constexpr bool rebootIfSanityCheckFails = true;
 
 // IP101 PHY with the external 50 MHz RMII clock of the Waveshare ESP32-P4 Ethernet boards
 static constexpr gpio_num_t ETH_MDC_GPIO = GPIO_NUM_31;
@@ -823,7 +832,7 @@ static std::atomic<int32_t> s_pps_isr_latency_ns{static_cast<int32_t>(PPS_ISR_LA
 // 1 = free-running PTP clock (recommended). The PTP clock is set once and then never written again. Its rate is
 //     corrected through the frequency adjustment of the EMAC (fine update addend), so it runs at the GNSS rate.
 //     Once per second the offset of the PTP clock against the PPS is measured (by software readings, or in hardware
-//     with the PTP PPS loopback, see PTPPPSLoopbackPin in ESP32TimeServerSettings.h). A filter estimates offset and
+//     with the PTP PPS loopback, see the setting "PTP PPS loopback pin"). A filter estimates offset and
 //     rate from these measurements, a servo steers the frequency, and the hardware time stamps are converted with
 //     the estimate (continuous piecewise linear mapping, so time stamps taken before an update convert correctly).
 //     No clock steps every second, no write latency, no time stamp that straddles a write.
@@ -964,7 +973,7 @@ static esp_eth_mac_t *s_ptp_mac = nullptr;
 static std::atomic<uint32_t> s_ptp_epoch{0};
 // Set when the EMAC PTP block was initialised again (Ethernet recovery): the frequency command is back at 0
 static std::atomic<bool> s_ptp_addend_reset{false};
-// PTP PPS loopback (see PTPPPSLoopbackPin): MCPWM capture ticks of the last PTP pulses, written by the interrupt
+// PTP PPS loopback (setting "PTP PPS loopback pin"): MCPWM capture ticks of the last PTP pulses, written by the interrupt
 static constexpr uint32_t ptp_pps_capture_ring_size = 4;
 static uint32_t s_ptp_pps_captures[ptp_pps_capture_ring_size] = {};
 static std::atomic<uint32_t> s_ptp_pps_capture_head{0};
@@ -1827,7 +1836,7 @@ static shared64_t<int64_t> s_pps_holdover_us;    // PPS holdover of the settings
 static std::atomic<uint8_t> s_pps_lost_stratum{16};  // after the holdover: stratum of the replies (live)
 static std::atomic<bool> s_pps_lost_serve{true};     // after the holdover: answer NTP requests at all (live)
 static shared64_t<int64_t> s_pps_lost_serve_us;  // ... for this long after the PPS was lost, 0 = no limit (live)
-static std::atomic<uint32_t> s_pps_dispersion_ppm{ntpHoldoverDispersionPpm}; // root dispersion growth while coasting (live)
+static std::atomic<uint32_t> s_pps_dispersion_ppm{15}; // root dispersion growth while coasting (live setting, default 15 ppm)
 static std::atomic<bool> s_ntp_pps_active{false};
 static std::atomic<bool> s_ntp_gnss_timing_valid{false};
 static std::atomic<bool> s_ntp_pps_missing{false};
@@ -2449,7 +2458,7 @@ static void apply_timezone_settings()
     char time_zone[WEB_TZ_SIZE];
     if (s_live_settings_mutex != nullptr)
         xSemaphoreTake(s_live_settings_mutex, portMAX_DELAY);
-    snprintf(time_zone, sizeof(time_zone), "%s", s_time_zone[0] != '\0' ? s_time_zone : timeZoneSpec);
+    snprintf(time_zone, sizeof(time_zone), "%s", s_time_zone[0] != '\0' ? s_time_zone : "UTC0");
     if (s_live_settings_mutex != nullptr)
         xSemaphoreGive(s_live_settings_mutex);
     setenv("TZ", time_zone, 1);
@@ -2495,7 +2504,6 @@ static void format_local_date_time(time_t utc_time, char *date_string, size_t da
         snprintf(time_string + len, time_size - len, " %s", zone);
 }
 
-#if UPTIME_RESTART_BUTTON_ENABLED
 static void get_uptime(char *buffer, size_t buffer_size)
 {
     uint64_t total_seconds = static_cast<uint64_t>(esp_timer_get_time() / 1000000ULL);
@@ -2507,7 +2515,6 @@ static void get_uptime(char *buffer, size_t buffer_size)
     uint64_t seconds = total_seconds % 60ULL;
     snprintf(buffer, buffer_size, "%llu %02llu:%02llu:%02llu", days, hours, minutes, seconds);
 }
-#endif
 
 static bool initialize_nvs_storage()
 {
@@ -2754,7 +2761,6 @@ static bool gnss_identity_matches(const gnss_nvs_data_t &stored, const gnss_iden
     return strcmp(stored.id_type, current.type) == 0 && strcmp(stored.id_value, current.value) == 0;
 }
 
-#if UPTIME_RESTART_BUTTON_ENABLED
 static bool s_button_ready = false; // the GPIO of the button is set up (setup_the_button)
 
 static bool check_uptime_request()
@@ -2765,12 +2771,12 @@ static bool check_uptime_request()
     static bool button_was_pressed = false;
     static uint32_t button_press_start_ms = 0;
 
-    bool button_pressed = gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) == 0;
+    bool button_pressed = gpio_get_level(static_cast<gpio_num_t>(s_button_pin)) == 0;
 
     if (button_pressed)
     {
         vTaskDelay(pdMS_TO_TICKS(10));
-        button_pressed = gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) == 0;
+        button_pressed = gpio_get_level(static_cast<gpio_num_t>(s_button_pin)) == 0;
     }
 
     if (!button_pressed)
@@ -2785,7 +2791,7 @@ static bool check_uptime_request()
         button_was_pressed = true;
         button_press_start_ms = uptime_ms();
     }
-    else if (uptime_ms() - button_press_start_ms >= holdUpTimeRestartButtonForThisManySecondsToTriggerAReset * 1000UL)
+    else if (uptime_ms() - button_press_start_ms >= WEB_BUTTON_HOLD_S * 1000UL)
     {
         clear_gnss_nvs_data();
         controlled_restart("manual_restart");
@@ -2793,7 +2799,6 @@ static bool check_uptime_request()
 
     return true;
 }
-#endif
 
 static int64_t days_from_civil(int year, unsigned month, unsigned day)
 {
@@ -2927,8 +2932,8 @@ static ntp_reply_status_t get_ntp_reply_status()
         {
             // Coasting is possible: the GNSS was valid when the PPS was lost (the server was at stratum 1; the GNSS may
             // be lost as well, e.g. antenna fault), the model clock (learned rate) and, with hardware time stamps, the
-            // free-running PTP clock are valid. The root dispersion grows by the ppm of the settings (default
-            // ntpHoldoverDispersionPpm) of the time since the last pulse, up to Ntp_Root_Dispersion_Max_S1616 (1 s).
+            // free-running PTP clock are valid. The root dispersion grows by the ppm of the settings (default 15 ppm)
+            // of the time since the last pulse, up to Ntp_Root_Dispersion_Max_S1616 (1 s).
             // The age is capped at the longest coasting time (one hour): the product stays far below the int64 limit
             // however long the PPS is lost and whatever the serving time after it (3600e6 us * 10000 ppm * 65536 =
             // 2.4e18 < 9.2e18). The stratum 16 replies keep NTP_ROOT_DISPERSION.
@@ -4408,7 +4413,7 @@ static void ptp_loopback_capture_start(void *arg)
         start->result = mcpwm_capture_channel_enable(start->channel);
 }
 
-// PTP PPS loopback: the EMAC outputs its PPS on PTPPPSLoopbackPin, and a second channel of the PPS capture timer
+// PTP PPS loopback: the EMAC outputs its PPS on the PTP PPS loopback pin (setting), and a second channel of the PPS capture timer
 // reads the same pad back. Nothing has to be wired.
 static void setup_ptp_pps_loopback(esp_eth_mac_t *mac)
 {
@@ -5771,7 +5776,7 @@ static void set_hardware_clock_from_pps(int64_t pps_second, const local_instant_
 #else
 // ---- Servo of the free-running PTP clock (PTP_FREE_RUNNING 1) ----
 // Measurement, once per PPS edge: m = raw PTP time - true time at the edge
-//   - with the PTP PPS loopback (PTPPPSLoopbackPin): the EMAC pulse at every PTP second and the GNSS PPS are captured
+//   - with the PTP PPS loopback (setting "PTP PPS loopback pin"): the EMAC pulse at every PTP second and the GNSS PPS are captured
 //     by the same MCPWM timer, m = -(capture of the PTP pulse - capture of the GNSS pulse). 12.5 ns resolution, no
 //     software delay in the result. Whole seconds and a plausibility check come from a short software measurement.
 //   - otherwise by software: several readings of the PTP clock, each one bracketed by two readings of the fine local
@@ -7454,7 +7459,7 @@ static void app_update_check_task(void *parameter)
         gnss_ubx_get_status(&ubx);
         const bool network = s_ethernet_connected.load(std::memory_order_acquire);
         const bool ntp = s_ntp_server_ready.load(std::memory_order_acquire) && s_hardware_ntp_accepting.load(std::memory_order_acquire);
-        const bool web = !WEB_ADMIN_ENABLED || web_admin_running();
+        const bool web = web_admin_running();
         const bool gnss = nmea.sentences > 0 || ubx.frames > 0;
         if (network && ntp && web && gnss)
         {
@@ -7521,7 +7526,7 @@ static void setup_gnss()
     ubx_config.on_satellites = gnss_note_satellites;
     gnss_ubx_init(ubx_config);
 
-    // GNSS protocol of the settings (UBLOX_COMPLIANT_GNSS_RECEIVER_ENABLED is the default)
+    // GNSS protocol of the settings (default NMEA)
     if (s_gnss_ublox)
         setup_gnss_ublox_receiver();
     else
@@ -9052,7 +9057,7 @@ static void setup_ethernet()
         ESP_LOGE(TAG, "Unable to configure Ethernet hardware timestamping");
     }
 
-    // Network settings of this boot (web settings, defaults from ESP32TimeServerSettings.h): IPv4 DHCP or static,
+    // Network settings of this boot (web settings): IPv4 DHCP or static,
     // IPv6 SLAAC and an optional static IPv6 address with gateway, DNS servers
     web_net_dns_start();
     if (!web_net_apply(s_eth_netif, *s_cfg, nullptr))
@@ -9097,18 +9102,6 @@ void write_opening_messages_to_the_console()
     ESP_LOGW(TAG, "Debug: Disabled");
 #endif
 
-#if UPTIME_RESTART_BUTTON_ENABLED
-    ESP_LOGI(TAG, "Uptime / Reset button support: Enabled");
-#else
-    ESP_LOGW(TAG, "Uptime / Reset button support: Disabled");
-#endif
-
-#if WEB_ADMIN_ENABLED
-    ESP_LOGI(TAG, "Web admin page support: Enabled");
-#else
-    ESP_LOGW(TAG, "Web admin page support: Disabled (compiled settings only)");
-#endif
-
     ESP_LOGI(TAG, "");
 }
 
@@ -9128,14 +9121,18 @@ void write_settings_messages_to_the_console()
     else
         ESP_LOGW(TAG, "LCD support: Disabled");
 
+    if (s_button_on)
+        ESP_LOGI(TAG, "Uptime / restart button: Enabled (GPIO %d)", s_button_pin);
+    else
+        ESP_LOGW(TAG, "Uptime / restart button: Disabled");
+
     if (s_ote_on)
         ESP_LOGI(TAG, "Over the Ethernet update support: Enabled (upload over the web admin server, HTTPS TCP 443)");
     else
         ESP_LOGW(TAG, "Over the Ethernet update support: Disabled");
 
     if (cfg.ntp_auth_enabled)
-        ESP_LOGI(TAG, "Symmetric-key authentication support: Enabled (%u key(s) %s)", static_cast<unsigned int>(ntp_auth_key_count()),
-                 cfg.ntp_key_override ? "of the web settings" : "compiled in");
+        ESP_LOGI(TAG, "Symmetric-key authentication support: Enabled (%u key(s))", static_cast<unsigned int>(ntp_auth_key_count()));
     else
         ESP_LOGW(TAG, "Symmetric-key authentication support: Disabled");
 
@@ -9201,6 +9198,8 @@ void setup_NVS_storage(void)
     s_ote_on = s_cfg->ote_enabled;
     s_gnss_ublox = s_cfg->gnss_ublox;
     s_led_type = s_cfg->led_type;
+    s_button_on = s_cfg->button_enabled;
+    s_button_pin = s_cfg->button_pin;
     s_ipv4_enabled = s_cfg->ip_mode != web_ip_mode_t::ipv6;
     s_ipv6_enabled = s_cfg->ip_mode != web_ip_mode_t::ipv4;
     web_settings_hostname(*s_cfg, s_hostname, sizeof(s_hostname));
@@ -9314,17 +9313,18 @@ void setup_the_LCD(void)
 
 static void setup_the_button()
 {
+    if (!s_button_on)
+        return;
 
-#if UPTIME_RESTART_BUTTON_ENABLED
     gpio_config_t config{};
-    config.pin_bit_mask = 1ULL << upTimeRestartPin;
+    config.pin_bit_mask = 1ULL << s_button_pin;
     config.mode = GPIO_MODE_INPUT;
     config.pull_up_en = GPIO_PULLUP_ENABLE;
     config.pull_down_en = GPIO_PULLDOWN_DISABLE;
     config.intr_type = GPIO_INTR_DISABLE;
     if (gpio_config(&config) != ESP_OK) // review E-08: no abort at the start
     {
-        ESP_LOGE(TAG, "Restart button on GPIO %d could not be set up: the button is not used", static_cast<int>(upTimeRestartPin));
+        ESP_LOGE(TAG, "Restart button on GPIO %d could not be set up: the button is not used", s_button_pin);
         return;
     }
     s_button_ready = true;
@@ -9332,7 +9332,7 @@ static void setup_the_button()
     // Recovery of a forgotten web admin password: holding the button for 10 s while the device starts erases the
     // web settings, the password and the allow-list (like the reset to defaults on the page) and restarts
     vTaskDelay(pdMS_TO_TICKS(20));
-    if (gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) != 0)
+    if (gpio_get_level(static_cast<gpio_num_t>(s_button_pin)) != 0)
         return;
     ESP_LOGW(TAG, "Button pressed at start: keep it pressed for 10 s to reset the web settings and password");
     display_line(1, "Hold 10 s: reset");
@@ -9340,7 +9340,7 @@ static void setup_the_button()
     for (int tenths = 0; tenths < 100; ++tenths)
     {
         vTaskDelay(pdMS_TO_TICKS(100));
-        if (gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) != 0)
+        if (gpio_get_level(static_cast<gpio_num_t>(s_button_pin)) != 0)
         {
             ESP_LOGI(TAG, "Button released: no reset");
             display_line(1, "");
@@ -9352,10 +9352,9 @@ static void setup_the_button()
     ESP_LOGW(TAG, "Web settings, password and allow-list erased by the button (%s), restarting", esp_err_to_name(err));
     display_line(1, "Web settings reset");
     display_line(2, "Release the button");
-    while (gpio_get_level(static_cast<gpio_num_t>(upTimeRestartPin)) == 0)
+    while (gpio_get_level(static_cast<gpio_num_t>(s_button_pin)) == 0)
         vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
-#endif
 }
 
 static std::string configure_mac_address()
@@ -9384,7 +9383,7 @@ static std::string configure_mac_address()
     }
 #endif
 
-    // MAC of the settings (MACAddress or the web admin, lower case): empty or the real MAC = do nothing
+    // MAC of the settings (lower case): empty or the real MAC = do nothing
     const char *configured_mac = s_cfg->mac_address;
     if ((configured_mac[0] == '\0') || (std::strcmp(real_mac_address_str, configured_mac) == 0))
     {
@@ -9686,9 +9685,6 @@ void setup_for_ote_updates()
         ESP_LOGE(TAG, "Unable to start the OTE service task, OTE updates are not available");
         s_ote_on = false;
     }
-#if !WEB_ADMIN_ENABLED
-    ESP_LOGW(TAG, "OTE updates need the web admin server (WEB_ADMIN_ENABLED 1): no firmware can be uploaded");
-#endif
 
 #endif
 }
@@ -9702,10 +9698,8 @@ void setup_mdns()
         result = mdns_hostname_set(s_hostname);
     if (result == ESP_OK)
         result = mdns_instance_name_set(s_hostname);
-#if WEB_ADMIN_ENABLED
     if (result == ESP_OK)
         result = mdns_service_add(nullptr, "_https", "_tcp", 443, nullptr, 0);
-#endif
     if (result != ESP_OK)
     {
         ESP_LOGE(TAG, "mDNS could not be started: %s", esp_err_to_name(result));
@@ -11284,9 +11278,7 @@ static void update_LED_LCD_Button_task(void *parameter)
         {
             if (s_led_type != web_led_type_t::none)
                 update_RGB_LED();
-#if UPTIME_RESTART_BUTTON_ENABLED
             (void)check_uptime_request();
-#endif
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
@@ -11294,9 +11286,7 @@ static void update_LED_LCD_Button_task(void *parameter)
     int previous_top_line_message = -1;
     int previous_second = -1;
     char title[WEB_LCD_TITLE_SIZE] = "";
-#if UPTIME_RESTART_BUTTON_ENABLED
     int display_uptime_seconds_counter = 0;
-#endif
 
     for (;;)
     {
@@ -11325,10 +11315,8 @@ static void update_LED_LCD_Button_task(void *parameter)
         {
             previous_second = utc_tm.tm_sec;
 
-#if UPTIME_RESTART_BUTTON_ENABLED
             if (check_uptime_request())
                 display_uptime_seconds_counter = upTimeDisplayWillStayActiveForThisManySeconds;
-#endif
 
             int required_top_line_message;
 
@@ -11375,10 +11363,8 @@ static void update_LED_LCD_Button_task(void *parameter)
 
             */
 
-#if UPTIME_RESTART_BUTTON_ENABLED
             if (display_uptime_seconds_counter > 0)
                 required_top_line_message = 99;
-#endif
 
             // Update top line only if it has changed
             if (required_top_line_message != previous_top_line_message)
@@ -11418,7 +11404,6 @@ static void update_LED_LCD_Button_task(void *parameter)
                 previous_top_line_message = required_top_line_message;
             }
 
-#if UPTIME_RESTART_BUTTON_ENABLED
             if (display_uptime_seconds_counter > 0)
             {
                 char uptime_buffer[lcdColumns + 1];
@@ -11442,7 +11427,6 @@ static void update_LED_LCD_Button_task(void *parameter)
                 display_uptime_seconds_counter--;
             }
             else
-#endif
             {
                 if (s_time_has_been_set.load(std::memory_order_acquire))
                 {
@@ -11468,7 +11452,7 @@ static void update_LED_LCD_Button_task(void *parameter)
 void start_RGB_LED_LCD_and_Button_refresh()
 {
     // No task at all when neither the LCD, the LED nor the button is used
-    if (!s_lcd_on && s_led_type == web_led_type_t::none && !UPTIME_RESTART_BUTTON_ENABLED)
+    if (!s_lcd_on && s_led_type == web_led_type_t::none && !s_button_on)
         return;
 
     xTaskCreatePinnedToCore(update_LED_LCD_Button_task, "LED_LCD_Button_service", LED_LCD_Button_Task_Stack_Size, nullptr, 10, nullptr, tskNO_AFFINITY);
@@ -11522,7 +11506,7 @@ void app_apply_live_settings(const web_settings_t &settings)
     const size_t key_count = std::min<size_t>(settings.ntp_key_count, WEB_NTP_MAX_KEYS);
     for (size_t i = 0; i < key_count; ++i)
         keys[i] = {settings.ntp_keys[i].id, settings.ntp_keys[i].key};
-    ntp_auth_configure(settings.ntp_auth_enabled, settings.ntp_key_override, keys, key_count);
+    ntp_auth_configure(settings.ntp_auth_enabled, keys, key_count);
 }
 
 void app_controlled_restart(const char *reason)
@@ -11667,7 +11651,6 @@ void app_get_status(web_app_status_t &status)
     }
     status.eth_recoveries = s_ethernet_recoveries.load(std::memory_order_relaxed);
     status.ntp_auth_available = ntp_auth_available();
-    status.ntp_auth_compiled_keys = ntp_auth_compiled_key_count();
     status.ntp_auth_keys_in_use = ntp_auth_key_count();
     status.ntp_rate_limited_requests = s_ntp_rate_limited_requests.load(std::memory_order_relaxed);
     status.free_heap = esp_get_free_heap_size();
@@ -11914,7 +11897,7 @@ void write_open_for_business_messages_to_the_console()
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED && DEBUG_ENABLED
 
     // The secret keys are only printed with DEBUG_ENABLED (a serial log is easily copied or recorded).
-    // For the client configuration the ASCII keys of ESP32TimeServerSettingsSecrets.h can be used directly,
+    // For the client configuration the ASCII keys of the web page can be used directly,
     // e.g. "1 SHA256 ASCII:<key>" in chrony.keys.
     if (ntp_auth_key_count() != 0)
     {
@@ -11975,7 +11958,7 @@ void write_open_for_business_messages_to_the_console()
     s_open_for_business_message_written.store(true, std::memory_order_release);
 
 #if !DEBUG_ENABLED
-    ESP_LOGW(TAG, "DEBUG_ENABLED is disabled in the settings file; this will be the last console message from main_cpp");
+    ESP_LOGW(TAG, "DEBUG_ENABLED is 0 (main/CMakeLists.txt); this will be the last console message from main_cpp");
 #endif
 }
 
