@@ -147,27 +147,6 @@ static constexpr char SubnetMask[] = "";      // optional - leave as "" to omit,
 static constexpr char PrimaryDNS[] = "";      // optional - leave as "" to omit, or for example: 8.8.8.8
 static constexpr char SecondaryDNS[] = "";    // optional - leave as "" to omit, or for example: 1.1.1.1
 
-// Preference for network connection
-static constexpr int PreferIPvX = 0; // 0 - dual-stack (uses both IPv4 and IPv6), LCD shows both IPv4 and IPv6 addresses
-                                     // 1 - use IPv4 only, LCD shows IPv4 address only
-                                     // 2 - use IPv6 only, LCD shows IPv6 address only
-                                     // 4 - dual-stack, but LCD shows IPv4 address only
-                                     // 6 - dual-stack, but LCD shows IPv6 address only
-                                     // 8 - dual-stack, but LCD shows IPv4 and IPv6 address status only ("IPv4: OK/N/A  IPv6: GUA/ULA/LLA/N/A")
-                                     // 9 - dual-stack, but leave the LCD bottom line blank for privacy/security reasons
-                                     //
-                                     // Notes: 
-                                     // - With prefer IPv4: if an IPv6 address is offered it will be temporarily accepted,
-                                     //   until an IPv4 offer comes in at which time the program will automatically switch over
-                                     //   to an IPv4 address.
-                                     // - The same is true, in reverse, for prefer IPv6.
-                                     // - With a value of 0, 4, 6, 8, or 9 NTP requests from both IPv4 and IPv6 clients are accepted.
-                                     // - With values 1 and 2, NTP requests are accepted only on the selected IP version.
-                                     // - For IPv6 addresses, the LCD will display the appropriate status based on highest scope address type 
-                                     //   (Global-Unicast address (GUA), Unique-Local address (ULA), or Link-Local address (LLA)) assigned:
-                                     //   i.e. if a GUA is assigned it will be shown, otherwise if a ULA is assigned it will be shown,
-                                     //   otherwise if a LLA is assigned it will be shown.
-
 // (required) Time zone setting for your region - for more information see https://gist.github.com/alwynallan/24d96091655391107939
 static constexpr const char *timeZoneSpec = "CET-1CEST,M3.5.0,M10.5.0/3";
 

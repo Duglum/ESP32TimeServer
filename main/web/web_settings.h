@@ -49,6 +49,24 @@ enum class web_led_type_t : uint8_t
     ws2812 = 2,
 };
 
+// Address families in use (needs a restart)
+enum class web_ip_mode_t : uint8_t
+{
+    dual = 0, // IPv4 and IPv6
+    ipv4 = 1, // IPv4 only (no IPv6 address at all, no NTP over IPv6)
+    ipv6 = 2, // IPv6 only (no DHCPv4, no IPv4 address, no NTP over IPv4)
+};
+
+// Address shown in the bottom line of the LCD
+enum class web_lcd_address_t : uint8_t
+{
+    both = 0,   // the IPv4 and the IPv6 address in turn (only the one of the family in use with IPv4 or IPv6 only)
+    ipv4 = 1,   // the IPv4 address (the IPv6 address while there is none)
+    ipv6 = 2,   // the IPv6 address (the IPv4 address while there is none)
+    status = 3, // the state of both families: "IPv4: OK/N/A  IPv6: GUA/ULA/LLA/N/A"
+    none = 4,   // nothing (privacy)
+};
+
 // Symmetric NTP key (key ID and 32 letters or digits)
 struct web_ntp_key_t
 {
@@ -171,6 +189,11 @@ struct web_settings_t
     // Minimum satellites in use before stratum 1 (0 = off, at most WEB_GNSS_MIN_SATELLITES_MAX; NMEA: from GGA, which
     // is then required; takes effect at once; added in version 10)
     uint8_t gnss_min_satellites;
+
+    // Address families in use (needs a restart) and the address in the bottom line of the LCD (takes effect at once);
+    // added in version 11, they replace the former compiled setting PreferIPvX
+    web_ip_mode_t ip_mode;
+    web_lcd_address_t lcd_address;
 };
 
 // Compiled defaults

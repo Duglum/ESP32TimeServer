@@ -1238,9 +1238,6 @@ static bool model_ns_at(int64_t esp_ns, int64_t &unix_ns)
     return true;
 }
 
-static_assert(PreferIPvX == 0 || PreferIPvX == 1 || PreferIPvX == 2 || PreferIPvX == 4 || PreferIPvX == 6 || PreferIPvX == 8 || PreferIPvX == 9,
-              "PreferIPvX must be 0, 1, 2, 4, 6, 8, or 9");
-
 static char s_ip_address[IP_ADDRESS_TEXT_SIZE] = "";
 static char s_ipv4_address[INET_ADDRSTRLEN] = "";
 static char s_ipv6_address[IP_ADDRESS_TEXT_SIZE] = "";
@@ -1271,14 +1268,33 @@ struct network_address_snapshot_t
     ipv6_address_priority_t ipv6_priority;
 };
 
-static constexpr bool IPV4_ENABLED = PreferIPvX != 2;
-static constexpr bool IPV6_ENABLED = PreferIPvX != 1;
+// Address families of this boot (setting "Address families", needs a restart). Set in setup_NVS_storage() before
+// any task, event handler or the Ethernet driver starts, constant afterwards: read without a lock (also by the
+// hardware NTP path). With IPv4 only no IPv6 address is created (not even the link-local one) and NTP requests over
+// IPv6 are not answered; with IPv6 only the same holds for IPv4.
+static bool s_ipv4_enabled = true;
+static bool s_ipv6_enabled = true;
+// Address in the bottom line of the LCD (live setting, web_lcd_address_t)
+static std::atomic<uint8_t> s_lcd_address{static_cast<uint8_t>(web_lcd_address_t::both)};
+
+// The address line the LCD shows: the setting, limited to the address families in use
+static web_lcd_address_t lcd_address_shown()
+{
+    const web_lcd_address_t chosen = static_cast<web_lcd_address_t>(s_lcd_address.load(std::memory_order_relaxed));
+    if (chosen == web_lcd_address_t::status || chosen == web_lcd_address_t::none)
+        return chosen;
+    if (!s_ipv6_enabled)
+        return web_lcd_address_t::ipv4;
+    if (!s_ipv4_enabled)
+        return web_lcd_address_t::ipv6;
+    return chosen;
+}
 
 static bool has_usable_network_address(EventBits_t event_bits)
 {
-    if (PreferIPvX == 1)
+    if (!s_ipv6_enabled)
         return (event_bits & ETH_GOT_IP_BIT) != 0;
-    if (PreferIPvX == 2)
+    if (!s_ipv4_enabled)
         return (event_bits & ETH_GOT_ROUTABLE_IP6_BIT) != 0;
     return (event_bits & (ETH_GOT_IP_BIT | ETH_GOT_ROUTABLE_IP6_BIT)) != 0;
 }
@@ -1288,14 +1304,13 @@ static void update_selected_ip_address_locked()
     const bool has_ipv4 = s_ipv4_address[0] != '\0';
     const bool has_ipv6 = s_ipv6_address[0] != '\0';
 
+    // The address of the LCD line; with both families in turn (or no address line) the current one stays selected
+    // while it exists. With one family off its address is always empty.
+    const web_lcd_address_t shown = lcd_address_shown();
     const char *selected_address = "";
-    if (PreferIPvX == 1)
-        selected_address = s_ipv4_address;
-    else if (PreferIPvX == 2)
-        selected_address = s_ipv6_address;
-    else if (PreferIPvX == 4)
+    if (shown == web_lcd_address_t::ipv4)
         selected_address = has_ipv4 ? s_ipv4_address : s_ipv6_address;
-    else if (PreferIPvX == 6)
+    else if (shown == web_lcd_address_t::ipv6)
         selected_address = has_ipv6 ? s_ipv6_address : s_ipv4_address;
     else if (strcmp(s_ip_address, s_ipv4_address) == 0 && has_ipv4)
         selected_address = s_ipv4_address;
@@ -1325,7 +1340,7 @@ static network_address_snapshot_t get_network_address_snapshot()
 static void refresh_own_ipv6_addresses()
 {
     esp_ip6_addr_t addresses[Own_Ipv6_Max] = {};
-    const int found = (IPV6_ENABLED && s_eth_netif != nullptr) ? esp_netif_get_all_ip6(s_eth_netif, addresses) : 0;
+    const int found = (s_ipv6_enabled && s_eth_netif != nullptr) ? esp_netif_get_all_ip6(s_eth_netif, addresses) : 0;
     const uint32_t count = static_cast<uint32_t>(std::clamp(found, 0, static_cast<int>(Own_Ipv6_Max)));
     taskENTER_CRITICAL(&s_own_ipv6_writer_lock);
     const uint32_t s = s_own_ipv6_seq.load(std::memory_order_relaxed);
@@ -1457,7 +1472,7 @@ static bool set_network_ipv6_address(const esp_ip6_addr_t &address)
 
 static void refresh_network_ipv6_addresses()
 {
-    if (!IPV6_ENABLED || s_eth_netif == nullptr)
+    if (!s_ipv6_enabled || s_eth_netif == nullptr)
         return;
 
     esp_ip6_addr_t addresses[CONFIG_LWIP_IPV6_NUM_ADDRESSES]{};
@@ -1474,7 +1489,7 @@ static void refresh_network_ipv6_addresses()
 
 static void log_network_ipv6_addresses()
 {
-    if (!IPV6_ENABLED || s_eth_netif == nullptr)
+    if (!s_ipv6_enabled || s_eth_netif == nullptr)
         return;
 
     esp_ip6_addr_t addresses[CONFIG_LWIP_IPV6_NUM_ADDRESSES]{};
@@ -2305,7 +2320,8 @@ static esp_err_t setup_lcd()
 
 static void display_selected_ip_address(int seconds)
 {
-    if (PreferIPvX == 9)
+    const web_lcd_address_t shown = lcd_address_shown();
+    if (shown == web_lcd_address_t::none)
     {
         display_line(3, "");
         return;
@@ -2318,7 +2334,7 @@ static void display_selected_ip_address(int seconds)
 
     network_address_snapshot_t addresses = get_network_address_snapshot();
 
-    if (PreferIPvX == 8)
+    if (shown == web_lcd_address_t::status)
     {
         const char *ipv6_status = "N/A";
         if (addresses.ipv6[0] != '\0')
@@ -2353,7 +2369,7 @@ static void display_selected_ip_address(int seconds)
 
     // An IPv6 can change from Link-Local Address (LLA) to Unique-Local Address (ULA) to Global-Unicast Address (GUA)
     // so if the selected IPv6 address has changed reset the IPv6 address parts
-    if (PreferIPvX == 0 || PreferIPvX == 2 || PreferIPvX == 6)
+    if (shown == web_lcd_address_t::both || shown == web_lcd_address_t::ipv6)
     {
         if (strcmp(addresses.ipv6, last_known_IPv6_addresss) != 0)
         {
@@ -2382,9 +2398,9 @@ static void display_selected_ip_address(int seconds)
         }
     }
 
-    switch (PreferIPvX)
+    switch (shown)
     {
-    case 0:
+    case web_lcd_address_t::both:
 
         // no preference between IPv4 and IPv6
         // each minute:
@@ -2401,8 +2417,7 @@ static void display_selected_ip_address(int seconds)
 
         break;
 
-    case 1:
-    case 4:
+    case web_lcd_address_t::ipv4:
         // Show the IPv4 address only
         if (strcmp(addresses.selected, addresses.ipv4) == 0)
         {
@@ -2411,8 +2426,7 @@ static void display_selected_ip_address(int seconds)
         }
         break;
 
-    case 2:
-    case 6:
+    case web_lcd_address_t::ipv6:
         // Show the IPv6 address only
 
         // each minute:
@@ -2422,6 +2436,9 @@ static void display_selected_ip_address(int seconds)
             display_line(3, ipv6_part1);
         else
             display_line(3, ipv6_part2);
+        break;
+
+    default:
         break;
     }
 }
@@ -3826,7 +3843,7 @@ static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uin
     const eth_mac_time_t *rx_timestamp = static_cast<const eth_mac_time_t *>(info);
     const bool ipv4_request = is_ipv4_ntp_request(frame, length, &ip_offset, &udp_offset);
     const bool ipv6_request = !ipv4_request && is_ipv6_ntp_request(frame, length, &ip_offset, &udp_offset);
-    if ((!ipv4_request && !ipv6_request) || (ipv4_request && !IPV4_ENABLED) || (ipv6_request && !IPV6_ENABLED))
+    if ((!ipv4_request && !ipv6_request) || (ipv4_request && !s_ipv4_enabled) || (ipv6_request && !s_ipv6_enabled))
         return esp_netif_receive(static_cast<esp_netif_t *>(netif), frame, length, nullptr);
     const uint8_t *request = frame + udp_offset + UDP_HEADER_SIZE;
     const uint8_t version = (request[0] >> 3) & 0x07;
@@ -3919,7 +3936,7 @@ static void hardware_ntp_server_task(void *parameter)
         if (xQueueReceive(s_hardware_ntp_request_queue, &ntp_request, portMAX_DELAY) == pdTRUE)
         {
             const bool ipv6 = ntp_request.frame[12] == 0x86 && ntp_request.frame[13] == 0xDD;
-            if (ipv6 ? IPV6_ENABLED : IPV4_ENABLED)
+            if (ipv6 ? s_ipv6_enabled : s_ipv4_enabled)
                 process_hardware_ntp_request(ntp_request.handle, ntp_request.frame, ntp_request.length,
                                              ntp_request.netif, &ntp_request.rx_timestamp, ipv6);
             else
@@ -4091,11 +4108,9 @@ static ethernet_recovery_result_t restart_ethernet_transport()
         s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
         return restart_ethernet_link_result();
     }
-    const EventBits_t needed_ip = PreferIPvX == 1   ? ETH_GOT_IP_BIT
-                                  : PreferIPvX == 2 ? ETH_GOT_ROUTABLE_IP6_BIT
-                                  : PreferIPvX == 4 && s_ipv4_ever_acquired.load(std::memory_order_relaxed)
-                                      ? ETH_GOT_IP_BIT
-                                      : ETH_GOT_IP_BIT | ETH_GOT_IP6_BIT;
+    const EventBits_t needed_ip = !s_ipv6_enabled   ? ETH_GOT_IP_BIT
+                                  : !s_ipv4_enabled ? ETH_GOT_ROUTABLE_IP6_BIT
+                                                    : ETH_GOT_IP_BIT | ETH_GOT_IP6_BIT;
     const EventBits_t acquired_ip = xEventGroupWaitBits(s_net_event_group, needed_ip, pdFALSE, pdFALSE,
                                                         pdMS_TO_TICKS(ETHERNET_RECOVERY_IP_TIMEOUT_MS));
     const bool linked = s_ethernet_connected.load(std::memory_order_acquire);
@@ -8760,7 +8775,7 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
         break;
     case ETHERNET_EVENT_CONNECTED:
         s_ethernet_connected.store(true);
-        if (IPV6_ENABLED)
+        if (s_ipv6_enabled)
         {
             const esp_err_t result = esp_netif_create_ip6_linklocal(s_eth_netif);
             if (result != ESP_OK)
@@ -8835,7 +8850,7 @@ static void ethernet_ip_event_handler(void *, esp_event_base_t, int32_t event, v
     case IP_EVENT_ETH_GOT_IP:
     {
         const ip_event_got_ip_t &info = *static_cast<const ip_event_got_ip_t *>(event_data);
-        if (info.esp_netif != s_eth_netif || !IPV4_ENABLED)
+        if (info.esp_netif != s_eth_netif || !s_ipv4_enabled)
             break;
         s_ipv4_ever_acquired.store(true, std::memory_order_relaxed);
         set_network_ipv4_address(info.ip_info.ip);
@@ -8860,7 +8875,7 @@ static void ethernet_ip_event_handler(void *, esp_event_base_t, int32_t event, v
     case IP_EVENT_GOT_IP6:
     {
         const ip_event_got_ip6_t &info = *static_cast<const ip_event_got_ip6_t *>(event_data);
-        if (info.esp_netif != s_eth_netif || !IPV6_ENABLED)
+        if (info.esp_netif != s_eth_netif || !s_ipv6_enabled)
             break;
         const bool routable_ipv6_acquired = set_network_ipv6_address(info.ip6_info.ip);
         refresh_own_ipv6_addresses();
@@ -8979,7 +8994,7 @@ static bool start_ethernet_driver()
 
 static void wait_for_startup_ethernet_readiness()
 {
-    if (PreferIPvX == 1)
+    if (!s_ipv6_enabled)
     {
         xEventGroupWaitBits(s_net_event_group, ETH_GOT_IP_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
         return;
@@ -9051,7 +9066,7 @@ static void setup_ethernet()
     ESP_LOGI(TAG,
              "Waiting for Ethernet %s address%s...",
              s_cfg->ipv4_dhcp ? "DHCP" : "static",
-             PreferIPvX == 1 ? "" : " and routable IPv6");
+             s_ipv6_enabled ? " and routable IPv6" : "");
 #endif
     wait_for_startup_ethernet_readiness();
 #if DEBUG_ENABLED
@@ -9186,6 +9201,8 @@ void setup_NVS_storage(void)
     s_ote_on = s_cfg->ote_enabled;
     s_gnss_ublox = s_cfg->gnss_ublox;
     s_led_type = s_cfg->led_type;
+    s_ipv4_enabled = s_cfg->ip_mode != web_ip_mode_t::ipv6;
+    s_ipv6_enabled = s_cfg->ip_mode != web_ip_mode_t::ipv4;
     web_settings_hostname(*s_cfg, s_hostname, sizeof(s_hostname));
     s_live_settings_mutex = xSemaphoreCreateMutex();
     ntp_auth_initialize();
@@ -10178,10 +10195,10 @@ void setup_the_gnss()
 static void ntp_server_task(void *parameter)
 {
     TaskHandle_t startup_task = static_cast<TaskHandle_t>(parameter);
-    int ipv4_socket = IPV4_ENABLED ? socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : -1;
-    int ipv6_socket = IPV6_ENABLED ? socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP) : -1;
-    int ipv6_link_local_socket = IPV6_ENABLED ? socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP) : -1;
-    if ((IPV4_ENABLED && ipv4_socket < 0) || (IPV6_ENABLED && ipv6_socket < 0))
+    int ipv4_socket = s_ipv4_enabled ? socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : -1;
+    int ipv6_socket = s_ipv6_enabled ? socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP) : -1;
+    int ipv6_link_local_socket = s_ipv6_enabled ? socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP) : -1;
+    if ((s_ipv4_enabled && ipv4_socket < 0) || (s_ipv6_enabled && ipv6_socket < 0))
     {
 #if DEBUG_ENABLED
         ESP_LOGE(TAG, "Unable to create NTP UDP sockets: errno %d", errno);
@@ -10205,8 +10222,8 @@ static void ntp_server_task(void *parameter)
 
     int ipv6_only = 1;
     int reuse_address = 1;
-    if ((IPV4_ENABLED && bind(ipv4_socket, reinterpret_cast<struct sockaddr *>(&ipv4_listen_addr), sizeof(ipv4_listen_addr)) != 0) ||
-        (IPV6_ENABLED &&
+    if ((s_ipv4_enabled && bind(ipv4_socket, reinterpret_cast<struct sockaddr *>(&ipv4_listen_addr), sizeof(ipv4_listen_addr)) != 0) ||
+        (s_ipv6_enabled &&
          (setsockopt(ipv6_socket, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_only, sizeof(ipv6_only)) != 0 ||
           setsockopt(ipv6_socket, SOL_SOCKET, SO_REUSEADDR, &reuse_address, sizeof(reuse_address)) != 0)))
     {
@@ -10223,7 +10240,7 @@ static void ntp_server_task(void *parameter)
         return;
     }
 
-    if (IPV6_ENABLED)
+    if (s_ipv6_enabled)
     {
         struct sockaddr_in6 ipv6_listen_addr{};
         ipv6_listen_addr.sin6_family = AF_INET6;
@@ -10247,7 +10264,7 @@ static void ntp_server_task(void *parameter)
     }
 
     esp_ip6_addr_t link_local_address{};
-    if (!IPV6_ENABLED)
+    if (!s_ipv6_enabled)
         ipv6_link_local_socket = -1;
     else if (ipv6_link_local_socket < 0 ||
              setsockopt(ipv6_link_local_socket, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_only, sizeof(ipv6_only)) != 0 ||
@@ -10856,12 +10873,12 @@ static startup_health_mqtt_metrics_result_t check_startup_health_mqtt_metrics(co
     const network_address_snapshot_t addresses = get_network_address_snapshot();
     if (results.prerequisites_ready)
     {
-        if (IPV4_ENABLED && addresses.ipv4[0] != '\0')
+        if (s_ipv4_enabled && addresses.ipv4[0] != '\0')
         {
             count_endpoint(results.ipv4_loopback);
             count_endpoint(results.ipv4_assigned);
         }
-        if (IPV6_ENABLED && addresses.ipv6[0] != '\0')
+        if (s_ipv6_enabled && addresses.ipv6[0] != '\0')
         {
             count_endpoint(results.ipv6_loopback);
             count_endpoint(results.ipv6_assigned);
@@ -10921,10 +10938,10 @@ static startup_health_mqtt_metrics_result_t check_startup_health_mqtt_metrics(co
 
     if (xSemaphoreTake(s_mqtt_stats_mutex, portMAX_DELAY) != pdTRUE)
         return startup_health_mqtt_metrics_result_t::could_not_determine;
-    const bool clients_match = (!IPV4_ENABLED ||
+    const bool clients_match = (!s_ipv4_enabled ||
                                 (has_expected_client_requests("127.0.0.1", AF_INET, endpoint_expected_valid_requests(results.ipv4_loopback)) &&
                                  has_expected_client_requests(addresses.ipv4, AF_INET, endpoint_expected_valid_requests(results.ipv4_assigned)))) &&
-                               (!IPV6_ENABLED ||
+                               (!s_ipv6_enabled ||
                                 (has_expected_client_requests("::1", AF_INET6, endpoint_expected_valid_requests(results.ipv6_loopback)) &&
                                  has_expected_client_requests(addresses.ipv6, AF_INET6, endpoint_expected_valid_requests(results.ipv6_assigned))));
     xSemaphoreGive(s_mqtt_stats_mutex);
@@ -11009,18 +11026,12 @@ static startup_health_test_results_t run_startup_health_tests()
     do
     {
         ready = xEventGroupGetBits(s_net_event_group);
-        const bool required_ip_available = PreferIPvX == 1   ? (ready & ETH_GOT_IP_BIT) != 0
-                                           : PreferIPvX == 2 ? (ready & ETH_GOT_ROUTABLE_IP6_BIT) != 0
-                                                             : (ready & (ETH_GOT_IP_BIT | ETH_GOT_ROUTABLE_IP6_BIT)) != 0;
-        if ((ready & ETH_CONNECTED_BIT) != 0 && required_ip_available)
+        if ((ready & ETH_CONNECTED_BIT) != 0 && has_usable_network_address(ready))
             break;
         vTaskDelay(pdMS_TO_TICKS(100));
     } while (esp_timer_get_time() < deadline_us);
 
-    const bool required_ip_available = PreferIPvX == 1   ? (ready & ETH_GOT_IP_BIT) != 0
-                                       : PreferIPvX == 2 ? (ready & ETH_GOT_ROUTABLE_IP6_BIT) != 0
-                                                         : (ready & (ETH_GOT_IP_BIT | ETH_GOT_ROUTABLE_IP6_BIT)) != 0;
-    if ((ready & ETH_CONNECTED_BIT) == 0 || !required_ip_available || !s_time_has_been_set.load(std::memory_order_acquire) ||
+    if ((ready & ETH_CONNECTED_BIT) == 0 || !has_usable_network_address(ready) || !s_time_has_been_set.load(std::memory_order_acquire) ||
         !s_pps_discipline_active.load(std::memory_order_acquire))
     {
         queue_startup_health_log(ESP_LOG_ERROR, "Health Check prerequisites were not ready before timeout");
@@ -11029,7 +11040,7 @@ static startup_health_test_results_t run_startup_health_tests()
 
     results.prerequisites_ready = true;
     const network_address_snapshot_t addresses = get_network_address_snapshot();
-    if (IPV4_ENABLED && addresses.ipv4[0] != '\0')
+    if (s_ipv4_enabled && addresses.ipv4[0] != '\0')
     {
         struct sockaddr_in ipv4_loopback{};
         ipv4_loopback.sin_family = AF_INET;
@@ -11046,7 +11057,7 @@ static startup_health_test_results_t run_startup_health_tests()
             queue_startup_health_log(ESP_LOG_ERROR, "Health Check IPv4 assigned: invalid address");
     }
 
-    if (IPV6_ENABLED && addresses.ipv6[0] != '\0')
+    if (s_ipv6_enabled && addresses.ipv6[0] != '\0')
     {
         struct sockaddr_in6 ipv6_loopback{};
         ipv6_loopback.sin6_family = AF_INET6;
@@ -11497,6 +11508,12 @@ void app_apply_live_settings(const web_settings_t &settings)
     s_lcd_24_hour.store(settings.lcd_24_hour, std::memory_order_relaxed);
     s_lcd_pad_hour.store(settings.lcd_pad_hour, std::memory_order_relaxed);
     s_lcd_show_time_zone.store(settings.lcd_show_time_zone, std::memory_order_relaxed);
+    s_lcd_address.store(static_cast<uint8_t>(settings.lcd_address), std::memory_order_relaxed);
+    if (s_network_address_mutex != nullptr && xSemaphoreTake(s_network_address_mutex, portMAX_DELAY) == pdTRUE)
+    {
+        update_selected_ip_address_locked(); // the address of the LCD line
+        xSemaphoreGive(s_network_address_mutex);
+    }
     s_led_brightness_percent.store(settings.led_brightness_percent, std::memory_order_relaxed);
     for (size_t state = 0; state < WEB_LED_STATE_COUNT; ++state)
         s_led_rgb[state].store(settings.led_rgb[state] & 0xFFFFFFu, std::memory_order_relaxed);
@@ -11925,7 +11942,7 @@ void write_open_for_business_messages_to_the_console()
     refresh_network_ipv6_addresses();
     log_network_ipv6_addresses();
     const network_address_snapshot_t addresses = get_network_address_snapshot();
-    if (PreferIPvX != 2) // If not IPv6 only, report IPv4 connection status
+    if (s_ipv4_enabled) // If not IPv6 only, report IPv4 connection status
     {
         if (addresses.ipv4[0] != '\0')
             ESP_LOGI(TAG, "The IPv4 connection is up ( %s )", addresses.ipv4);
@@ -11933,7 +11950,7 @@ void write_open_for_business_messages_to_the_console()
             ESP_LOGW(TAG, "The IPv4 connection is down");
     }
 
-    if (PreferIPvX != 1) // If not IPv4 only, report IPv6 connection status
+    if (s_ipv6_enabled) // If not IPv4 only, report IPv6 connection status
     {
         if (addresses.ipv6[0] != '\0')
             ESP_LOGI(TAG, "The IPv6 connection is up ( %s )", addresses.ipv6);

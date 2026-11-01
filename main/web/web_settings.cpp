@@ -46,15 +46,18 @@ namespace
     // 7: root dispersion growth while coasting appended at the end (versions 5 and 6 are still read the same way);
     // 8: NTP client rate limit appended at the end (versions 5 to 7 are still read the same way);
     // 9: minimum GNSS fix age before stratum 1 appended at the end (versions 5 to 8 are still read the same way);
-    // 10: minimum satellites in use before stratum 1 appended at the end (versions 5 to 9 are still read the same way).
+    // 10: minimum satellites in use before stratum 1 appended at the end (versions 5 to 9 are still read the same way);
+    // 11: address families and the address shown on the LCD appended at the end (versions 5 to 10 are still read the
+    //     same way).
     // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
     // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
-    constexpr uint32_t BLOB_VERSION = 10;
+    constexpr uint32_t BLOB_VERSION = 11;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
     constexpr uint32_t BLOB_VERSION_7 = 7;
     constexpr uint32_t BLOB_VERSION_8 = 8;
     constexpr uint32_t BLOB_VERSION_9 = 9;
+    constexpr uint32_t BLOB_VERSION_10 = 10;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -66,12 +69,13 @@ namespace
     constexpr size_t SETTINGS_SIZE_7 = settings_size_before(offsetof(web_settings_t, ntp_client_rate_limit));
     constexpr size_t SETTINGS_SIZE_8 = settings_size_before(offsetof(web_settings_t, gnss_min_fix_age_s));
     constexpr size_t SETTINGS_SIZE_9 = settings_size_before(offsetof(web_settings_t, gnss_min_satellites));
-    // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 10 may fit into that of the
+    constexpr size_t SETTINGS_SIZE_10 = settings_size_before(offsetof(web_settings_t, ip_mode));
+    // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 11 may fit into that of the
     // version before: the version number tells them apart, and an older set always gets the defaults for the newer
     // fields instead of its padding bytes
     static_assert(SETTINGS_SIZE_5 <= SETTINGS_SIZE_6 && SETTINGS_SIZE_6 <= SETTINGS_SIZE_7 &&
                       SETTINGS_SIZE_7 <= SETTINGS_SIZE_8 && SETTINGS_SIZE_8 <= SETTINGS_SIZE_9 &&
-                      SETTINGS_SIZE_9 <= sizeof(web_settings_t),
+                      SETTINGS_SIZE_9 <= SETTINGS_SIZE_10 && SETTINGS_SIZE_10 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
     // ntpHoldoverDurationUs in whole seconds, within the range of the setting
@@ -149,7 +153,7 @@ namespace
         return false;
     }
 
-    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 9) and passes the CRC.
+    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 10) and passes the CRC.
     // *had_ote_fields (optional): the stored set still held the former OTE device name or password (zeroed in blob)
     bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob, bool *had_ote_fields = nullptr)
     {
@@ -186,6 +190,7 @@ namespace
         const bool version_7 = header.version == BLOB_VERSION_7 && header.size == SETTINGS_SIZE_7;
         const bool version_8 = header.version == BLOB_VERSION_8 && header.size == SETTINGS_SIZE_8;
         const bool version_9 = header.version == BLOB_VERSION_9 && header.size == SETTINGS_SIZE_9;
+        const bool version_10 = header.version == BLOB_VERSION_10 && header.size == SETTINGS_SIZE_10;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
@@ -195,9 +200,10 @@ namespace
                                length != HEADER_SIZE + SETTINGS_SIZE_6 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_7 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_8 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_9 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_9 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_10 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
-        else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9) ||
+        else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9 && !version_10) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -240,10 +246,18 @@ namespace
             {
                 // Appended in version 10
                 blob.settings.gnss_min_satellites = default_gnss_min_satellites();
-                blob.version = BLOB_VERSION;
-                blob.size = sizeof(web_settings_t);
                 if (version_9)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 9 read; the minimum satellites in use have their default", key);
+            }
+            if (version_5 || version_6 || version_7 || version_8 || version_9 || version_10)
+            {
+                // Appended in version 11
+                blob.settings.ip_mode = web_ip_mode_t::dual;
+                blob.settings.lcd_address = web_lcd_address_t::both;
+                blob.version = BLOB_VERSION;
+                blob.size = sizeof(web_settings_t);
+                if (version_10)
+                    ESP_LOGI(TAG, "Stored web settings '%s' of version 10 read; the address families have their default", key);
             }
             // Former OTE device name and OTE password: no longer used
             const bool had_ote = any_byte_set(blob.settings.ote_name_unused, sizeof(blob.settings.ote_name_unused)) ||
@@ -563,6 +577,7 @@ void web_settings_defaults(web_settings_t &out)
     }
     out.ipv4_prefix = prefix;
 
+    out.ip_mode = web_ip_mode_t::dual;
     out.ipv6_slaac = true;
     out.ipv6_prefix = 64;
     copy_text(out.dns[0], PrimaryDNS);
@@ -595,6 +610,7 @@ void web_settings_defaults(web_settings_t &out)
     out.lcd_24_hour = display24HourFormat;
     out.lcd_pad_hour = displayHoursWithPaddedZero;
     out.lcd_show_time_zone = displayTimeZone;
+    out.lcd_address = web_lcd_address_t::both;
     copy_text(out.time_zone, timeZoneSpec);
 
 #if RBG_LED_KY_016_MODULE_ENABLED && RBG_LED_WS2812_MODULE_ENABLED
@@ -898,8 +914,11 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         }
     }
 
+    if (s.ip_mode != web_ip_mode_t::dual && s.ip_mode != web_ip_mode_t::ipv4 && s.ip_mode != web_ip_mode_t::ipv6)
+        FAIL("Address families: dual, ipv4 or ipv6 expected");
+
     // ---- IPv4 ----
-    if (!s.ipv4_dhcp)
+    if (s.ip_mode != web_ip_mode_t::ipv6 && !s.ipv4_dhcp)
     {
         uint32_t address_be = 0;
         uint32_t gateway_be = 0;
@@ -924,7 +943,7 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
     }
 
     // ---- IPv6 static address ----
-    if (s.ipv6_address[0] != '\0')
+    if (s.ip_mode != web_ip_mode_t::ipv4 && s.ipv6_address[0] != '\0')
     {
         uint8_t address[16];
         if (!web_parse_ipv6(s.ipv6_address, address))
@@ -948,7 +967,7 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
                 FAIL("IPv6 gateway must be a link-local address or in the /64 of the address");
         }
     }
-    else if (s.ipv6_gateway[0] != '\0')
+    else if (s.ip_mode != web_ip_mode_t::ipv4 && s.ipv6_gateway[0] != '\0')
         FAIL("IPv6 gateway requires a static IPv6 address");
     else if (s.ipv6_prefix < 64 || s.ipv6_prefix > 128)
         FAIL("IPv6 prefix length: 64 to 128");
@@ -1064,6 +1083,8 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         if (length == 0 || length >= WEB_LCD_TITLE_SIZE || !is_printable_ascii(s.lcd_title, 0x20, 0x7D))
             FAIL("LCD title: 1 to 17 printable ASCII characters");
     }
+    if (s.lcd_address > web_lcd_address_t::none)
+        FAIL("LCD address line is not valid");
     if (!web_is_valid_time_zone(s.time_zone))
         FAIL("Time zone is not a valid POSIX TZ string");
     if (s.led_brightness_percent > 100)
@@ -1154,8 +1175,9 @@ bool web_settings_network_differs(const web_settings_t &a, const web_settings_t 
     for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
         if (strcmp(a.dns[i], b.dns[i]) != 0)
             return true;
-    // The MAC needs a restart; addresses from DHCP and SLAAC may change with it, so it has to be confirmed as well
-    return strcmp(a.mac_address, b.mac_address) != 0;
+    // The MAC and the address families need a restart; addresses may change with them, so they have to be confirmed
+    // as well
+    return strcmp(a.mac_address, b.mac_address) != 0 || a.ip_mode != b.ip_mode;
 }
 
 bool web_settings_restart_fields_differ(const web_settings_t &a, const web_settings_t &b)
@@ -1166,7 +1188,7 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            a.lcd_enabled != b.lcd_enabled ||
            a.led_type != b.led_type || a.led_red_pin != b.led_red_pin || a.led_green_pin != b.led_green_pin ||
            a.led_blue_pin != b.led_blue_pin || a.led_ws2812_pin != b.led_ws2812_pin ||
-           strcmp(a.mac_address, b.mac_address) != 0 ||
+           strcmp(a.mac_address, b.mac_address) != 0 || a.ip_mode != b.ip_mode ||
            a.tf_cmd_pin != b.tf_cmd_pin || a.tf_clk_pin != b.tf_clk_pin || a.tf_d0_pin != b.tf_d0_pin ||
            a.tf_d1_pin != b.tf_d1_pin || a.tf_d2_pin != b.tf_d2_pin || a.tf_d3_pin != b.tf_d3_pin ||
            strcmp(a.mqtt_topic, b.mqtt_topic) != 0 || a.mqtt_qos != b.mqtt_qos || a.mqtt_retain != b.mqtt_retain ||
@@ -1185,7 +1207,7 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
     if (web_settings_network_differs(a, b) || web_settings_restart_fields_differ(a, b))
         return false;
     return strcmp(a.lcd_title, b.lcd_title) == 0 && a.lcd_24_hour == b.lcd_24_hour && a.lcd_pad_hour == b.lcd_pad_hour &&
-           a.lcd_show_time_zone == b.lcd_show_time_zone && strcmp(a.time_zone, b.time_zone) == 0 &&
+           a.lcd_show_time_zone == b.lcd_show_time_zone && a.lcd_address == b.lcd_address && strcmp(a.time_zone, b.time_zone) == 0 &&
            a.led_brightness_percent == b.led_brightness_percent && memcmp(a.led_rgb, b.led_rgb, sizeof(a.led_rgb)) == 0 &&
            a.pps_holdover_s == b.pps_holdover_s && a.pps_lost_stratum == b.pps_lost_stratum &&
            a.pps_lost_serve == b.pps_lost_serve && a.pps_lost_serve_min == b.pps_lost_serve_min &&

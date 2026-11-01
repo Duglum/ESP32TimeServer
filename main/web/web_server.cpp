@@ -362,6 +362,10 @@ namespace
     // ---- JSON <-> settings ----
     // Names of the LED states in the JSON (order of web_led_state_t)
     const char *const s_led_state_names[WEB_LED_STATE_COUNT] = {"startup", "normal", "sync", "warning", "alert", "critical", "button"};
+    // Names of the LCD address lines in the JSON (order of web_lcd_address_t)
+    const char *const s_lcd_address_names[] = {"both", "ipv4", "ipv6", "status", "none"};
+    static_assert(sizeof(s_lcd_address_names) / sizeof(s_lcd_address_names[0]) == static_cast<size_t>(web_lcd_address_t::none) + 1,
+                  "one name per LCD address line");
 
     void add_ntp_keys(cJSON *array, const web_ntp_key_t *keys, size_t count)
     {
@@ -377,6 +381,7 @@ namespace
     void settings_to_json(cJSON *object, const web_settings_t &s)
     {
         cJSON_AddStringToObject(object, "fqdn", s.fqdn);
+        cJSON_AddStringToObject(object, "ip_mode", s.ip_mode == web_ip_mode_t::ipv4 ? "ipv4" : s.ip_mode == web_ip_mode_t::ipv6 ? "ipv6" : "dual");
         cJSON_AddBoolToObject(object, "ipv4_dhcp", s.ipv4_dhcp);
         cJSON_AddStringToObject(object, "ipv4_address", s.ipv4_address);
         cJSON_AddNumberToObject(object, "ipv4_prefix", s.ipv4_prefix);
@@ -409,6 +414,7 @@ namespace
         cJSON_AddBoolToObject(object, "lcd_24_hour", s.lcd_24_hour);
         cJSON_AddBoolToObject(object, "lcd_pad_hour", s.lcd_pad_hour);
         cJSON_AddBoolToObject(object, "lcd_show_time_zone", s.lcd_show_time_zone);
+        cJSON_AddStringToObject(object, "lcd_address", s_lcd_address_names[static_cast<size_t>(s.lcd_address)]);
         cJSON_AddStringToObject(object, "time_zone", s.time_zone);
         cJSON_AddStringToObject(object, "led_type", s.led_type == web_led_type_t::ky016 ? "ky016" : s.led_type == web_led_type_t::ws2812 ? "ws2812" : "none");
         cJSON_AddNumberToObject(object, "led_brightness", s.led_brightness_percent);
@@ -574,6 +580,39 @@ namespace
                 s.mac_address[0] = '\0';
             else
                 snprintf(s.mac_address, sizeof(s.mac_address), "%s", normalised);
+        }
+
+        cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "ip_mode");
+        if (mode != nullptr)
+        {
+            const char *text = cJSON_IsString(mode) ? mode->valuestring : nullptr;
+            if (text != nullptr && strcmp(text, "dual") == 0)
+                s.ip_mode = web_ip_mode_t::dual;
+            else if (text != nullptr && strcmp(text, "ipv4") == 0)
+                s.ip_mode = web_ip_mode_t::ipv4;
+            else if (text != nullptr && strcmp(text, "ipv6") == 0)
+                s.ip_mode = web_ip_mode_t::ipv6;
+            else
+            {
+                snprintf(err, err_size, "Field ip_mode: dual, ipv4 or ipv6 expected");
+                return false;
+            }
+        }
+
+        cJSON *lcd_address = cJSON_GetObjectItemCaseSensitive(root, "lcd_address");
+        if (lcd_address != nullptr)
+        {
+            const char *text = cJSON_IsString(lcd_address) ? lcd_address->valuestring : nullptr;
+            size_t index = 0;
+            while (index < sizeof(s_lcd_address_names) / sizeof(s_lcd_address_names[0]) &&
+                   (text == nullptr || strcmp(text, s_lcd_address_names[index]) != 0))
+                ++index;
+            if (index == sizeof(s_lcd_address_names) / sizeof(s_lcd_address_names[0]))
+            {
+                snprintf(err, err_size, "Field lcd_address: both, ipv4, ipv6, status or none expected");
+                return false;
+            }
+            s.lcd_address = static_cast<web_lcd_address_t>(index);
         }
 
         cJSON *protocol = cJSON_GetObjectItemCaseSensitive(root, "gnss_protocol");
@@ -785,12 +824,12 @@ namespace
         cJSON_AddNumberToObject(pending, "seconds_left", left_us > 0 ? static_cast<double>(left_us / 1000000LL) : 0.0);
         cJSON *urls = cJSON_AddArrayToObject(pending, "urls");
         char url[80];
-        if (!s_pending->applied.ipv4_dhcp)
+        if (s_pending->applied.ip_mode != web_ip_mode_t::ipv6 && !s_pending->applied.ipv4_dhcp)
         {
             snprintf(url, sizeof(url), "https://%s/", s_pending->applied.ipv4_address);
             cJSON_AddItemToArray(urls, cJSON_CreateString(url));
         }
-        if (s_pending->applied.ipv6_address[0] != '\0')
+        if (s_pending->applied.ip_mode != web_ip_mode_t::ipv4 && s_pending->applied.ipv6_address[0] != '\0')
         {
             snprintf(url, sizeof(url), "https://[%s]/", s_pending->applied.ipv6_address);
             cJSON_AddItemToArray(urls, cJSON_CreateString(url));
@@ -1103,8 +1142,10 @@ namespace
             return send_error(req, "409 Conflict", "No network change to confirm");
         // With a new static address the confirmation has to come over that address
         struct sockaddr_storage local{};
-        const bool has_new_static = !s_pending->applied.ipv4_dhcp || s_pending->applied.ipv6_address[0] != '\0';
-        if (has_new_static && (!peer_address(req, local, true) || !web_net_is_static_address(s_pending->applied, local)))
+        const web_settings_t &applied = s_pending->applied;
+        const bool has_new_static = (applied.ip_mode != web_ip_mode_t::ipv6 && !applied.ipv4_dhcp) ||
+                                    (applied.ip_mode != web_ip_mode_t::ipv4 && applied.ipv6_address[0] != '\0');
+        if (has_new_static && (!peer_address(req, local, true) || !web_net_is_static_address(applied, local)))
             return send_error(req, "409 Conflict", "Open the page over the new static address and confirm there");
         s_pending->active = false;
         esp_timer_stop(s_confirm_timer);

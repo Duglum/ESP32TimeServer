@@ -404,6 +404,7 @@
     // the form view of a settings object (also used for the defaults)
     return {
       fqdn: s.fqdn,
+      ip_mode: s.ip_mode,
       ipv4_dhcp: s.ipv4_dhcp,
       ipv4_cidr: s.ipv4_address ? s.ipv4_address + '/' + s.ipv4_prefix : '',
       ipv4_gateway: s.ipv4_gateway,
@@ -433,6 +434,7 @@
       lcd_24_hour: s.lcd_24_hour,
       lcd_pad_hour: s.lcd_pad_hour,
       lcd_show_time_zone: s.lcd_show_time_zone,
+      lcd_address: s.lcd_address,
       time_zone: s.time_zone,
       led_type: s.led_type,
       led_brightness: String(s.led_brightness),
@@ -464,6 +466,9 @@
   }
 
   const displayNames = {
+    ip_mode: { dual: 'IPv4 and IPv6', ipv4: 'IPv4 only', ipv6: 'IPv6 only' },
+    lcd_address: { both: 'IPv4 and IPv6 address in turn', ipv4: 'IPv4 address', ipv6: 'IPv6 address',
+      status: 'Status of IPv4 and IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)', none: 'Empty (privacy)' },
     gnss_protocol: { nmea: 'NMEA Standard Protocol (needs RMC sentence)', ubx: 'U-Blox UBX Protocol' },
     led_type: { none: 'None', ky016: 'KY-016', ws2812: 'WS2812' },
     mqtt_qos: { 0: '0 (at most once)', 1: '1 (at least once)', 2: '2 (exactly once)' }
@@ -575,6 +580,9 @@
   }
 
   function updateDependent() {
+    const mode = f.ip_mode.value;
+    document.querySelectorAll('.v4-field').forEach((el) => { el.hidden = mode === 'ipv6'; });
+    document.querySelectorAll('.v6-field').forEach((el) => { el.hidden = mode === 'ipv4'; });
     const dhcp = f.ipv4_dhcp.checked;
     f.ipv4_cidr.disabled = dhcp;
     f.ipv4_gateway.disabled = dhcp;
@@ -642,6 +650,7 @@
   function collect() {
     const body = {
       fqdn: f.fqdn.value.trim(),
+      ip_mode: f.ip_mode.value,
       ipv4_dhcp: f.ipv4_dhcp.checked,
       ipv6_slaac: f.ipv6_slaac.checked,
       ipv6_gateway: f.ipv6_gateway.value.trim(),
@@ -664,6 +673,7 @@
       lcd_24_hour: f.lcd_24_hour.checked,
       lcd_pad_hour: f.lcd_pad_hour.checked,
       lcd_show_time_zone: f.lcd_show_time_zone.checked,
+      lcd_address: f.lcd_address.value,
       time_zone: f.time_zone.value.trim(),
       led_type: f.led_type.value,
       led_brightness: Number(f.led_brightness.value),
@@ -712,7 +722,7 @@
       if (!hex) throw fieldError('led-colours', t('LED colour "{name}": #RRGGBB expected', { name: t(name) }));
       body.led_colors[key] = hex;
     }
-    if (!body.ipv4_dhcp) {
+    if (!body.ipv4_dhcp && body.ip_mode !== 'ipv6') {
       const v4 = splitCidr(f.ipv4_cidr.value.trim(), NaN);
       if (!v4) throw fieldError('ipv4_cidr', t('IPv4 address: a.b.c.d/prefix length expected'));
       body.ipv4_address = v4.address;
@@ -720,7 +730,9 @@
       body.ipv4_gateway = f.ipv4_gateway.value.trim();
     }
     const v6text = f.ipv6_cidr.value.trim();
-    if (v6text === '') {
+    if (body.ip_mode === 'ipv4') {
+      delete body.ipv6_gateway;
+    } else if (v6text === '') {
       body.ipv6_address = '';
       body.ipv6_prefix = 64;
     } else {
@@ -789,6 +801,9 @@
     return String(text).indexOf(':') >= 0 ? String(text).toLowerCase() : String(text);
   }
 
+  // Kinds of the addresses in the status (texts of the firmware and of renderStatus); others are shown as they are
+  const ADDRESS_KINDS = ['link-local', 'static', 'SLAAC, unique local', 'SLAAC, global', 'not used: IPv4 only', 'not used: IPv6 only'];
+
   // One entry per line; addresses as "address (kind)" get the kind in a second line
   function fillList(id, items, empty, addresses) {
     const list = $(id);
@@ -808,7 +823,7 @@
         if (m) {
           const kind = document.createElement('span');
           kind.className = 'addr-kind';
-          kind.textContent = m[2];
+          kind.textContent = ADDRESS_KINDS.includes(m[2]) ? t(m[2]) : m[2];
           li.appendChild(kind);
         }
       } else {
@@ -874,13 +889,16 @@
     f.mac_address.placeholder = st.mac_hardware;
     $('st-fingerprint').textContent = state.fingerprint;
     // Same form as the IPv6 lines: address in the first line, gateway and source in the second
+    const mode = state.settings.ip_mode;
     fillList('st-ipv4', st.ipv4_address
       ? [st.ipv4_address + '/' + st.ipv4_prefix + ' (' + t('via {gateway}, {source}', { gateway: st.ipv4_gateway || '-', source: st.ipv4_dhcp_running ? 'DHCP' : t('static') }) + ')']
-      : [], st.ipv4_dhcp_running ? t('waiting for DHCP') : t('none'), true);
-    fillList('st-ipv6', st.ipv6, t('none'), true);
+      : [], mode === 'ipv6' ? t('off (IPv6 only)') : st.ipv4_dhcp_running ? t('waiting for DHCP') : t('none'), true);
+    fillList('st-ipv6', st.ipv6, mode === 'ipv4' ? t('off (IPv4 only)') : t('none'), true);
     fillList('st-dns', st.dns, t('none'), true);
-    fillList('st-dns-v4', st.dns_received_v4, t('none'), true);
-    fillList('st-dns-v6', st.dns_received_v6, t('none'), true);
+    // Servers of an address family that is off are listed as received but not used (except link-local IPv6 ones)
+    const unused = (items, off) => (items || []).map((a) => off && !/^fe[89ab]/i.test(a) ? a + ' (not used: ' + (mode === 'ipv4' ? 'IPv4 only' : 'IPv6 only') + ')' : a);
+    fillList('st-dns-v4', unused(st.dns_received_v4, mode === 'ipv6'), t('none'), true);
+    fillList('st-dns-v6', unused(st.dns_received_v6, mode === 'ipv4'), t('none'), true);
     $('st-client').textContent = addressText(st.client);
 
     $('banner-default-pw').hidden = !state.default_password;

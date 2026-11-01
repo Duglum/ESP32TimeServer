@@ -99,12 +99,32 @@ namespace
     size_t s_dns_configured_count = 0;
     ip_addr_t s_dns_received_v4[WEB_DNS_SERVER_COUNT]; // DHCPv4, by the index the lease used (zero = none)
     ip_addr_t s_dns_received_v6[WEB_DNS_SERVER_COUNT]; // RDNSS, by the index the router advertisement used
+    // Address families in use: a server of a family that is off is not used. With "IPv4 only" the device has no IPv6
+    // address, but lwIP still takes the RDNSS option of router advertisements; such a server cannot be reached (a
+    // link-local one is still allowed: it needs no address of this device but the link-local one).
+    bool s_dns_use_v4 = true;
+    bool s_dns_use_v6 = true;
+
+    bool usable(const ip_addr_t &server)
+    {
+        return IP_IS_V6_VAL(server) ? s_dns_use_v6 || ip6_addr_islinklocal(ip_2_ip6(&server)) : s_dns_use_v4;
+    }
 
     size_t compact(const ip_addr_t *list, ip_addr_t *out)
     {
         size_t n = 0;
         for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
             if (!ip_addr_isany(&list[i]))
+                out[n++] = list[i];
+        return n;
+    }
+
+    // The servers of a list that the address families in use can reach (called with s_dns_lock held)
+    size_t compact_usable(const ip_addr_t *list, size_t count, ip_addr_t *out)
+    {
+        size_t n = 0;
+        for (size_t i = 0; i < count; ++i)
+            if (!ip_addr_isany(&list[i]) && usable(list[i]))
                 out[n++] = list[i];
         return n;
     }
@@ -116,14 +136,13 @@ namespace
             ip_addr_set_zero(&entry);
         if (s_dns_configured_count > 0)
         {
-            for (size_t i = 0; i < s_dns_configured_count; ++i)
-                table[i] = s_dns_configured[i];
+            compact_usable(s_dns_configured, s_dns_configured_count, table);
             return;
         }
         ip_addr_t v4[WEB_DNS_SERVER_COUNT];
         ip_addr_t v6[WEB_DNS_SERVER_COUNT];
-        const size_t v4_count = compact(s_dns_received_v4, v4);
-        const size_t v6_count = compact(s_dns_received_v6, v6);
+        const size_t v4_count = compact_usable(s_dns_received_v4, WEB_DNS_SERVER_COUNT, v4);
+        const size_t v6_count = compact_usable(s_dns_received_v6, WEB_DNS_SERVER_COUNT, v6);
         size_t n = 0;
         size_t i4 = 0;
         size_t i6 = 0;
@@ -211,7 +230,7 @@ namespace
         return ESP_OK;
     }
 
-    void set_configured_dns(struct netif *netif, const char (*servers)[WEB_IPV6_TEXT_SIZE])
+    void set_configured_dns(struct netif *netif, const char (*servers)[WEB_IPV6_TEXT_SIZE], bool use_v4, bool use_v6)
     {
         ip_addr_t parsed[WEB_DNS_SERVER_COUNT];
         size_t count = 0;
@@ -237,6 +256,8 @@ namespace
         taskENTER_CRITICAL(&s_dns_lock);
         memcpy(s_dns_configured, parsed, sizeof(parsed));
         s_dns_configured_count = count;
+        s_dns_use_v4 = use_v4;
+        s_dns_use_v6 = use_v6;
         taskEXIT_CRITICAL(&s_dns_lock);
         esp_netif_tcpip_exec(write_dns_table_in_lwip_thread, nullptr);
     }
@@ -287,11 +308,25 @@ bool web_net_apply(esp_netif_t *netif, const web_settings_t &s, const web_settin
         return false;
     bool ok = true;
     struct netif *lwip_netif = static_cast<struct netif *>(esp_netif_get_netif_impl(netif));
+    // Address families: IPv4 only has no SLAAC and no static IPv6 address (main.cpp creates no link-local address
+    // either), IPv6 only no DHCPv4 and no IPv4 address
+    const bool use_ipv4 = s.ip_mode != web_ip_mode_t::ipv6;
+    const bool use_ipv6 = s.ip_mode != web_ip_mode_t::ipv4;
 
     // ---- IPv4 ----
     esp_netif_dhcp_status_t dhcp_status = ESP_NETIF_DHCP_INIT;
     esp_netif_dhcpc_get_status(netif, &dhcp_status);
-    if (s.ipv4_dhcp)
+    if (!use_ipv4)
+    {
+        const esp_err_t stop_err = esp_netif_dhcpc_stop(netif);
+        esp_netif_ip_info_t none{};
+        if ((stop_err != ESP_OK && stop_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) || esp_netif_set_ip_info(netif, &none) != ESP_OK)
+        {
+            ESP_LOGE(TAG, "IPv4 could not be switched off: %s", esp_err_to_name(stop_err));
+            ok = false;
+        }
+    }
+    else if (s.ipv4_dhcp)
     {
         // Only a client that was stopped for a static address is started again; at the start (INIT) the
         // interface starts it by itself when the link comes up
@@ -330,15 +365,16 @@ bool web_net_apply(esp_netif_t *netif, const web_settings_t &s, const web_settin
 
     // ---- IPv6 static address ----
     uint8_t new_address[16] = {};
-    const bool has_static = s.ipv6_address[0] != '\0' && web_parse_ipv6(s.ipv6_address, new_address);
-    if (previous != nullptr && previous->ipv6_address[0] != '\0' && strcmp(previous->ipv6_address, s.ipv6_address) != 0)
+    const bool has_static = use_ipv6 && s.ipv6_address[0] != '\0' && web_parse_ipv6(s.ipv6_address, new_address);
+    if (previous != nullptr && previous->ipv6_address[0] != '\0' && (!has_static || strcmp(previous->ipv6_address, s.ipv6_address) != 0))
     {
         esp_ip6_addr_t old{};
         if (web_parse_ipv6(previous->ipv6_address, reinterpret_cast<uint8_t *>(old.addr)))
             esp_netif_remove_ip6_address(netif, &old);
     }
     publish_gateway(nullptr, nullptr); // the gateway is set again below
-    if (has_static && (previous == nullptr || strcmp(previous->ipv6_address, s.ipv6_address) != 0))
+    if (has_static && (previous == nullptr || previous->ip_mode == web_ip_mode_t::ipv4 ||
+                       strcmp(previous->ipv6_address, s.ipv6_address) != 0))
     {
         esp_ip6_addr_t address{};
         memcpy(address.addr, new_address, 16);
@@ -356,13 +392,13 @@ bool web_net_apply(esp_netif_t *netif, const web_settings_t &s, const web_settin
     // ---- SLAAC (and destination cache) ----
     if (lwip_netif != nullptr)
     {
-        slaac_request_t request{lwip_netif, s.ipv6_slaac, has_static, {}};
+        slaac_request_t request{lwip_netif, use_ipv6 && s.ipv6_slaac, has_static, {}};
         memcpy(request.static_address, new_address, 16);
         esp_netif_tcpip_exec(slaac_in_lwip_thread, &request);
     }
 
-    // ---- DNS (set by the DNS manager in the lwIP thread) ----
-    set_configured_dns(lwip_netif, s.dns);
+    // ---- DNS (set by the DNS manager in the lwIP thread; only servers of the address families in use) ----
+    set_configured_dns(lwip_netif, s.dns, use_ipv4, use_ipv6);
     return ok;
 }
 

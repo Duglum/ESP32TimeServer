@@ -148,21 +148,30 @@
               <small class="def" data-for="fqdn"></small>
               <small class="note">E.g. ESP32TimeServer.example.com. Without a domain, the domain of the DHCP server applies if DHCP is used. The first part is the host name (DHCP), the full name is used for the certificate.</small>
             </label>
-            <label class="switch span2"><input type="checkbox" name="ipv4_dhcp"> IPv4 address by DHCP</label>
-            <label><span class="lt">IPv4 address / prefix length</span>
+            <label class="span2"><span class="lt">Address families <span class="badge restart">restart</span></span>
+              <select name="ip_mode">
+                <option value="dual">IPv4 and IPv6</option>
+                <option value="ipv4">IPv4 only</option>
+                <option value="ipv6">IPv6 only</option>
+              </select>
+              <small class="note">IPv4 only: no IPv6 address at all (no link-local, no SLAAC, no static IPv6 address) and no NTP over IPv6. IPv6 only: no DHCPv4, no IPv4 address and no NTP over IPv4. DNS servers of a family that is off are not used.</small>
+              <small class="def" data-for="ip_mode"></small>
+            </label>
+            <label class="switch span2 v4-field"><input type="checkbox" name="ipv4_dhcp"> IPv4 address by DHCP</label>
+            <label class="v4-field"><span class="lt">IPv4 address / prefix length</span>
               <input type="text" name="ipv4_cidr" placeholder="192.168.1.10/24" spellcheck="false" autocomplete="off">
               <small class="def" data-for="ipv4_cidr"></small>
             </label>
-            <label><span class="lt">IPv4 gateway</span>
+            <label class="v4-field"><span class="lt">IPv4 gateway</span>
               <input type="text" name="ipv4_gateway" placeholder="192.168.1.1" spellcheck="false" autocomplete="off">
               <small class="def" data-for="ipv4_gateway"></small>
             </label>
-            <label class="switch span2"><input type="checkbox" name="ipv6_slaac"> IPv6 addresses by SLAAC (router advertisements)</label>
-            <label><span class="lt">Additional static IPv6 address / prefix length</span>
+            <label class="switch span2 v6-field"><input type="checkbox" name="ipv6_slaac"> IPv6 addresses by SLAAC (router advertisements)</label>
+            <label class="v6-field"><span class="lt">Additional static IPv6 address / prefix length</span>
               <input type="text" name="ipv6_cidr" placeholder="2001:db8::10/64 (empty = none)" spellcheck="false" autocomplete="off">
               <small class="def" data-for="ipv6_cidr"></small>
             </label>
-            <label><span class="lt">IPv6 gateway</span>
+            <label class="v6-field"><span class="lt">IPv6 gateway</span>
               <input type="text" name="ipv6_gateway" placeholder="fe80::1 (empty = from router advertisements)" spellcheck="false" autocomplete="off">
               <small class="def" data-for="ipv6_gateway"></small>
             </label>
@@ -314,6 +323,17 @@
             <label class="switch"><input type="checkbox" name="lcd_24_hour"> 24-hour clock</label>
             <label class="switch"><input type="checkbox" name="lcd_pad_hour"> Hour with leading zero</label>
             <label class="switch"><input type="checkbox" name="lcd_show_time_zone"> Show the time zone</label>
+            <label class="span2"><span class="lt">Bottom line</span>
+              <select name="lcd_address">
+                <option value="both">IPv4 and IPv6 address in turn</option>
+                <option value="ipv4">IPv4 address</option>
+                <option value="ipv6">IPv6 address</option>
+                <option value="status">Status of IPv4 and IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)</option>
+                <option value="none">Empty (privacy)</option>
+              </select>
+              <small class="note">With IPv4 only or IPv6 only the address of that family is shown. An IPv4 or IPv6 address line shows the other family while the chosen one has no address; IPv6 shows the address of the widest scope (global, unique local, link-local), in two halves.</small>
+              <small class="def" data-for="lcd_address"></small>
+            </label>
           </div>
         </details>
       </section>
