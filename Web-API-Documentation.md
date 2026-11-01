@@ -35,7 +35,7 @@ Request bodies are limited to 4096 bytes, except the firmware upload. Errors com
 | `/api/info` | GET | **none** | Host name and FQDN (for the login page) |
 | `/api/login` | POST | same origin, password in the body | Starts a session: cookie and CSRF token. `401` wrong password, `429` with `Retry-After` while locked out |
 | `/api/logout` | POST | cookie + CSRF (without them only the cookie is cleared) | Ends the session |
-| `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, compiled NTP keys, allow-list, `status` (network, time, GNSS, PPS, ...), certificate fingerprint, CSRF token. Secrets (passwords, keys) are not sent back |
+| `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, compiled NTP keys, allow-list, `status` (network: link state, speed, duplex and driver restarts in `link_up`, `link_speed_mbps`, `link_full_duplex`, `eth_recoveries`; time, GNSS, PPS, ...), certificate fingerprint, CSRF token. Secrets (passwords, keys) are not sent back |
 | `/api/diag` | GET | cookie | Diagnostics: servo, ADEV/TDEV, ISR histogram, NTP paths, basic mode TX delay, load shedding, RMC phase, UBX details |
 | `/api/coredump` | GET | cookie | Downloads the stored core dump (`404` if there is none) |
 | `/api/apply` | POST | cookie + CSRF | Applies settings now, without storing them. The body is a settings object with the field names of `settings` in `/api/state`; missing fields keep their current value. See the notes below the table. Errors: `400` invalid value, `409` while a network change waits for its confirmation |

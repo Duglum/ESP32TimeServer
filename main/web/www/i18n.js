@@ -194,6 +194,11 @@
     'connected': 'verbunden',
     'not connected': 'nicht verbunden',
     '{state}, reports queued on the TF card': '{state}, Berichte in der Warteschlange auf der TF-Karte',
+    'link up, {speed} Mbit/s {duplex} duplex': 'Link aktiv, {speed} Mbit/s {duplex}',
+    'full': 'Vollduplex',
+    'half': 'Halbduplex',
+    'no link': 'kein Link',
+    '{n} restarts of the Ethernet driver since the start': '{n} Neustarts des Ethernet-Treibers seit dem Start',
     '{mac} (hardware MAC)': '{mac} (Hardware-MAC)',
     '{mac} (set, hardware MAC {hardware})': '{mac} (eingestellt, Hardware-MAC {hardware})',
     'via {gateway}, {source}': 'über {gateway}, {source}',
@@ -719,7 +724,7 @@
 
   // Texts that stay English on purpose (names, technical terms, examples): listed so that app.js does not report
   // them as missing
-  for (const text of ['ESP32 Time Server', 'UTC', 'Firmware', 'MQTT', 'MAC', 'IPv4', 'IPv6', 'RGB LED', 'Broker URI', 'NTP',
+  for (const text of ['ESP32 Time Server', 'UTC', 'Firmware', 'MQTT', 'MAC', 'Ethernet', 'IPv4', 'IPv6', 'RGB LED', 'Broker URI', 'NTP',
     'qErr', 'ADEV', 'TDEV',
     'Topic', 'CMD (GPIO)', 'CLK (GPIO)', 'D0 (GPIO)', 'D1 (GPIO)', 'D2 (GPIO)', 'D3 (GPIO)', 'KY-016', 'WS2812',
     'CET-1CEST,M3.5.0,M10.5.0/3', '192.168.1.0/24 fd00::/8', '$CFGMSG,0,4,1', '0A 04']) {

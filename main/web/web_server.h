@@ -48,6 +48,10 @@ struct web_app_status_t
     bool mqtt_connected;
     bool mqtt_tf_queue;           // MQTT reports are queued on the TF card (QoS 1 or 2 and a usable FAT32 card)
     char mac_address[WEB_MAC_TEXT_SIZE]; // MAC in use since the start
+    bool link_up;                 // Ethernet link reported by the driver
+    uint16_t link_speed_mbps;     // 10 or 100 (0 = no link)
+    bool link_full_duplex;
+    uint32_t eth_recoveries;      // restarts of the Ethernet driver by the recovery since the start
     bool ntp_auth_available;
     size_t ntp_auth_compiled_keys;
     size_t ntp_auth_keys_in_use;

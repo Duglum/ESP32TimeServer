@@ -1513,6 +1513,7 @@ static std::atomic<bool> s_ethernet_connected{false};
 static std::atomic<bool> s_ipv4_ever_acquired{false};
 static std::atomic<int64_t> s_last_physical_link_down_us{0};
 static std::atomic<bool> s_ethernet_recovery_in_progress{false};
+static std::atomic<uint32_t> s_ethernet_recoveries{0}; // driver restarts by the recovery since the start (web page)
 static std::atomic<bool> s_ethernet_recovery_rx_probe_active{false};
 static std::atomic<uint32_t> s_ethernet_recovery_rx_probe_frames{0};
 static std::atomic<uint32_t> s_ethernet_rx_frames{0}; // every frame the EMAC delivered (receive hang check)
@@ -4010,6 +4011,7 @@ static ethernet_recovery_result_t restart_ethernet_transport()
         s_ethernet_recovery_in_progress.store(false, std::memory_order_release);
         return ethernet_recovery_result_t::driver_failed;
     }
+    s_ethernet_recoveries.fetch_add(1, std::memory_order_relaxed);
 
     xEventGroupClearBits(s_net_event_group, ETH_CONNECTED_BIT | ETH_GOT_IP_BIT | ETH_GOT_IP6_BIT | ETH_GOT_ROUTABLE_IP6_BIT);
     vTaskDelay(pdMS_TO_TICKS(ETHERNET_RECOVERY_DELAY_MS));
@@ -11636,6 +11638,17 @@ void app_get_status(web_app_status_t &status)
     status.mqtt_connected = s_mqtt_on && s_mqtt_connected.load(std::memory_order_acquire);
     status.mqtt_tf_queue = s_mqtt_on && s_tf_queue_available.load(std::memory_order_acquire);
     snprintf(status.mac_address, sizeof(status.mac_address), "%s", MACToBeUsed.c_str());
+    // Link state, speed and duplex as the driver reports them (ETH_CMD_G_* return its stored values, no PHY access)
+    status.link_up = s_ethernet_connected.load(std::memory_order_acquire);
+    eth_speed_t link_speed = ETH_SPEED_10M;
+    eth_duplex_t link_duplex = ETH_DUPLEX_HALF;
+    if (status.link_up && s_eth_handle != nullptr && esp_eth_ioctl(s_eth_handle, ETH_CMD_G_SPEED, &link_speed) == ESP_OK &&
+        esp_eth_ioctl(s_eth_handle, ETH_CMD_G_DUPLEX_MODE, &link_duplex) == ESP_OK)
+    {
+        status.link_speed_mbps = link_speed == ETH_SPEED_100M ? 100 : 10;
+        status.link_full_duplex = link_duplex == ETH_DUPLEX_FULL;
+    }
+    status.eth_recoveries = s_ethernet_recoveries.load(std::memory_order_relaxed);
     status.ntp_auth_available = ntp_auth_available();
     status.ntp_auth_compiled_keys = ntp_auth_compiled_key_count();
     status.ntp_auth_keys_in_use = ntp_auth_key_count();

@@ -861,6 +861,12 @@
     $('st-mqtt').textContent = state.settings.mqtt_enabled
       ? (st.mqtt_tf_queue ? t('{state}, reports queued on the TF card', { state: mqttState }) : mqttState)
       : t('off');
+    const link = $('st-link');
+    link.textContent = st.link_up
+      ? t('link up, {speed} Mbit/s {duplex} duplex', { speed: st.link_speed_mbps, duplex: st.link_full_duplex ? t('full') : t('half') })
+      : t('no link');
+    if (st.eth_recoveries > 0) link.textContent += '; ' + t('{n} restarts of the Ethernet driver since the start', { n: st.eth_recoveries });
+    link.className = st.link_up ? 'good' : 'bad';
     $('st-mac').textContent = st.mac_address === st.mac_hardware
       ? t('{mac} (hardware MAC)', { mac: st.mac_address })
       : t('{mac} (set, hardware MAC {hardware})', { mac: st.mac_address, hardware: st.mac_hardware });

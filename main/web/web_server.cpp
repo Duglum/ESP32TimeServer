@@ -1009,6 +1009,10 @@ namespace
         web_hardware_mac(hardware_mac);
         cJSON_AddStringToObject(status, "mac_hardware", hardware_mac);
         cJSON_AddStringToObject(status, "mac_address", sets->app.mac_address);
+        cJSON_AddBoolToObject(status, "link_up", sets->app.link_up);
+        cJSON_AddNumberToObject(status, "link_speed_mbps", sets->app.link_speed_mbps);
+        cJSON_AddBoolToObject(status, "link_full_duplex", sets->app.link_full_duplex);
+        cJSON_AddNumberToObject(status, "eth_recoveries", sets->app.eth_recoveries);
         cJSON_AddBoolToObject(status, "ntp_auth_available", sets->app.ntp_auth_available);
         cJSON_AddNumberToObject(status, "ntp_auth_compiled_keys", sets->app.ntp_auth_compiled_keys);
         cJSON_AddNumberToObject(status, "ntp_auth_keys_in_use", sets->app.ntp_auth_keys_in_use);
