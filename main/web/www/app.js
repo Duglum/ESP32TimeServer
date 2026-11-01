@@ -1389,6 +1389,11 @@
     e.preventDefault();
     const file = $('config-file').files[0];
     if (!file) return;
+    // The device takes at most 8192 bytes; a larger file is not even read
+    if (file.size > 8192) {
+      show(t('The file is too large for a configuration file (at most 8 kB).'), 'error');
+      return;
+    }
     let body;
     try {
       body = JSON.parse(await file.text());

@@ -514,6 +514,8 @@
     'Replace all settings and the allow-list with those of {file}?': 'Alle Einstellungen und die Allow-List durch die aus {file} ersetzen?',
     'This is no configuration file of ESP32 Time Server': 'Dies ist keine Konfigurationsdatei von ESP32 Time Server',
     'Configuration file: the settings are missing': 'Konfigurationsdatei: die Einstellungen fehlen',
+    'Request body nested too deeply or with too many values': 'Anfrage zu tief verschachtelt oder mit zu vielen Werten',
+    'The file is too large for a configuration file (at most 8 kB).': 'Die Datei ist zu groß für eine Konfigurationsdatei (höchstens 8 kB).',
     'Configuration imported. The device restarts once with it: confirm the network settings within 120 s, then save them.':
       'Konfiguration importiert. Das Gerät startet einmal damit neu: die Netzwerkeinstellungen innerhalb von 120 s bestätigen und dann speichern.',
     'Configuration imported, not saved yet: confirm the network settings within 120 s, then save them.':

@@ -29,7 +29,7 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
    - the page shows a red warning;
    - scripted uploads are refused.
 
-Request bodies are limited to 4096 bytes; `/api/config` (import) takes up to 8192 bytes, the firmware upload more. Errors come back as `{"error": "..."}` with a matching HTTP status.
+Request bodies are limited to 4096 bytes; `/api/config` (import) takes up to 8192 bytes, the firmware upload more. A JSON body may nest at most 8 levels deep and have at most 512 separators (`,` and `:` outside strings); otherwise, or when it is no JSON object, the answer is `400`. Errors come back as `{"error": "..."}` with a matching HTTP status.
 
 ## Endpoints
 

@@ -297,6 +297,56 @@ namespace
                strncmp(content_type, "application/json", 16) == 0;
     }
 
+    // Shape of a request body, checked before cJSON parses it. cJSON recurses once per nesting level (96 bytes of
+    // stack in parse_value; CONFIG_CJSON_NESTING_LIMIT is 1000 by default, far more than the server task stack holds)
+    // and allocates a node of about 64 bytes per value. Without this check a small body such as "[[[[..." would
+    // overflow the stack of the server task (before any login), and "[0,0,0,..." of 8 kB would take about 250 kB of
+    // heap. The requests of the page nest at most 3 levels deep; a complete configuration file has about 200 separators.
+    constexpr int JSON_MAX_DEPTH = 8;
+    constexpr size_t JSON_MAX_SEPARATORS = 512; // ',' and ':' outside strings: about one per value
+
+    bool json_shape_ok(const char *text, size_t length)
+    {
+        int depth = 0;
+        size_t separators = 0;
+        bool in_string = false;
+        for (size_t i = 0; i < length; ++i)
+        {
+            const char c = text[i];
+            if (in_string)
+            {
+                if (c == '\\')
+                    ++i; // the escaped character cannot end the string
+                else if (c == '"')
+                    in_string = false;
+                continue;
+            }
+            switch (c)
+            {
+            case '"':
+                in_string = true;
+                break;
+            case '[':
+            case '{':
+                if (++depth > JSON_MAX_DEPTH)
+                    return false;
+                break;
+            case ']':
+            case '}':
+                --depth;
+                break;
+            case ',':
+            case ':':
+                if (++separators > JSON_MAX_SEPARATORS)
+                    return false;
+                break;
+            default:
+                break;
+            }
+        }
+        return true;
+    }
+
     // Reads the JSON body (at most max bytes). Returns nullptr and sends the error response on failure.
     cJSON *read_json(httpd_req_t *req, size_t max = MAX_BODY)
     {
@@ -326,6 +376,13 @@ namespace
             received += static_cast<size_t>(ret);
         }
         body[received] = '\0';
+        if (!json_shape_ok(body, received))
+        {
+            memset(body, 0, received);
+            free(body);
+            send_error(req, "400 Bad Request", "Request body nested too deeply or with too many values");
+            return nullptr;
+        }
         cJSON *root = cJSON_ParseWithLength(body, received);
         memset(body, 0, received); // may contain passwords
         free(body);
@@ -502,7 +559,8 @@ namespace
         if (item == nullptr)
             return true;
         const double value = cJSON_IsNumber(item) ? item->valuedouble : -1e30;
-        if (!cJSON_IsNumber(item) || value != static_cast<double>(static_cast<long>(value)) || value < min_value || value > max_value)
+        // The range first: converting a double outside the range of long (1e300, or inf from 1e999) is undefined
+        if (!cJSON_IsNumber(item) || !(value >= min_value && value <= max_value) || value != static_cast<double>(static_cast<long>(value)))
         {
             snprintf(err, err_size, "Field %s: whole number from %ld to %ld expected", name, min_value, max_value);
             return false;
@@ -1891,7 +1949,7 @@ namespace
         }
         else if (format->valuedouble != CONFIG_FORMAT)
         {
-            snprintf(err, sizeof(err), "Configuration file: format %d is not supported", static_cast<int>(format->valuedouble));
+            snprintf(err, sizeof(err), "Configuration file: format %d is not supported", format->valueint); // valueint is clamped by cJSON
             ok = false;
         }
         else if (!cJSON_IsObject(settings))
