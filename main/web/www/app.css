@@ -93,6 +93,8 @@ h1 { font-size: 1.15rem; margin: 0; overflow: hidden; text-overflow: ellipsis; w
 h2 { font-size: 1.05rem; margin: 0 0 1rem; display: flex; align-items: center; gap: .5rem; }
 h3 { font-size: .95rem; margin: 0 0 .5rem; }
 h3.sub-heading { margin: 1.25rem 0 .25rem; display: flex; align-items: center; gap: .5rem; }
+/* A sub-heading that starts a separate part of a panel (e.g. the button in the LCD panel) */
+h3.sub-heading.separated { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 h2 + h3.sub-heading { margin-top: 0; }
 .section-gap { margin-top: 1rem; }
 .hint.first + .grid { margin-top: .75rem; }

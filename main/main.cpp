@@ -627,7 +627,7 @@ static constexpr int lcdRows = 4;
 static constexpr int lcdI2CAddressPrimary = 0x27;
 static constexpr int lcdI2CAddressSecondary = 0x3F;
 
-// Uptime / restart button (setting of the LCD Display panel): the uptime stays on the LCD this long after a press
+// Uptime / restart button (setting of the panel "LCD Display and Uptime/Restart Button"): the uptime stays on the LCD this long after a press
 static constexpr int upTimeDisplayWillStayActiveForThisManySeconds = 10;
 
 // GNSS internals

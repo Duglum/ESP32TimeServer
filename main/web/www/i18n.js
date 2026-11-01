@@ -345,6 +345,8 @@
 
     // ---- LCD Display ----
     'LCD Display': 'LCD-Display',
+    'LCD Display and Uptime/Restart Button': 'LCD-Display und Uptime-/Neustart-Taster',
+    'Enable the button': 'Taster aktivieren',
     'Enable LCD Display': 'LCD-Display aktivieren',
     '20 × 4 character LCD (HD44780) with a PCF8574 I2C backpack: SDA on GPIO 8, SCL on GPIO 7, I2C address 0x27 or 0x3F (found automatically).':
       '20 × 4 Zeichen LCD (HD44780) mit PCF8574-I2C-Backpack: SDA an GPIO 8, SCL an GPIO 7, I2C-Adresse 0x27 oder 0x3F (wird automatisch erkannt).',
@@ -360,8 +362,8 @@
     'Status of IPv4 and IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)': 'Status von IPv4 und IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)',
     'Empty (privacy)': 'Leer (Privatsphäre)',
     'Uptime / restart button': 'Uptime-/Neustart-Taster',
-    'Push button from the GPIO to GND (internal pull-up). A press shows the uptime on the LCD for 10 s; held for 10 s it erases the stored GNSS data and restarts the device. Held while the device starts it resets the settings, the password and the allow-list to their defaults (forgotten password).':
-      'Taster vom GPIO nach GND (interner Pull-up). Ein Druck zeigt die Laufzeit 10 s lang auf dem LCD; 10 s gehalten löscht er die gespeicherten GNSS-Daten und startet das Gerät neu. Beim Start gehalten setzt er die Einstellungen, das Passwort und die Allow-List auf ihre Standardwerte zurück (vergessenes Passwort).',
+    'Push button from the GPIO to GND (internal pull-up); it also works without the LCD. Held for 10 s it erases the stored GNSS data and restarts the device. Held while the device starts it resets the settings, the password and the allow-list to their defaults (forgotten password). With the LCD, a short press shows the uptime for 10 s.':
+      'Taster vom GPIO nach GND (interner Pull-up); er funktioniert auch ohne LCD. 10 s gehalten löscht er die gespeicherten GNSS-Daten und startet das Gerät neu. Beim Start gehalten setzt er die Einstellungen, das Passwort und die Allow-List auf ihre Standardwerte zurück (vergessenes Passwort). Mit LCD zeigt ein kurzer Druck 10 s lang die Laufzeit.',
     'Button pin (GPIO) <span class="badge restart">restart</span>': 'Taster-Pin (GPIO) <span class="badge restart">Neustart</span>',
     'Button pin': 'Taster-Pin',
     'With IPv4 only or IPv6 only the address of that family is shown. An IPv4 or IPv6 address line shows the other family while the chosen one has no address; IPv6 shows the address of the widest scope (global, unique local, link-local), in two halves.':
