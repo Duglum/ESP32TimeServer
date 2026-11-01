@@ -8,6 +8,7 @@
 // esp_https_server) so that the source address allow-list is checked before the TLS handshake.
 
 #include "web_server.h"
+#include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
 #include "custom/gnss_uart.h"
 #include "custom/gnss_ubx.h"
@@ -60,6 +61,12 @@ namespace
     constexpr uint16_t HTTPS_PORT = 443;
     constexpr size_t MAX_SOCKETS = 3;
     constexpr size_t MAX_BODY = 4096;
+    // Configuration files (import): a complete settings set with the secrets, the allow-list and the information
+    // fields, formatted (about 4 kB at most)
+    constexpr size_t CONFIG_BODY_MAX = 8192;
+    // Marker and format version of a configuration file (export and import, /api/config)
+    constexpr char CONFIG_MARKER[] = "timeserver_config";
+    constexpr int CONFIG_FORMAT = 1;
     constexpr uint32_t HANDSHAKE_TIMEOUT_MS = 5000;
     constexpr uint16_t IO_TIMEOUT_S = 5;
     constexpr UBaseType_t TASK_PRIORITY = 3;   // below every timing task (PPS 14, GNSS 15, NTP 17/20, recovery 6, MQTT 5)
@@ -290,12 +297,12 @@ namespace
                strncmp(content_type, "application/json", 16) == 0;
     }
 
-    // Reads the JSON body (at most MAX_BODY bytes). Returns nullptr and sends the error response on failure.
-    cJSON *read_json(httpd_req_t *req)
+    // Reads the JSON body (at most max bytes). Returns nullptr and sends the error response on failure.
+    cJSON *read_json(httpd_req_t *req, size_t max = MAX_BODY)
     {
-        if (req->content_len == 0 || req->content_len > MAX_BODY)
+        if (req->content_len == 0 || req->content_len > max)
         {
-            send_error(req, req->content_len > MAX_BODY ? "413 Payload Too Large" : "400 Bad Request", "Request body missing or too large");
+            send_error(req, req->content_len > max ? "413 Payload Too Large" : "400 Bad Request", "Request body missing or too large");
             return nullptr;
         }
         char *body = static_cast<char *>(malloc(req->content_len + 1));
@@ -376,7 +383,9 @@ namespace
         }
     }
 
-    void settings_to_json(cJSON *object, const web_settings_t &s)
+    // with_secrets: the stored form of a configuration file (the MQTT password in clear text instead of whether it is
+    // set)
+    void settings_to_json(cJSON *object, const web_settings_t &s, bool with_secrets = false)
     {
         cJSON_AddStringToObject(object, "fqdn", s.fqdn);
         cJSON_AddStringToObject(object, "ip_mode", s.ip_mode == web_ip_mode_t::ipv4 ? "ipv4" : s.ip_mode == web_ip_mode_t::ipv6 ? "ipv6" : "dual");
@@ -432,8 +441,11 @@ namespace
         cJSON_AddBoolToObject(object, "mqtt_enabled", s.mqtt_enabled);
         cJSON_AddStringToObject(object, "mqtt_uri", s.mqtt_uri);
         cJSON_AddStringToObject(object, "mqtt_username", s.mqtt_username);
-        // Secrets are never sent: only whether they are set
-        cJSON_AddBoolToObject(object, "mqtt_password_set", s.mqtt_password[0] != '\0');
+        // Secrets are never sent to the page: only whether they are set (a configuration file has them)
+        if (with_secrets)
+            cJSON_AddStringToObject(object, "mqtt_password", s.mqtt_password);
+        else
+            cJSON_AddBoolToObject(object, "mqtt_password_set", s.mqtt_password[0] != '\0');
         cJSON_AddStringToObject(object, "mqtt_topic", s.mqtt_topic);
         cJSON_AddNumberToObject(object, "mqtt_qos", s.mqtt_qos);
         cJSON_AddBoolToObject(object, "mqtt_retain", s.mqtt_retain);
@@ -1771,6 +1783,220 @@ namespace
         return send_ok(req, count == 0 ? "Allow-list cleared: every source address may connect." : "Allow-list stored and active.");
     }
 
+    // ---- Configuration file ----
+    // Export: the settings in use (secrets included) and the allow-list as a JSON file. A read that carries secrets:
+    // besides the session it needs the CSRF header, which a page of another site cannot set, and a browser that sends
+    // Sec-Fetch-Site must say same-origin.
+    esp_err_t handle_config_export(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, false, token) != gate_t::passed)
+            return ESP_OK;
+        char csrf[WEB_CSRF_TOKEN_HEX_LEN + 2];
+        char fetch_site[32];
+        if (!header(req, "X-CSRF-Token", csrf, sizeof(csrf)) || !web_auth_csrf_valid(token, csrf) ||
+            (header(req, "Sec-Fetch-Site", fetch_site, sizeof(fetch_site)) && strcmp(fetch_site, "same-origin") != 0))
+            return send_error(req, "403 Forbidden", "Request rejected (origin or CSRF token)");
+        web_settings_t *running = new (std::nothrow) web_settings_t{}; // about 1 kB: not on the server task stack
+        cJSON *root = cJSON_CreateObject();
+        if (running == nullptr || root == nullptr)
+        {
+            delete running;
+            cJSON_Delete(root);
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        }
+        web_settings_get_running(*running);
+        cJSON_AddNumberToObject(root, CONFIG_MARKER, CONFIG_FORMAT);
+        settings_to_json(cJSON_AddObjectToObject(root, "settings"), *running, true);
+        char host[WEB_HOSTNAME_MAX_LEN + 1];
+        web_settings_hostname(*running, host, sizeof(host));
+        *running = web_settings_t{}; // no secrets left on the heap
+        delete running;
+        cJSON_AddStringToObject(root, "hostname", host);
+        cJSON_AddStringToObject(root, "firmware", get_app_metadata()->version);
+        const time_t now = time(nullptr);
+        if (now > 1767225600) // after 2026-01-01: the clock is set
+        {
+            struct tm utc{};
+            gmtime_r(&now, &utc);
+            char text[32];
+            strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc);
+            cJSON_AddStringToObject(root, "exported", text);
+        }
+        cJSON *allow = cJSON_AddArrayToObject(root, "allow_list");
+        web_allow_entry_t entries[WEB_ALLOW_LIST_MAX];
+        const size_t count = web_auth_allow_list(entries, WEB_ALLOW_LIST_MAX);
+        for (size_t i = 0; i < count; ++i)
+        {
+            char text[64];
+            web_auth_format_cidr(entries[i], text, sizeof(text));
+            cJSON_AddItemToArray(allow, cJSON_CreateString(text));
+        }
+        char *text = cJSON_Print(root);
+        cJSON_Delete(root);
+        if (text == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        char disposition[96];
+        snprintf(disposition, sizeof(disposition), "attachment; filename=\"timeserver-config-%s.json\"", host);
+        set_security_headers(req, "no-store");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+        const size_t length = strlen(text);
+        const esp_err_t err = httpd_resp_send(req, text, static_cast<ssize_t>(length));
+        memset(text, 0, length); // contains secrets
+        cJSON_free(text);
+        ESP_LOGI(TAG, "Web admin: configuration exported");
+        return err;
+    }
+
+    // Import: every setting and the allow-list from a configuration file, checked like Apply and Save. A field the
+    // file lacks gets its default. Without a change of the network settings the set is saved and takes effect (with
+    // a restart if a restart field changed); with one it is applied like Apply (confirmation within 120 s) and saved
+    // by the user afterwards.
+    esp_err_t handle_config_import(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        if (s_pending->active)
+            return send_error(req, "409 Conflict", "Confirm or wait for the pending network change first");
+        cJSON *root = read_json(req, CONFIG_BODY_MAX);
+        if (root == nullptr)
+            return ESP_OK;
+
+        struct sets_t
+        {
+            web_settings_t running, defaults, candidate;
+            web_allow_entry_t entries[WEB_ALLOW_LIST_MAX];
+        };
+        sets_t *sets = new (std::nothrow) sets_t{};
+        if (sets == nullptr)
+        {
+            cJSON_Delete(root);
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        }
+        web_settings_get_running(sets->running);
+        web_settings_defaults(sets->defaults);
+        char err[128] = "";
+        bool ok = true;
+        const cJSON *format = cJSON_GetObjectItemCaseSensitive(root, CONFIG_MARKER);
+        cJSON *settings = cJSON_GetObjectItemCaseSensitive(root, "settings");
+        const cJSON *allow = cJSON_GetObjectItemCaseSensitive(root, "allow_list");
+        const bool has_allow = allow != nullptr; // the file has an allow-list (allow is gone with root below)
+        size_t allow_count = 0;
+        if (!cJSON_IsNumber(format))
+        {
+            snprintf(err, sizeof(err), "This is no configuration file of ESP32 Time Server");
+            ok = false;
+        }
+        else if (format->valuedouble != CONFIG_FORMAT)
+        {
+            snprintf(err, sizeof(err), "Configuration file: format %d is not supported", static_cast<int>(format->valuedouble));
+            ok = false;
+        }
+        else if (!cJSON_IsObject(settings))
+        {
+            snprintf(err, sizeof(err), "Configuration file: the settings are missing");
+            ok = false;
+        }
+        else if (allow != nullptr && (!cJSON_IsArray(allow) || cJSON_GetArraySize(allow) > static_cast<int>(WEB_ALLOW_LIST_MAX)))
+        {
+            snprintf(err, sizeof(err), "Configuration file: allow-list of at most %u entries expected", static_cast<unsigned>(WEB_ALLOW_LIST_MAX));
+            ok = false;
+        }
+        else
+        {
+            const cJSON *item = nullptr;
+            cJSON_ArrayForEach(item, allow)
+            {
+                if (!cJSON_IsString(item) || strlen(item->valuestring) > 50 || !web_auth_parse_cidr(item->valuestring, sets->entries[allow_count]))
+                {
+                    snprintf(err, sizeof(err), "Configuration file: allow-list entry %u is not an address or CIDR network",
+                             static_cast<unsigned>(allow_count + 1));
+                    ok = false;
+                    break;
+                }
+                ++allow_count;
+            }
+        }
+        // The settings onto the defaults: every field of the file replaces its value, a missing one keeps the default
+        ok = ok && settings_from_json(settings, sets->defaults, sets->candidate, err, sizeof(err));
+        cJSON_Delete(root);
+        if (!ok || !web_settings_validate(sets->candidate, err, sizeof(err)))
+        {
+            delete sets;
+            return send_error(req, "400 Bad Request", err);
+        }
+        // The allow-list first: it is refused when it would lock out the address of this request
+        if (has_allow)
+        {
+            struct sockaddr_storage peer{};
+            peer_address(req, peer, false);
+            const esp_err_t result = web_auth_set_allow_list(sets->entries, allow_count, peer);
+            if (result != ESP_OK)
+            {
+                delete sets;
+                return result == ESP_ERR_INVALID_STATE
+                           ? send_error(req, "409 Conflict", "Refused: the allow-list of the file does not allow your own address")
+                           : send_error(req, "500 Internal Server Error", "Allow-list could not be stored");
+            }
+        }
+        const bool network_changed = web_settings_network_differs(sets->candidate, sets->running);
+        const bool restart = web_settings_restart_fields_differ(sets->candidate, sets->running);
+        esp_err_t write_err = ESP_OK;
+        const char *message = nullptr;
+        if (network_changed)
+        {
+            // Network settings are only saved once they work: as with Apply
+            if (restart)
+            {
+                write_err = web_settings_save_oneshot(sets->candidate, true);
+                message = "Configuration imported. The device restarts once with it: confirm the network settings within 120 s, then save them.";
+            }
+            else
+            {
+                if (!web_net_apply(app_eth_netif(), sets->candidate, &sets->running))
+                    ESP_LOGW(TAG, "Web admin: some network settings could not be applied");
+                start_network_confirmation(sets->running, sets->candidate, false);
+                message = "Configuration imported, not saved yet: confirm the network settings within 120 s, then save them.";
+            }
+        }
+        else
+        {
+            write_err = web_settings_save(sets->candidate);
+            message = restart ? "Configuration imported and saved. The device restarts with it." : "Configuration imported and saved.";
+        }
+        if (write_err != ESP_OK)
+        {
+            delete sets;
+            return send_error(req, "500 Internal Server Error", "Settings could not be written to NVS");
+        }
+        if (!restart)
+        {
+            web_settings_set_running(sets->candidate);
+            app_apply_live_settings(sets->candidate);
+            if (network_changed)
+                app_network_settings_changed();
+        }
+        *sets = sets_t{}; // no secrets left on the heap
+        delete sets;
+        ESP_LOGI(TAG, "Web admin: configuration imported%s%s", network_changed ? " (network: waiting for the confirmation)" : "",
+                 restart ? ", restarting" : "");
+
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddStringToObject(reply, "message", message);
+        cJSON_AddBoolToObject(reply, "restart", restart);
+        cJSON_AddBoolToObject(reply, "network_changed", network_changed);
+        cJSON_AddBoolToObject(reply, "saved", !network_changed);
+        if (!restart)
+            add_confirm_info(reply);
+        const esp_err_t send_err = send_json(req, "200 OK", reply);
+        if (restart)
+            schedule_restart("web_admin_configuration_imported");
+        return send_err;
+    }
+
     bool register_handlers(httpd_handle_t server)
     {
         struct route_t
@@ -1790,6 +2016,8 @@ namespace
             {"/api/state", HTTP_GET, handle_state},
             {"/api/apply", HTTP_POST, handle_apply},
             {"/api/save", HTTP_POST, handle_save},
+            {"/api/config", HTTP_GET, handle_config_export},
+            {"/api/config", HTTP_POST, handle_config_import},
             {"/api/network/confirm", HTTP_POST, handle_confirm},
             {"/api/factory-reset", HTTP_POST, handle_factory_reset},
             {"/api/password", HTTP_POST, handle_password},
@@ -1862,7 +2090,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 24; // 23 routes in use
+        config.max_uri_handlers = 26; // 25 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

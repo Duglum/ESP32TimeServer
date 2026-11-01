@@ -1314,7 +1314,7 @@
 
   form.addEventListener('input', () => { formDirty = true; updateDependent(); markDefaults(); });
   form.addEventListener('change', () => { formDirty = true; updateDependent(); markDefaults(); });
-  // The OTE settings sit in the Firmware Update card, outside the settings form (form="settings-form"): their events
+  // The OTE settings sit in the Firmware and Configuration card, outside the settings form (form="settings-form"): their events
   // do not bubble through the form
   $('ote-card').addEventListener('input', () => { formDirty = true; updateDependent(); markDefaults(); });
   $('ote-card').addEventListener('change', () => { formDirty = true; updateDependent(); markDefaults(); });
@@ -1352,6 +1352,73 @@
     }
     await loadState(true);
   }
+
+  // ---- Configuration export and import ----
+  // The export carries secrets: it is fetched with the CSRF header (a plain link could not send it) and handed to
+  // the browser as a download
+  $('config-export').addEventListener('click', async () => {
+    let response;
+    try {
+      response = await fetch('/api/config', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-CSRF-Token': csrf } });
+    } catch (e) {
+      show(t('The device does not answer (restarting or a different address?)'), 'error');
+      return;
+    }
+    if (response.status === 401) { showLogin(); return; }
+    if (response.status !== 200) {
+      let data = {};
+      try { data = await response.json(); } catch (e) { data = {}; }
+      show(ts(data.error) || t('Request failed ({status})', { status: response.status }), 'error');
+      return;
+    }
+    const blob = await response.blob();
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const host = state && state.settings ? String(state.settings.fqdn).split('.')[0] : 'timeserver';
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'timeserver-config-' + host + '-' + d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    show(t('Configuration exported. The file contains secrets: keep it safe.'), 'ok');
+  });
+
+  $('config-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const file = $('config-file').files[0];
+    if (!file) return;
+    let body;
+    try {
+      body = JSON.parse(await file.text());
+    } catch (err) {
+      show(t('The file is no JSON file.'), 'error');
+      return;
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      show(ts('This is no configuration file of ESP32 Time Server'), 'error');
+      return;
+    }
+    if (!window.confirm(t('Replace all settings and the allow-list with those of {file}?', { file: file.name }))) return;
+    setBusy(true);
+    const r = await api('/api/config', body);
+    setBusy(false);
+    if (r.status !== 200) {
+      show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
+      return;
+    }
+    $('config-file').value = '';
+    const message = ts(r.data.message);
+    if (r.data.restart) {
+      stopAfterRestart(t('{message} Reload this page in about a minute.', { message: message }));
+      return;
+    }
+    formDirty = false;
+    show(message, 'ok');
+    if (r.data.network_pending) renderPending(r.data.network_pending);
+    await loadState(true);
+  });
 
   $('btn-apply').addEventListener('click', () => submitSettings('/api/apply'));
   $('btn-save').addEventListener('click', () => submitSettings('/api/save'));

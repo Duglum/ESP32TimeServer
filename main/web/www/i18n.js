@@ -498,7 +498,29 @@
     'Cancel': 'Abbrechen',
 
     // ---- Firmware update ----
-    'Firmware Update': 'Firmware-Update',
+    'Firmware and Configuration': 'Firmware und Konfiguration',
+    'Configuration': 'Konfiguration',
+    '<em>Export configuration</em> saves all settings in use and the allow-list as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the TLS key of the device.':
+      '<em>Konfiguration exportieren</em> speichert alle verwendeten Einstellungen und die Allow-List als JSON-Datei; <em>Konfiguration importieren</em> lädt eine solche Datei und ersetzt alle Einstellungen und die Allow-List auf einmal. Nicht in der Datei: das Passwort dieser Seite und der TLS-Schlüssel des Geräts.',
+    'The file contains secrets in clear text (MQTT password, NTP keys): keep it as safe as a password.':
+      'Die Datei enthält Geheimnisse im Klartext (MQTT-Passwort, NTP-Schlüssel): bewahren Sie sie so sicher auf wie ein Passwort.',
+    'Export configuration': 'Konfiguration exportieren',
+    'Configuration file (.json)': 'Konfigurationsdatei (.json)',
+    'The file is checked like <em>Apply</em> and saved; the device restarts if a setting needs it. Changed network settings have to be confirmed within 120 s and saved afterwards. A setting the file lacks gets its default; a file without an allow-list leaves the allow-list unchanged.':
+      'Die Datei wird wie bei <em>Übernehmen</em> geprüft und gespeichert; das Gerät startet neu, wenn eine Einstellung das braucht. Geänderte Netzwerkeinstellungen müssen innerhalb von 120 s bestätigt und danach gespeichert werden. Eine Einstellung, die in der Datei fehlt, erhält ihren Standardwert; eine Datei ohne Allow-List lässt die Allow-List unverändert.',
+    'Import configuration': 'Konfiguration importieren',
+    'Configuration exported. The file contains secrets: keep it safe.': 'Konfiguration exportiert. Die Datei enthält Geheimnisse: sicher aufbewahren.',
+    'The file is no JSON file.': 'Die Datei ist keine JSON-Datei.',
+    'Replace all settings and the allow-list with those of {file}?': 'Alle Einstellungen und die Allow-List durch die aus {file} ersetzen?',
+    'This is no configuration file of ESP32 Time Server': 'Dies ist keine Konfigurationsdatei von ESP32 Time Server',
+    'Configuration file: the settings are missing': 'Konfigurationsdatei: die Einstellungen fehlen',
+    'Configuration imported. The device restarts once with it: confirm the network settings within 120 s, then save them.':
+      'Konfiguration importiert. Das Gerät startet einmal damit neu: die Netzwerkeinstellungen innerhalb von 120 s bestätigen und dann speichern.',
+    'Configuration imported, not saved yet: confirm the network settings within 120 s, then save them.':
+      'Konfiguration importiert, noch nicht gespeichert: die Netzwerkeinstellungen innerhalb von 120 s bestätigen und dann speichern.',
+    'Configuration imported and saved. The device restarts with it.': 'Konfiguration importiert und gespeichert. Das Gerät startet damit neu.',
+    'Configuration imported and saved.': 'Konfiguration importiert und gespeichert.',
+    'Refused: the allow-list of the file does not allow your own address': 'Abgelehnt: die Allow-List der Datei lässt Ihre eigene Adresse nicht zu',
     'A new firmware can be installed over the network (Over The Ethernet, OTE). First the device has to accept updates:':
       'Eine neue Firmware kann über das Netzwerk installiert werden (Over The Ethernet, OTE). Zuerst muss das Gerät Updates annehmen:',
     '<strong>Once:</strong> press <em>Restart with updates enabled</em> under <em>Upload</em>. The device restarts and accepts updates until its next restart (the one after an upload included); after that they are off again. Log in again after about a minute.':
@@ -729,6 +751,9 @@
     ['PPS pin: GPIO %d cannot be used', 'PPS-Pin: GPIO {1} kann nicht verwendet werden'],
     ['PTP PPS loopback pin: GPIO %d cannot be used', 'PTP-PPS-Loopback-Pin: GPIO {1} kann nicht verwendet werden'],
     ['Button pin: GPIO %d cannot be used', 'Taster-Pin: GPIO {1} kann nicht verwendet werden'],
+    ['Configuration file: allow-list of at most %u entries expected', 'Konfigurationsdatei: Allow-List mit höchstens {1} Einträgen erwartet'],
+    ['Configuration file: allow-list entry %u is not an address or CIDR network', 'Konfigurationsdatei: Eintrag {1} der Allow-List ist keine Adresse und kein CIDR-Netz'],
+    ['Configuration file: format %d is not supported', 'Konfigurationsdatei: Format {1} wird nicht unterstützt'],
     ['WS2812 data pin: GPIO %d cannot be used', 'WS2812-Daten-Pin: GPIO {1} kann nicht verwendet werden'],
     ['GPIO %d is used twice (%s, %s)', 'GPIO {1} ist doppelt belegt ({2}, {3})'],
     ['LED colour %u is not a 24-bit RGB value', 'LED-Farbe {1} ist kein 24-Bit-RGB-Wert'],

@@ -29,7 +29,7 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
    - the page shows a red warning;
    - scripted uploads are refused.
 
-Request bodies are limited to 4096 bytes, except the firmware upload. Errors come back as `{"error": "..."}` with a matching HTTP status.
+Request bodies are limited to 4096 bytes; `/api/config` (import) takes up to 8192 bytes, the firmware upload more. Errors come back as `{"error": "..."}` with a matching HTTP status.
 
 ## Endpoints
 
@@ -44,6 +44,8 @@ Request bodies are limited to 4096 bytes, except the firmware upload. Errors com
 | `/api/apply` | POST | cookie + CSRF | Applies settings now, without storing them. The body is a settings object with the field names of `settings` in `/api/state`; missing fields keep their current value. See the notes below the table. Errors: `400` invalid value, `409` while a network change waits for its confirmation |
 | `/api/network/confirm` | POST | cookie + CSRF | Confirms the pending network change (body `{}`). A new static address must be confirmed over that address (`409` otherwise) |
 | `/api/save` | POST | cookie + CSRF | Stores the settings (same body as `/api/apply`) in NVS; they are loaded at every start. `409` while network changes are not applied and confirmed yet |
+| `/api/config` | GET | cookie + CSRF header | *Export configuration*: the configuration file (JSON, `Content-Disposition: attachment; filename="timeserver-config-<host name>.json"`), see *Configuration file* below. Contains secrets, so besides the cookie it needs the `X-CSRF-Token` header, and a `Sec-Fetch-Site` header (sent by browsers) must be `same-origin` (`403` otherwise) |
+| `/api/config` | POST | cookie + CSRF | *Import configuration*: the body is a configuration file. Replaces every setting and the allow-list, see *Configuration file* below. Errors: `400` not a configuration file or an invalid value, `409` while a network change waits for its confirmation or when the allow-list of the file does not allow your own address |
 | `/api/reboot` | POST | cookie + CSRF | Restarts with the saved settings; applied but unsaved settings are discarded |
 | `/api/password` | POST | cookie + CSRF + current password | `{"current": "...", "new": "..."}`; the new password has 12 to 128 characters |
 | `/api/allow-list` | POST | cookie + CSRF | `{"entries": ["192.168.8.0/24", "2001:db8::/64", ...]}`: source addresses or networks (CIDR) allowed to connect. `409` if your own address would no longer be allowed |
@@ -59,6 +61,31 @@ Notes on `/api/apply`:
 - A change of a restart field (FQDN, pins, LED module, MQTT, ...) writes a one-shot set and restarts once with it.
 
 **Static files** need no login; only the allow-list applies: `/`, `/app.js`, `/app.css`, `/i18n.js`, `/favicon.ico`.
+
+## Configuration file (`/api/config`)
+
+```json
+{
+  "timeserver_config": 1,
+  "settings": { "fqdn": "ESP32TimeServer", "...": "every field of settings in /api/state, with the secrets" },
+  "hostname": "ESP32TimeServer",
+  "firmware": "3.0.5-WebIf",
+  "exported": "2026-11-01T10:15:00Z",
+  "allow_list": ["192.168.8.0/24"]
+}
+```
+
+- `timeserver_config`: the format (1). A file without it, or of another format, is refused.
+- `settings`: the settings in use, with the field names of `settings` in `/api/state`, but with the MQTT password in clear text (`mqtt_password`) in place of `mqtt_password_set`; the NTP keys (`ntp_keys`) are there as on the page. On import a field the file lacks gets its default.
+- `hostname`, `firmware`, `exported` (UTC, only when the clock is set): for information, ignored on import.
+- `allow_list`: at most 8 entries as for `/api/allow-list`. On import a file without it leaves the allow-list unchanged; `[]` clears it.
+- Not in the file: the password of the web page and the TLS key and certificate.
+
+Import (`POST /api/config`): the settings are checked like `/api/apply` and `/api/save`, then the allow-list is stored (refused with `409` if it would not allow your own address). Then:
+- without a change of the network settings the set is saved in NVS and takes effect; if a restart field changed, the device restarts with it (`"restart": true`);
+- with a change of the network settings the set is applied like `/api/apply` and not saved: confirm within 120 s (`network_pending`), then save it with `/api/save`; with a restart field it is written as a one-shot set and the device restarts once.
+
+Answer: `{"ok": true, "message": "...", "restart": ..., "network_changed": ..., "saved": ..., "network_pending": {...}}`.
 
 ## GNSS console (`/api/gnss/command`, `/api/gnss/console`)
 
@@ -109,6 +136,13 @@ curl -k -c jar -H "Origin: https://HOST" -H "Content-Type: application/json" \
 
 # Read the state
 curl -k -b jar https://HOST/api/state
+
+# Export the configuration (contains secrets)
+curl -k -b jar -H "X-CSRF-Token: <csrf>" -o timeserver-config.json https://HOST/api/config
+
+# Import it again
+curl -k -b jar -H "Origin: https://HOST" -H "Content-Type: application/json" \
+     -H "X-CSRF-Token: <csrf>" --data-binary @timeserver-config.json https://HOST/api/config
 
 # State-changing request, e.g. a restart
 curl -k -b jar -H "Origin: https://HOST" -H "Content-Type: application/json" \

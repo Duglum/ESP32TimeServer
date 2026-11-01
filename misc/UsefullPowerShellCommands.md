@@ -23,7 +23,7 @@ In the examples below:
 ## 1. Over The Ethernet (OTE) Updates
 
 The firmware image is uploaded over the HTTPS web admin server (TCP 443), either on
-the web admin page (section *Firmware update*) or with `tools\ote_upload.py`.
+the web admin page (section *Firmware and Configuration*) or with `tools\ote_upload.py`.
 Over The Ethernet updates have to be switched on (web admin page, section
 *Over The Ethernet updates*).
 

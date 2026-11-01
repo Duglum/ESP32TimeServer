@@ -487,7 +487,7 @@
 
     <section class="card" id="ote-card">
       <details class="panel">
-        <summary><h2>Firmware Update</h2><span class="panel-changed" hidden></span></summary>
+        <summary><h2>Firmware and Configuration</h2><span class="panel-changed" hidden></span></summary>
         <!-- The only explanation of this card: the fields below only show their default and state -->
         <div class="help">
           <p>A new firmware can be installed over the network (Over The Ethernet, OTE). First the device has to accept updates:</p>
@@ -527,6 +527,21 @@
           <small class="note" id="ote-once-on" hidden>Updates are on until the next restart (enabled once).</small>
           <div class="buttons left">
             <button type="submit" id="ote-upload">Upload and restart</button>
+          </div>
+        </form>
+        <h3 class="sub-heading">Configuration</h3>
+        <p class="hint first"><em>Export configuration</em> saves all settings in use and the allow-list as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the TLS key of the device.</p>
+        <p class="callout">The file contains secrets in clear text (MQTT password, NTP keys): keep it as safe as a password.</p>
+        <div class="buttons left">
+          <button type="button" id="config-export">Export configuration</button>
+        </div>
+        <form id="config-form" class="stack section-gap">
+          <label><span class="lt">Configuration file (.json)</span>
+            <input type="file" id="config-file" accept=".json,application/json" required>
+          </label>
+          <small class="note">The file is checked like <em>Apply</em> and saved; the device restarts if a setting needs it. Changed network settings have to be confirmed within 120 s and saved afterwards. A setting the file lacks gets its default; a file without an allow-list leaves the allow-list unchanged.</small>
+          <div class="buttons left">
+            <button type="submit" id="config-import">Import configuration</button>
           </div>
         </form>
       </details>
