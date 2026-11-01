@@ -544,6 +544,7 @@
       'MAC-Adresse: Eine Unicast-Adresse ist erforderlich (das niedrigste Bit des ersten Bytes muss 0 sein)',
     'At most 3 DNS servers': 'Höchstens 3 DNS-Server',
     'Too many failed logins. Try again in {s} s.': 'Zu viele fehlgeschlagene Anmeldungen. Versuchen Sie es in {s} s erneut.',
+    'Too many failed logins. Try again in {m} min.': 'Zu viele fehlgeschlagene Anmeldungen. Versuchen Sie es in {m} min erneut.',
     'Login failed': 'Anmeldung fehlgeschlagen',
     'Logged out.': 'Abgemeldet.',
     'Request failed ({status})': 'Anfrage fehlgeschlagen ({status})',

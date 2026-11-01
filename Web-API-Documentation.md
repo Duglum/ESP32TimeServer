@@ -21,7 +21,10 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
    - `X-CSRF-Token: <csrf>`.
 6. **Throttling.** One counter per source address covers failed logins, failed password checks and failed scripted uploads. After 5 failures:
    - the device answers `429 Too Many Requests` with `Retry-After`;
-   - the lock-out starts at 30 s and doubles up to 15 min.
+   - the lock-out starts at 30 s and doubles with every further failure up to 1 h (30 s, 1, 2, 4, 8, 16, 32 min, then 1 h per failure: at most one guess per hour);
+   - the failures of a source are forgotten after 24 h without a failure (the counter lives in RAM: a restart clears it).
+
+   More than 20 failures per minute from all sources together block every login for 1 min (doubling up to 1 h, forgotten after 24 h without such a block).
 7. **Password storage.** The password is stored as a salted PBKDF2 hash (10000 iterations) in NVS. The compiled password from `ESP32TimeServerSettingsSecrets.h` (default `password`) is used until one is set on the page. While the default password is in use:
    - the page shows a red warning;
    - scripted uploads are refused.

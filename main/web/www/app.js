@@ -1284,7 +1284,9 @@
       show('', '');
       if (await loadState(true)) startRefresh();
     } else if (r.status === 429) {
-      show(t('Too many failed logins. Try again in {s} s.', { s: r.data.retry_after }), 'error');
+      const wait = Number(r.data.retry_after) || 0;
+      show(wait >= 120 ? t('Too many failed logins. Try again in {m} min.', { m: Math.ceil(wait / 60) })
+        : t('Too many failed logins. Try again in {s} s.', { s: wait }), 'error');
     } else {
       show(ts(r.data.error) || t('Login failed'), 'error');
     }

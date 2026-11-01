@@ -78,8 +78,11 @@ namespace
     constexpr size_t THROTTLE_ENTRIES = 16;
     constexpr uint32_t FAILURES_BEFORE_LOCKOUT = 5;
     constexpr int64_t FIRST_LOCKOUT_US = 30LL * 1000000LL;
-    constexpr int64_t MAX_LOCKOUT_US = 15LL * 60LL * 1000000LL;
-    constexpr int64_t FAILURE_MEMORY_US = 60LL * 60LL * 1000000LL; // failures are forgotten after an hour without one
+    // The lock-out doubles with every further failure: 30 s, 1, 2, 4, 8, 16, 32 min, then 1 h for every failure, so a
+    // source gets at most one guess per hour. The failures are kept longer than the longest lock-out: forgotten after
+    // 24 h without one, not at the end of a lock-out.
+    constexpr int64_t MAX_LOCKOUT_US = 60LL * 60LL * 1000000LL;
+    constexpr int64_t FAILURE_MEMORY_US = 24LL * 60LL * 60LL * 1000000LL;
     constexpr uint32_t GLOBAL_FAILURES_PER_MINUTE = 20;
 
     password_record_t s_password{};
