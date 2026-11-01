@@ -76,12 +76,14 @@ namespace
     constexpr int64_t NETWORK_CONFIRM_TIMEOUT_US = 120LL * 1000000LL;
     constexpr char SESSION_COOKIE[] = "__Host-sid";
 
-    // TLS 1.2 (ECDHE-ECDSA with AEAD) and TLS 1.3 only
+    // TLS 1.3 only. With TLS 1.2 on as well, a TLS 1.2 handshake never completes on ESP-IDF 6.1: the TLS 1.3 server
+    // keeps the ClientHello of a TLS 1.2 client to parse it again (keep_current_message), but the dynamic buffers
+    // (CONFIG_MBEDTLS_DYNAMIC_BUFFER, esp_ssl_srv.c) free the receive buffer after that step, so the server waits for
+    // a record that never comes until the handshake timeout. Browsers, Python and tools/ote_upload.py use TLS 1.3;
+    // a TLS 1.2-only client (e.g. curl.exe of Windows 10, Schannel) gets a protocol_version alert at once.
     const int s_ciphersuites[] = {
         MBEDTLS_TLS1_3_AES_128_GCM_SHA256,
         MBEDTLS_TLS1_3_AES_256_GCM_SHA384,
-        MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-        MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         0};
 
     httpd_handle_t s_server = nullptr;
@@ -2123,7 +2125,9 @@ namespace
         s_tls_config.serverkey_buf = s_identity.key_der;
         s_tls_config.serverkey_bytes = s_identity.key_length;
         s_tls_config.tls_handshake_timeout_ms = HANDSHAKE_TIMEOUT_MS;
-        s_tls_config.tls_version = ESP_TLS_VER_ANY; // TLS 1.2 and 1.3 (mbedTLS 4 has nothing older)
+        s_tls_config.tls_version = ESP_TLS_VER_TLS_1_3; // see s_ciphersuites
+        // esp-tls logs "Setting server TLS version" at info level for every TLS 1.3 connection
+        esp_log_level_set("esp-tls-mbedtls", ESP_LOG_WARN);
         s_tls_config.ciphersuites_list = s_ciphersuites;
 
         s_pending = new (std::nothrow) network_pending_t{};

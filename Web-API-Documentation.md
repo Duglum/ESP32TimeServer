@@ -5,7 +5,7 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
 ## Authentication
 
 1. **Allow-list.** Each new TCP connection is checked against the allow-list first. A source that is not allowed is closed before the TLS handshake. The allow-list applies to every path, the static files included.
-2. **TLS.** Everything runs over HTTPS with the device's own certificate. It is self-signed and created at the first start. Compare its SHA-256 fingerprint with the one in the *Status* section or on the serial console.
+2. **TLS.** Everything runs over HTTPS with the device's own certificate, TLS 1.3 only: a client that only knows TLS 1.2 (e.g. `curl.exe` of Windows 10, which uses Schannel) is refused; use a browser, Python or a curl built with OpenSSL. It is self-signed and created at the first start. Compare its SHA-256 fingerprint with the one in the *Status* section or on the serial console.
 3. **Login.** `POST /api/login` with `{"password": "..."}` returns:
    - a session cookie `__Host-sid` (a 256-bit token, `Secure; HttpOnly; SameSite=Strict`);
    - a CSRF token in the body: `{"csrf": "..."}`. `GET /api/state` returns it again (field `csrf`), so the page has it after a reload.
