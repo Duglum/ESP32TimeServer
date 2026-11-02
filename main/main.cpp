@@ -8247,6 +8247,16 @@ static size_t mqtt_append_time_quality(char *payload, size_t payload_size, size_
 }
 #endif
 
+// Ethernet link time since the start
+static int64_t mqtt_link_up_total_us()
+{
+    int64_t link_up_total_us = s_eth_link_up_total_us.load();
+    const int64_t connected_since_us = s_eth_link_connected_us.load();
+    if (connected_since_us > 0)
+        link_up_total_us += esp_timer_get_time() - connected_since_us;
+    return link_up_total_us;
+}
+
 static void mqtt_build_report(char *payload, size_t payload_size)
 {
     uint32_t queued_messages = static_cast<uint32_t>(s_mqtt_queued_messages_count.load());
@@ -8267,10 +8277,7 @@ static void mqtt_build_report(char *payload, size_t payload_size)
     format_time_to_ISO8601(s_last_pps_undisciplined.load(), last_pps_undisciplined, sizeof(last_pps_undisciplined));
 #endif
 
-    int64_t link_up_total_us = s_eth_link_up_total_us.load();
-    int64_t connected_since_us = s_eth_link_connected_us.load();
-    if (connected_since_us > 0)
-        link_up_total_us += esp_timer_get_time() - connected_since_us;
+    const int64_t link_up_total_us = mqtt_link_up_total_us();
     int64_t link_up_us = link_up_total_us - s_mqtt_last_link_up_us;
     s_mqtt_last_link_up_us = link_up_total_us;
 
@@ -8563,11 +8570,14 @@ static void mqtt_service_task(void *parameter)
     TickType_t next_report = xTaskGetTickCount();
     for (;;)
     {
+        const bool was_on = mqtt_on();
         if (s_mqtt_wanted_changed.exchange(false) && mqtt_apply_settings())
         {
             period = pdMS_TO_TICKS(s_mqtt_active->report_period_s * 1000UL); // at most 86400 s
             next_report = xTaskGetTickCount() + period;
             previously_connected = false;
+            if (!was_on)
+                s_mqtt_last_link_up_us = mqtt_link_up_total_us(); // the first period starts now
         }
         if (!mqtt_on())
         {
@@ -9183,9 +9193,10 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
             refresh_network_ipv6_addresses();
         }
 #if MQTT_ENABLED
+        // Link time for the MQTT reports: noted also while MQTT is off, it may be switched on later with Apply
+        s_eth_link_connected_us.store(esp_timer_get_time());
         if (mqtt_on())
         {
-            s_eth_link_connected_us.store(esp_timer_get_time());
             if (s_mqtt_has_connected.load(std::memory_order_acquire))
                 s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
         }
@@ -9203,10 +9214,7 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
         s_first_ntp_input_us.store(0);
         s_last_ntp_response_us.store(0);
 #if MQTT_ENABLED
-        if (mqtt_on())
-        {
-            mqtt_note_ethernet_disconnected();
-        }
+        mqtt_note_ethernet_disconnected(); // also while MQTT is off (link time of the reports)
 #endif
 #if DEBUG_ENABLED
         ESP_LOGW(TAG, "Ethernet link disconnected");
@@ -9221,10 +9229,7 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
         s_first_ntp_input_us.store(0);
         s_last_ntp_response_us.store(0);
 #if MQTT_ENABLED
-        if (mqtt_on())
-        {
-            mqtt_note_ethernet_disconnected();
-        }
+        mqtt_note_ethernet_disconnected(); // also while MQTT is off (link time of the reports)
 #endif
 #if DEBUG_ENABLED
         ESP_LOGW(TAG, "Ethernet driver stopped");
