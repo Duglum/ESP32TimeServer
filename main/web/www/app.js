@@ -898,7 +898,9 @@
     $('st-client').textContent = addressText(st.client);
 
     $('banner-default-pw').hidden = !state.default_password;
-    $('banner-oneshot').hidden = !state.oneshot_boot;
+    // oneshot_boot describes how this start began; once Save Settings has stored the settings in use, the next
+    // restart loads the same values and neither banner applies
+    $('banner-oneshot').hidden = !(state.oneshot_boot && state.unsaved_changes);
     $('banner-unsaved').hidden = state.oneshot_boot || !state.unsaved_changes;
     renderPending(state.network_pending);
     renderOte();
