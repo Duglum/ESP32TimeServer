@@ -78,6 +78,9 @@ CONFIG_MBEDTLS_SSL_TLS1_3_KEXM_EPHEMERAL=y
 # Allocate the TLS record buffers only while they are used (about 40 kB less per idle connection)
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+# Validity dates of certificates (the MQTT broker's): without it mbedTLS ignores them; the MQTT client leaves them out
+# while the clock is not set yet (no GNSS time)
+CONFIG_MBEDTLS_HAVE_TIME_DATE=y
 # Browsers send long request headers (cookies, client hints)
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 # Static IPv6 default gateway (lwIP has no API for it): lwip_hook_nd6_get_gw() in main/web/web_net.cpp

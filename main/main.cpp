@@ -140,6 +140,12 @@ extern "C"
 #include "lwip/sockets.h"
 }
 
+// The MQTT client checks the validity dates of the broker certificate (sdkconfig.defaults); an sdkconfig made before
+// that option was added would build without the check
+#if MQTT_ENABLED && !defined(CONFIG_MBEDTLS_HAVE_TIME_DATE)
+#error "CONFIG_MBEDTLS_HAVE_TIME_DATE is off (an sdkconfig older than sdkconfig.defaults?): delete sdkconfig and build again"
+#endif
+
 static const char *TAG = "main_cpp";
 
 // ---- Settings of this boot (web admin, see web/web_settings.h) ----
@@ -7920,6 +7926,10 @@ static void mqtt_report_error(const esp_mqtt_error_codes_t *e)
 
 static int mqtt_verify_callback(void *, mbedtls_x509_crt *, int, uint32_t *flags)
 {
+    // The validity dates count only once the clock is set: before the first GNSS time it is near 1970, and every
+    // certificate would be "not valid yet" (taken from ESP32-WebTherm 5333ef1, where the time comes from NTP)
+    if (!s_time_has_been_set.load(std::memory_order_acquire))
+        *flags &= ~static_cast<uint32_t>(MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X509_BADCERT_FUTURE);
     s_mqtt_verify_flags |= *flags; // every certificate of the chain; the name check is in the flags of depth 0
     return 0;
 }
