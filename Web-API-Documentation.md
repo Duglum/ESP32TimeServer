@@ -29,7 +29,7 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
    - the page shows a red warning;
    - scripted uploads are refused.
 
-Request bodies are limited to 4096 bytes; `/api/config` (import) takes up to 8192 bytes, the firmware upload more. A JSON body may nest at most 8 levels deep and have at most 512 separators (`,` and `:` outside strings); otherwise, or when it is no JSON object, the answer is `400`. Errors come back as `{"error": "..."}` with a matching HTTP status.
+Request bodies are limited to 4096 bytes; `/api/apply`, `/api/save` and `/api/config` (import) take up to 12288 bytes (the MQTT CA certificate may have 4096 characters), the firmware upload more. A JSON body may nest at most 8 levels deep and have at most 512 separators (`,` and `:` outside strings); otherwise, or when it is no JSON object, the answer is `400`. Errors come back as `{"error": "..."}` with a matching HTTP status.
 
 ## Endpoints
 
@@ -38,7 +38,7 @@ Request bodies are limited to 4096 bytes; `/api/config` (import) takes up to 819
 | `/api/info` | GET | **none** | Host name and FQDN (for the login page) |
 | `/api/login` | POST | same origin, password in the body | Starts a session: cookie and CSRF token. `401` wrong password, `429` with `Retry-After` while locked out |
 | `/api/logout` | POST | cookie + CSRF (without them only the cookie is cleared) | Ends the session |
-| `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, allow-list, `status` (network: link state, speed, duplex and driver restarts in `link_up`, `link_speed_mbps`, `link_full_duplex`, `eth_recoveries`; time, GNSS, PPS, ...), certificate fingerprint, CSRF token. Secrets (passwords, keys) are not sent back |
+| `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, allow-list, `status` (network: link state, speed, duplex and driver restarts in `link_up`, `link_speed_mbps`, `link_full_duplex`, `eth_recoveries`; MQTT: `mqtt_active`, `mqtt_connected`, `mqtt_broker`, `mqtt_port`, `mqtt_tls`, `mqtt_error` with `mqtt_error_age_s`, `mqtt_connected_s`, `mqtt_published`, `mqtt_publish_age_s`, `mqtt_tf_queue`; time, GNSS, PPS, ...), certificate fingerprint, CSRF token. Secrets (passwords, keys) are not sent back |
 | `/api/diag` | GET | cookie | Diagnostics: servo, ADEV/TDEV, ISR histogram, NTP paths, basic mode TX delay, load shedding, RMC phase, UBX details |
 | `/api/coredump` | GET | cookie | Downloads the stored core dump (`404` if there is none) |
 | `/api/apply` | POST | cookie + CSRF | Applies settings now, without storing them. The body is a settings object with the field names of `settings` in `/api/state`; missing fields keep their current value. See the notes below the table. Errors: `400` invalid value, `409` while a network change waits for its confirmation |
@@ -59,6 +59,7 @@ Request bodies are limited to 4096 bytes; `/api/config` (import) takes up to 819
 Notes on `/api/apply`:
 - A network change must be confirmed within 120 s, otherwise the previous network settings are restored.
 - A change of a restart field (FQDN, pins, LED module, MQTT, ...) writes a one-shot set and restarts once with it.
+- MQTT broker: `mqtt_broker` (IPv4 or IPv6 address or DNS name, no `.local`), `mqtt_port` (0 = 8883 with TLS, 1883 without), `mqtt_tls`, `mqtt_ca_pem` (CA certificate of the broker in PEM, at most 4096 characters, required with TLS; parsed with mbedTLS, `400` if it cannot be read). With TLS the broker certificate is checked against this CA and the broker name or IP address (SAN). The former field `mqtt_uri` (`mqtt://host[:port]` or `mqtts://host[:port]`) is still accepted and sets broker, port and TLS; fields sent with it replace these values.
 
 **Static files** need no login; only the allow-list applies: `/`, `/app.js`, `/app.css`, `/i18n.js`, `/favicon.ico`.
 
@@ -76,7 +77,7 @@ Notes on `/api/apply`:
 ```
 
 - `timeserver_config`: the format (1). A file without it, or of another format, is refused.
-- `settings`: the settings in use, with the field names of `settings` in `/api/state`, but with the MQTT password in clear text (`mqtt_password`) in place of `mqtt_password_set`; the NTP keys (`ntp_keys`) are there as on the page. On import a field the file lacks gets its default.
+- `settings`: the settings in use, with the field names of `settings` in `/api/state`, but with the MQTT password in clear text (`mqtt_password`) in place of `mqtt_password_set`; the NTP keys (`ntp_keys`) are there as on the page. On import a field the file lacks gets its default. A file of an earlier firmware with `mqtt_uri` instead of `mqtt_broker`, `mqtt_port` and `mqtt_tls` is read as with `/api/apply`; with `mqtts://` and MQTT on it needs `mqtt_ca_pem` as well.
 - `hostname`, `firmware`, `exported` (UTC, only when the clock is set): for information, ignored on import.
 - `allow_list`: at most 8 entries as for `/api/allow-list`. On import a file without it leaves the allow-list unchanged; `[]` clears it.
 - Not in the file: the password of the web page and the TLS key and certificate.

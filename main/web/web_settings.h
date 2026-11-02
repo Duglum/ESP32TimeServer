@@ -24,7 +24,8 @@ static constexpr size_t WEB_IPV6_TEXT_SIZE = 46;
 static constexpr size_t WEB_DNS_SERVER_COUNT = 3;   // lwIP default DNS_MAX_SERVERS
 static constexpr size_t WEB_TZ_SIZE = 64;
 static constexpr size_t WEB_LCD_TITLE_SIZE = 18;    // 17 characters + NUL (the last 3 LCD columns are status indicators)
-static constexpr size_t WEB_MQTT_URI_SIZE = 128;
+static constexpr size_t WEB_MQTT_URI_SIZE = 128;   // former broker URI (blob versions up to 12, see mqtt_uri_unused)
+static constexpr size_t WEB_MQTT_CA_SIZE = 4097;   // CA certificate of the broker (PEM), 4096 characters + NUL
 static constexpr size_t WEB_MQTT_CREDENTIAL_SIZE = 65;
 static constexpr size_t WEB_MQTT_TOPIC_SIZE = 101;  // 100 characters + NUL (topics <topic>/report and <topic>/status)
 static constexpr uint16_t WEB_PPS_LOST_SERVE_MAX_MIN = 1440; // serving time after the PPS loss: up to 24 h (0 = no limit)
@@ -128,9 +129,11 @@ struct web_settings_t
     int8_t led_ws2812_pin;
     uint32_t led_rgb[WEB_LED_STATE_COUNT]; // colour per state, 0xRRGGBB
 
-    // MQTT
+    // MQTT (the broker, its port, TLS and CA certificate are appended at the end, version 13)
     bool mqtt_enabled;
-    char mqtt_uri[WEB_MQTT_URI_SIZE];
+    // Former broker URI (mqtt:// or mqtts://, versions up to 12): read into mqtt_broker, mqtt_port and mqtt_tls, then
+    // always zero; only keeps the layout of the saved settings
+    char mqtt_uri_unused[WEB_MQTT_URI_SIZE];
     char mqtt_username[WEB_MQTT_CREDENTIAL_SIZE];
     char mqtt_password[WEB_MQTT_CREDENTIAL_SIZE]; // secret
     char mqtt_topic[WEB_MQTT_TOPIC_SIZE];
@@ -203,6 +206,14 @@ struct web_settings_t
     // starts it resets the settings and the password to their defaults
     bool button_enabled;
     int8_t button_pin;
+
+    // MQTT broker (added in version 13, in the place of the URI): an IPv4 or IPv6 address or a DNS name (no .local,
+    // no mDNS); port 0 = 8883 with TLS, 1883 without; with TLS the broker certificate is checked against the CA
+    // certificate (PEM) and the broker name or IP address (SAN)
+    char mqtt_broker[WEB_FQDN_SIZE];
+    uint16_t mqtt_port;
+    bool mqtt_tls;
+    char mqtt_ca_pem[WEB_MQTT_CA_SIZE];
 };
 
 // Defaults of all settings (the state after a reset to defaults)
@@ -248,6 +259,20 @@ bool web_parse_ipv4(const char *text, uint32_t *address_be);
 bool web_parse_ipv6(const char *text, uint8_t address[16]);
 bool web_is_valid_time_zone(const char *tz);
 bool web_is_reserved_gpio(int gpio);
+// MQTT field checks: a broker name ending in .local (with or without the final dot); a broker that is an IPv4 or
+// IPv6 address or a DNS name; a topic of 1 to 100 characters without +, #, control characters, a leading $ or a
+// trailing /; PEM text of one or more CERTIFICATE blocks of base64 (the content is parsed with mbedTLS by the web
+// server, app_mqtt_check_ca)
+bool web_mqtt_is_mdns_name(const char *host);
+bool web_mqtt_host_valid(const char *host);
+bool web_mqtt_topic_valid(const char *topic);
+bool web_pem_certificates_valid(const char *pem);
+// Former broker URI "mqtt://host[:port]" or "mqtts://host[:port]" (an IPv6 address in brackets) into mqtt_broker,
+// mqtt_port (0 without a port) and mqtt_tls; false (broker empty) if it is no such URI or the host does not fit the
+// broker field
+bool web_mqtt_split_uri(const char *uri, web_settings_t &s);
+// Port of the broker connection: the setting, else 8883 with TLS and 1883 without
+inline uint16_t web_mqtt_port_in_use(const web_settings_t &s) { return s.mqtt_port != 0 ? s.mqtt_port : (s.mqtt_tls ? 8883 : 1883); }
 // MAC address as "xx:xx:xx:xx:xx:xx", "xx-xx-xx-xx-xx-xx", "xxxxxxxxxxxx" or "xxxx.xxxx.xxxx" (any case) to lower
 // case with ':'; false if not valid
 bool web_normalise_mac(const char *text, char (&out)[WEB_MAC_TEXT_SIZE]);

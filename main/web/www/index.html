@@ -385,7 +385,21 @@
           <summary><h2>MQTT <span class="badge restart">restart</span></h2><span class="panel-changed" hidden></span></summary>
           <div class="grid">
             <label class="switch span2"><input type="checkbox" name="mqtt_enabled"> MQTT reporting</label>
-            <label class="span2"><span class="lt">Broker URI</span><input type="text" name="mqtt_uri" maxlength="127" spellcheck="false" placeholder="mqtt://192.168.1.15:1883 or mqtts://broker.example:8883"><small class="def" data-for="mqtt_uri"></small></label>
+            <label><span class="lt">Broker (IPv4 or IPv6 address or DNS name)</span>
+              <input type="text" name="mqtt_broker" maxlength="253" spellcheck="false" autocomplete="off" placeholder="mqtt.example.org">
+              <small class="note">No .local names (mDNS) and no discovery.</small>
+              <small class="def" data-for="mqtt_broker"></small>
+            </label>
+            <label><span class="lt">Port (empty = 8883 with TLS, 1883 without)</span>
+              <input type="number" name="mqtt_port" min="1" max="65535">
+              <small class="def" data-for="mqtt_port"></small>
+            </label>
+            <label class="switch span2"><input type="checkbox" name="mqtt_tls"> TLS (mqtts)</label>
+            <label class="span2"><span class="lt">CA certificate of the broker (PEM)</span>
+              <textarea name="mqtt_ca_pem" rows="5" maxlength="4096" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+              <small class="note">With TLS the broker certificate is always checked against this CA certificate and the broker name; a broker given by its IP address needs that address as an IP SAN in its certificate. TLS 1.2 or 1.3. At most 4096 characters; checked when the settings are applied.</small>
+              <small class="def" data-for="mqtt_ca_pem"></small>
+            </label>
             <label><span class="lt">User name</span><input type="text" name="mqtt_username" maxlength="64" autocomplete="off" spellcheck="false"><small class="def" data-for="mqtt_username"></small></label>
             <label><span class="lt">Password</span>
               <input type="password" name="mqtt_password" maxlength="64" autocomplete="new-password" placeholder="unchanged">

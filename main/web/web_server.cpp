@@ -40,6 +40,7 @@ extern "C"
 #include "lwip/sockets.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/ssl_ciphersuites.h"
+#include "mbedtls/x509_crt.h"
 }
 
 extern const char index_html_start[] asm("_binary_index_html_start");
@@ -61,9 +62,11 @@ namespace
     constexpr uint16_t HTTPS_PORT = 443;
     constexpr size_t MAX_SOCKETS = 3;
     constexpr size_t MAX_BODY = 4096;
+    // Apply and Save: every setting of the page, with an MQTT CA certificate of up to 4096 characters
+    constexpr size_t SETTINGS_BODY_MAX = 12288;
     // Configuration files (import): a complete settings set with the secrets, the allow-list and the information
-    // fields, formatted (about 4 kB at most)
-    constexpr size_t CONFIG_BODY_MAX = 8192;
+    // fields, formatted (about 4 kB, and up to 4.2 kB more with the MQTT CA certificate)
+    constexpr size_t CONFIG_BODY_MAX = 12288;
     // Marker and format version of a configuration file (export and import, /api/config)
     constexpr char CONFIG_MARKER[] = "timeserver_config";
     constexpr int CONFIG_FORMAT = 1;
@@ -498,7 +501,10 @@ namespace
             cJSON_AddStringToObject(colours, s_led_state_names[i], hex);
         }
         cJSON_AddBoolToObject(object, "mqtt_enabled", s.mqtt_enabled);
-        cJSON_AddStringToObject(object, "mqtt_uri", s.mqtt_uri);
+        cJSON_AddStringToObject(object, "mqtt_broker", s.mqtt_broker);
+        cJSON_AddNumberToObject(object, "mqtt_port", s.mqtt_port);
+        cJSON_AddBoolToObject(object, "mqtt_tls", s.mqtt_tls);
+        cJSON_AddStringToObject(object, "mqtt_ca_pem", s.mqtt_ca_pem);
         cJSON_AddStringToObject(object, "mqtt_username", s.mqtt_username);
         // Secrets are never sent to the page: only whether they are set (a configuration file has them)
         if (with_secrets)
@@ -572,6 +578,53 @@ namespace
     }
 
     // Builds a candidate from the running settings and the fields of the request
+    // "mqtt_uri" of firmware up to blob version 12 (mqtt:// or mqtts://, host and port): into broker, port and TLS.
+    // Fields "mqtt_broker", "mqtt_port" and "mqtt_tls" that are sent as well replace these values.
+    bool json_mqtt_uri(cJSON *root, web_settings_t &s, char *err, size_t err_size)
+    {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, "mqtt_uri");
+        if (item == nullptr)
+            return true;
+        if (!cJSON_IsString(item) || strlen(item->valuestring) >= WEB_MQTT_URI_SIZE)
+        {
+            snprintf(err, err_size, "Field mqtt_uri: text of at most %u characters expected", static_cast<unsigned>(WEB_MQTT_URI_SIZE - 1));
+            return false;
+        }
+        if (item->valuestring[0] == '\0')
+        {
+            memset(s.mqtt_broker, 0, sizeof(s.mqtt_broker));
+            s.mqtt_port = 0;
+            s.mqtt_tls = false;
+            return true;
+        }
+        if (!web_mqtt_split_uri(item->valuestring, s))
+        {
+            snprintf(err, err_size, "Field mqtt_uri: mqtt://host[:port] or mqtts://host[:port] expected (or use mqtt_broker)");
+            return false;
+        }
+        return true;
+    }
+
+    // Field checks of a complete set and, with a CA certificate of the broker, whether mbedTLS reads it
+    bool settings_valid(const web_settings_t &s, char *err, size_t err_size)
+    {
+        if (!web_settings_validate(s, err, err_size))
+            return false;
+        if (s.mqtt_ca_pem[0] == '\0')
+            return true;
+        mbedtls_x509_crt crt;
+        mbedtls_x509_crt_init(&crt);
+        const int result = mbedtls_x509_crt_parse(&crt, reinterpret_cast<const unsigned char *>(s.mqtt_ca_pem), strlen(s.mqtt_ca_pem) + 1);
+        mbedtls_x509_crt_free(&crt);
+        if (result != 0)
+        {
+            snprintf(err, err_size, "MQTT CA certificate: not a valid X.509 certificate in PEM (mbedTLS -0x%04x)",
+                     static_cast<unsigned>(result < 0 ? -result : result));
+            return false;
+        }
+        return true;
+    }
+
     bool settings_from_json(cJSON *root, const web_settings_t &base, web_settings_t &s, char *err, size_t err_size)
     {
         s = base;
@@ -611,7 +664,11 @@ namespace
                   json_int(root, "led_blue_pin", s.led_blue_pin, -1, 54, err, err_size) &&
                   json_int(root, "led_ws2812_pin", s.led_ws2812_pin, -1, 54, err, err_size) &&
                   json_bool(root, "mqtt_enabled", s.mqtt_enabled, err, err_size) &&
-                  json_string(root, "mqtt_uri", s.mqtt_uri, sizeof(s.mqtt_uri), err, err_size) &&
+                  json_mqtt_uri(root, s, err, err_size) &&
+                  json_string(root, "mqtt_broker", s.mqtt_broker, sizeof(s.mqtt_broker), err, err_size) &&
+                  json_int(root, "mqtt_port", s.mqtt_port, 0, 65535, err, err_size) &&
+                  json_bool(root, "mqtt_tls", s.mqtt_tls, err, err_size) &&
+                  json_string(root, "mqtt_ca_pem", s.mqtt_ca_pem, sizeof(s.mqtt_ca_pem), err, err_size) &&
                   json_string(root, "mqtt_username", s.mqtt_username, sizeof(s.mqtt_username), err, err_size) &&
                   json_string(root, "mqtt_topic", s.mqtt_topic, sizeof(s.mqtt_topic), err, err_size) &&
                   json_int(root, "mqtt_qos", s.mqtt_qos, 0, 2, err, err_size) &&
@@ -841,9 +898,22 @@ namespace
             return;
         }
         ESP_LOGW(TAG, "Network settings were not confirmed within 120 s: the previous settings are restored");
-        web_settings_t running{};
+        // About 5.5 kB each: on the heap, not on the server task stack
+        struct sets_t
+        {
+            web_settings_t running, restored;
+        };
+        sets_t *sets = new (std::nothrow) sets_t;
+        if (sets == nullptr)
+        {
+            ESP_LOGE(TAG, "Network settings could not be restored (out of memory): restarting with the saved settings");
+            schedule_restart("web_admin_network_not_confirmed");
+            return;
+        }
+        web_settings_t &running = sets->running;
+        web_settings_t &restored = sets->restored;
         web_settings_get_running(running);
-        web_settings_t restored = running;
+        restored = running;
         // only the network part returns to the previous values
         restored.ipv4_dhcp = s_pending->previous.ipv4_dhcp;
         memcpy(restored.ipv4_address, s_pending->previous.ipv4_address, sizeof(restored.ipv4_address));
@@ -856,6 +926,8 @@ namespace
         memcpy(restored.dns, s_pending->previous.dns, sizeof(restored.dns));
         web_net_apply(app_eth_netif(), restored, &running);
         web_settings_set_running(restored);
+        memset(sets, 0, sizeof(sets_t)); // no secrets left on the heap
+        delete sets;
         app_network_settings_changed();
     }
 
@@ -991,7 +1063,7 @@ namespace
         char csrf[WEB_CSRF_TOKEN_HEX_LEN + 1] = "";
         web_auth_session_valid(token, csrf);
 
-        // web_settings_t is about 1 kB: on the heap, not on the server task stack
+        // web_settings_t is about 5.5 kB: on the heap, not on the server task stack
         struct sets_t
         {
             web_settings_t running, defaults, saved;
@@ -1096,6 +1168,15 @@ namespace
         cJSON_AddBoolToObject(status, "led_active", sets->app.led_active);
         cJSON_AddBoolToObject(status, "mqtt_connected", sets->app.mqtt_connected);
         cJSON_AddBoolToObject(status, "mqtt_tf_queue", sets->app.mqtt_tf_queue);
+        cJSON_AddBoolToObject(status, "mqtt_active", sets->app.mqtt_active);
+        cJSON_AddStringToObject(status, "mqtt_broker", sets->app.mqtt_broker);
+        cJSON_AddNumberToObject(status, "mqtt_port", sets->app.mqtt_port);
+        cJSON_AddBoolToObject(status, "mqtt_tls", sets->app.mqtt_tls);
+        cJSON_AddStringToObject(status, "mqtt_error", sets->app.mqtt_error);
+        cJSON_AddNumberToObject(status, "mqtt_error_age_s", sets->app.mqtt_error_age_s);
+        cJSON_AddNumberToObject(status, "mqtt_connected_s", sets->app.mqtt_connected_s);
+        cJSON_AddNumberToObject(status, "mqtt_published", sets->app.mqtt_published);
+        cJSON_AddNumberToObject(status, "mqtt_publish_age_s", sets->app.mqtt_publish_age_s);
         char hardware_mac[WEB_MAC_TEXT_SIZE] = "";
         web_hardware_mac(hardware_mac);
         cJSON_AddStringToObject(status, "mac_hardware", hardware_mac);
@@ -1121,7 +1202,7 @@ namespace
             return ESP_OK;
         if (s_pending->active)
             return send_error(req, "409 Conflict", "Confirm or wait for the pending network change first");
-        cJSON *root = read_json(req);
+        cJSON *root = read_json(req, SETTINGS_BODY_MAX);
         if (root == nullptr)
             return ESP_OK;
 
@@ -1139,7 +1220,7 @@ namespace
         char err[128] = "";
         const bool parsed = settings_from_json(root, sets->running, sets->candidate, err, sizeof(err));
         cJSON_Delete(root);
-        if (!parsed || !web_settings_validate(sets->candidate, err, sizeof(err)))
+        if (!parsed || !settings_valid(sets->candidate, err, sizeof(err)))
         {
             delete sets;
             return send_error(req, "400 Bad Request", err);
@@ -1211,7 +1292,7 @@ namespace
             return ESP_OK;
         if (s_pending->active)
             return send_error(req, "409 Conflict", "Confirm the pending network change first");
-        cJSON *root = read_json(req);
+        cJSON *root = read_json(req, SETTINGS_BODY_MAX);
         if (root == nullptr)
             return ESP_OK;
         struct sets_t
@@ -1228,7 +1309,7 @@ namespace
         char err[128] = "";
         const bool parsed = settings_from_json(root, sets->running, sets->candidate, err, sizeof(err));
         cJSON_Delete(root);
-        if (!parsed || !web_settings_validate(sets->candidate, err, sizeof(err)))
+        if (!parsed || !settings_valid(sets->candidate, err, sizeof(err)))
         {
             delete sets;
             return send_error(req, "400 Bad Request", err);
@@ -1350,7 +1431,7 @@ namespace
             return ESP_OK;
         if (s_pending->active)
             return send_error(req, "409 Conflict", "Confirm or wait for the pending network change first");
-        web_settings_t *settings = new (std::nothrow) web_settings_t{}; // about 1 kB: not on the server task stack
+        web_settings_t *settings = new (std::nothrow) web_settings_t{}; // about 5.5 kB: not on the server task stack
         if (settings == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
         web_settings_get_running(*settings);
@@ -1857,7 +1938,7 @@ namespace
         if (!header(req, "X-CSRF-Token", csrf, sizeof(csrf)) || !web_auth_csrf_valid(token, csrf) ||
             (header(req, "Sec-Fetch-Site", fetch_site, sizeof(fetch_site)) && strcmp(fetch_site, "same-origin") != 0))
             return send_error(req, "403 Forbidden", "Request rejected (origin or CSRF token)");
-        web_settings_t *running = new (std::nothrow) web_settings_t{}; // about 1 kB: not on the server task stack
+        web_settings_t *running = new (std::nothrow) web_settings_t{}; // about 5.5 kB: not on the server task stack
         cJSON *root = cJSON_CreateObject();
         if (running == nullptr || root == nullptr)
         {
@@ -1870,7 +1951,7 @@ namespace
         settings_to_json(cJSON_AddObjectToObject(root, "settings"), *running, true);
         char host[WEB_HOSTNAME_MAX_LEN + 1];
         web_settings_hostname(*running, host, sizeof(host));
-        *running = web_settings_t{}; // no secrets left on the heap
+        memset(running, 0, sizeof(web_settings_t)); // no secrets left on the heap (no temporary on the stack)
         delete running;
         cJSON_AddStringToObject(root, "hostname", host);
         cJSON_AddStringToObject(root, "firmware", get_app_metadata()->version);
@@ -1982,7 +2063,7 @@ namespace
         // The settings onto the defaults: every field of the file replaces its value, a missing one keeps the default
         ok = ok && settings_from_json(settings, sets->defaults, sets->candidate, err, sizeof(err));
         cJSON_Delete(root);
-        if (!ok || !web_settings_validate(sets->candidate, err, sizeof(err)))
+        if (!ok || !settings_valid(sets->candidate, err, sizeof(err)))
         {
             delete sets;
             return send_error(req, "400 Bad Request", err);
@@ -2038,7 +2119,7 @@ namespace
             if (network_changed)
                 app_network_settings_changed();
         }
-        *sets = sets_t{}; // no secrets left on the heap
+        memset(sets, 0, sizeof(sets_t)); // no secrets left on the heap (no temporary on the stack)
         delete sets;
         ESP_LOGI(TAG, "Web admin: configuration imported%s%s", network_changed ? " (network: waiting for the confirmation)" : "",
                  restart ? ", restarting" : "");
@@ -2174,10 +2255,17 @@ namespace
         bool network_confirm = false;
         if (web_settings_boot_was_oneshot(&network_confirm) && network_confirm)
         {
-            web_settings_t saved{};
-            if (!web_settings_get_saved(saved))
-                web_settings_defaults(saved);
-            start_network_confirmation(saved, boot, true);
+            web_settings_t *saved = new (std::nothrow) web_settings_t; // about 5.5 kB: not on the start task stack
+            if (saved == nullptr)
+                start_network_confirmation(boot, boot, true); // no rollback copy: the timeout restarts anyway
+            else
+            {
+                if (!web_settings_get_saved(*saved))
+                    web_settings_defaults(*saved);
+                start_network_confirmation(*saved, boot, true);
+                memset(saved, 0, sizeof(web_settings_t));
+                delete saved;
+            }
             ESP_LOGW(TAG, "Web admin: this start uses changed network settings; confirm them on the page within 120 s or the device restarts with the saved settings");
         }
         vTaskDelete(nullptr);

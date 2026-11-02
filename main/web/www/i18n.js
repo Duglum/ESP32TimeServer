@@ -417,7 +417,48 @@
     // ---- MQTT ----
     'MQTT <span class="badge restart">restart</span>': 'MQTT <span class="badge restart">Neustart</span>',
     'MQTT reporting': 'MQTT-Berichte',
-    'mqtt://192.168.1.15:1883 or mqtts://broker.example:8883': 'mqtt://192.168.1.15:1883 oder mqtts://broker.example:8883',
+    'Broker (IPv4 or IPv6 address or DNS name)': 'Broker (IPv4- oder IPv6-Adresse oder DNS-Name)',
+    'No .local names (mDNS) and no discovery.': 'Keine .local-Namen (mDNS) und keine Discovery.',
+    'Port (empty = 8883 with TLS, 1883 without)': 'Port (leer = 8883 mit TLS, 1883 ohne)',
+    'CA certificate of the broker (PEM)': 'CA-Zertifikat des Brokers (PEM)',
+    'With TLS the broker certificate is always checked against this CA certificate and the broker name; a broker given by its IP address needs that address as an IP SAN in its certificate. TLS 1.2 or 1.3. At most 4096 characters; checked when the settings are applied.':
+      'Mit TLS wird das Broker-Zertifikat immer gegen dieses CA-Zertifikat und den Broker-Namen geprüft; ein per IP-Adresse angegebener Broker braucht diese Adresse als IP-SAN in seinem Zertifikat. TLS 1.2 oder 1.3. Höchstens 4096 Zeichen; geprüft beim Übernehmen der Einstellungen.',
+    'automatic (8883 with TLS, 1883 without)': 'automatisch (8883 mit TLS, 1883 ohne)',
+    'MQTT port: 1 to 65535, or empty': 'MQTT-Port: 1 bis 65535 oder leer',
+    'MQTT broker: .local names (mDNS) are not supported; use an address or a DNS name': 'MQTT-Broker: .local-Namen (mDNS) werden nicht unterstützt; eine Adresse oder einen DNS-Namen verwenden',
+    'MQTT broker: a host name or an IPv4 or IPv6 address expected': 'MQTT-Broker: Hostname oder IPv4- oder IPv6-Adresse erwartet',
+    'MQTT broker: required while MQTT is on': 'MQTT-Broker: nötig, solange MQTT eingeschaltet ist',
+    'MQTT topic: 1 to 100 characters without +, #, control characters, a leading $ or a trailing /': 'MQTT-Topic: 1 bis 100 Zeichen ohne +, #, Steuerzeichen, ein $ am Anfang oder ein / am Ende',
+    'MQTT CA certificate: PEM with one or more BEGIN CERTIFICATE / END CERTIFICATE blocks expected': 'MQTT-CA-Zertifikat: PEM mit einem oder mehreren Blöcken BEGIN CERTIFICATE / END CERTIFICATE erwartet',
+    'MQTT: TLS needs the CA certificate of the broker (PEM)': 'MQTT: TLS braucht das CA-Zertifikat des Brokers (PEM)',
+    'MQTT: text is not terminated': 'MQTT: Text ist nicht abgeschlossen',
+    'on after the next restart': 'an nach dem nächsten Neustart',
+    'connected to {where} for {time}; {n} reports published, the latest {age}': 'verbunden mit {where} seit {time}; {n} Berichte gesendet, der letzte {age}',
+    'none yet': 'noch keiner',
+    '{n} s ago': 'vor {n} s',
+    'not connected to {where}: {error} ({age} s ago)': 'nicht verbunden mit {where}: {error} (vor {age} s)',
+    'connecting to {where} …': 'verbinde mit {where} …',
+    'reports queued on the TF card': 'Berichte in der Warteschlange auf der TF-Karte',
+    // Reasons of a failed connection (firmware, status page)
+    'No connection to the broker (address and port?)': 'Keine Verbindung zum Broker (Adresse und Port?)',
+    'TLS connection to the broker failed (TLS 1.2/1.3 and the certificate?)': 'TLS-Verbindung zum Broker fehlgeschlagen (TLS 1.2/1.3 und das Zertifikat?)',
+    'The MQTT client could not be started': 'Der MQTT-Client konnte nicht gestartet werden',
+    'The MQTT client could not be created (memory)': 'Der MQTT-Client konnte nicht angelegt werden (Speicher)',
+    'The broker certificate does not match the broker name (name or IP SAN)': 'Das Broker-Zertifikat passt nicht zum Broker-Namen (Name oder IP-SAN)',
+    'The broker certificate has expired': 'Das Broker-Zertifikat ist abgelaufen',
+    'The broker certificate is not signed by the CA certificate of the settings': 'Das Broker-Zertifikat ist nicht vom CA-Zertifikat der Einstellungen signiert',
+    'The broker certificate is not valid yet (is the clock set?)': 'Das Broker-Zertifikat ist noch nicht gültig (ist die Uhr gestellt?)',
+    'The broker certificate was refused': 'Das Broker-Zertifikat wurde abgelehnt',
+    'The broker is not available': 'Der Broker ist nicht verfügbar',
+    'The broker name could not be resolved (DNS)': 'Der Broker-Name konnte nicht aufgelöst werden (DNS)',
+    'The broker refused the client ID': 'Der Broker hat die Client-ID abgelehnt',
+    'The broker refused the connection (protocol)': 'Der Broker hat die Verbindung abgelehnt (Protokoll)',
+    'The broker refused the connection: not authorised': 'Der Broker hat die Verbindung abgelehnt: nicht berechtigt',
+    'The broker refused the user name or password': 'Der Broker hat Benutzername oder Passwort abgelehnt',
+    'The connection to the broker timed out': 'Zeitüberschreitung bei der Verbindung zum Broker',
+    'The connection to the broker was closed': 'Die Verbindung zum Broker wurde geschlossen',
+    'Connection error': 'Verbindungsfehler',
+    'Field mqtt_uri: mqtt://host[:port] or mqtts://host[:port] expected (or use mqtt_broker)': 'Feld mqtt_uri: mqtt://host[:port] oder mqtts://host[:port] erwartet (oder mqtt_broker verwenden)',
     'User name': 'Benutzername',
     'Clear the MQTT password': 'MQTT-Passwort löschen',
     'An empty password field keeps the stored password. Secrets are never sent back to the browser.':
@@ -517,7 +558,7 @@
     'This is no configuration file of ESP32 Time Server': 'Dies ist keine Konfigurationsdatei von ESP32 Time Server',
     'Configuration file: the settings are missing': 'Konfigurationsdatei: die Einstellungen fehlen',
     'Request body nested too deeply or with too many values': 'Anfrage zu tief verschachtelt oder mit zu vielen Werten',
-    'The file is too large for a configuration file (at most 8 kB).': 'Die Datei ist zu groß für eine Konfigurationsdatei (höchstens 8 kB).',
+    'The file is too large for a configuration file (at most 12 kB).': 'Die Datei ist zu groß für eine Konfigurationsdatei (höchstens 12 kB).',
     'Configuration imported. The device restarts once with it: confirm the network settings within 120 s, then save them.':
       'Konfiguration importiert. Das Gerät startet einmal damit neu: die Netzwerkeinstellungen innerhalb von 120 s bestätigen und dann speichern.',
     'Configuration imported, not saved yet: confirm the network settings within 120 s, then save them.':
@@ -723,14 +764,7 @@
     'MAC address: 00:00:00:00:00:00 cannot be used': 'MAC-Adresse: 00:00:00:00:00:00 kann nicht verwendet werden',
     'MAC address: xx:xx:xx:xx:xx:xx (hexadecimal) expected': 'MAC-Adresse: xx:xx:xx:xx:xx:xx (hexadezimal) erwartet',
     'MQTT QoS: 0, 1 or 2': 'MQTT QoS: 0, 1 oder 2',
-    'MQTT broker URI is required when MQTT is on': 'Die MQTT-Broker-URI ist erforderlich, wenn MQTT an ist',
-    'MQTT broker URI is too long': 'Die MQTT-Broker-URI ist zu lang',
-    'MQTT broker URI must start with mqtt:// or mqtts://': 'Die MQTT-Broker-URI muss mit mqtt:// oder mqtts:// beginnen',
-    'MQTT broker URI: IPv6 address must be in brackets': 'MQTT-Broker-URI: Die IPv6-Adresse muss in eckigen Klammern stehen',
-    'MQTT broker URI: port 1 to 65535': 'MQTT-Broker-URI: Port 1 bis 65535',
-    'MQTT broker URI: scheme://host[:port] without user, path or spaces': 'MQTT-Broker-URI: scheme://host[:port] ohne Benutzer, Pfad oder Leerzeichen',
     'MQTT password: at most 64 printable ASCII characters': 'MQTT-Passwort: höchstens 64 druckbare ASCII-Zeichen',
-    'MQTT topic: 1 to 100 printable ASCII characters without spaces, \'+\' and \'#\'': 'MQTT-Topic: 1 bis 100 druckbare ASCII-Zeichen ohne Leerzeichen, \'+\' und \'#\'',
     'MQTT user name: at most 64 printable ASCII characters': 'MQTT-Benutzername: höchstens 64 druckbare ASCII-Zeichen',
     'NTP authentication needs at least one key': 'NTP-Authentifizierung braucht mindestens einen Schlüssel',
     'TF card pins: one of the GPIOs cannot be used': 'TF-Karten-Pins: Einer der GPIOs kann nicht verwendet werden',
@@ -776,15 +810,18 @@
     ['Serving time after the PPS loss: 0 (no limit) to %u minutes', 'Antwortzeit nach dem PPS-Ausfall: 0 (unbegrenzt) bis {1} Minuten'],
     ['Stratum after the holdover: 2 to 16', 'Stratum nach dem Holdover: 2 bis 16'],
     ['Root dispersion growth: 1 to %u ppm (0.001 to 10 ms per second)', 'Zunahme der Root Dispersion: 1 bis {1} ppm (0,001 bis 10 ms pro Sekunde)'],
-    ['MQTT reporting period: 30 to 86400 s', 'MQTT-Berichtsintervall: 30 bis 86400 s']
+    ['MQTT reporting period: 30 to 86400 s', 'MQTT-Berichtsintervall: 30 bis 86400 s'],
+    ['MQTT CA certificate: not a valid X.509 certificate in PEM (mbedTLS -0x%04x)', 'MQTT-CA-Zertifikat: kein gültiges X.509-Zertifikat in PEM (mbedTLS -0x{1})']
   ];
 
   // Texts that stay English on purpose (names, technical terms, examples): listed so that app.js does not report
   // them as missing
-  for (const text of ['ESP32 Time Server', 'UTC', 'Firmware', 'MQTT', 'MAC', 'Ethernet', 'IPv4', 'IPv6', 'RGB LED', 'Broker URI', 'NTP',
+  for (const text of ['ESP32 Time Server', 'UTC', 'Firmware', 'MQTT', 'MAC', 'Ethernet', 'IPv4', 'IPv6', 'RGB LED', 'NTP', 'TLS (mqtts)',
     'qErr', 'ADEV', 'TDEV',
     'Topic', 'CMD (GPIO)', 'CLK (GPIO)', 'D0 (GPIO)', 'D1 (GPIO)', 'D2 (GPIO)', 'D3 (GPIO)', 'KY-016', 'WS2812',
-    'CET-1CEST,M3.5.0,M10.5.0/3', '192.168.1.0/24 fd00::/8', '$CFGMSG,0,4,1', '0A 04']) {
+    'CET-1CEST,M3.5.0,M10.5.0/3', '192.168.1.0/24 fd00::/8', '$CFGMSG,0,4,1', '0A 04',
+    // MQTT placeholders
+    'mqtt.example.org', '-----BEGIN CERTIFICATE-----']) {
     if (!Object.prototype.hasOwnProperty.call(de, text)) de[text] = text;
   }
 

@@ -47,6 +47,15 @@ struct web_app_status_t
     bool led_active;
     bool mqtt_connected;
     bool mqtt_tf_queue;           // MQTT reports are queued on the TF card (QoS 1 or 2 and a usable FAT32 card)
+    bool mqtt_active;             // the MQTT client runs (with the broker below)
+    char mqtt_broker[WEB_FQDN_SIZE];
+    uint16_t mqtt_port;
+    bool mqtt_tls;
+    char mqtt_error[96];          // reason of the last failed connection ("" = none since the last connection)
+    int32_t mqtt_error_age_s;     // -1 = no error
+    int32_t mqtt_connected_s;     // connected for this long (-1 = not connected)
+    uint32_t mqtt_published;      // reports published since the start
+    int32_t mqtt_publish_age_s;   // age of the latest published report (-1 = none)
     char mac_address[WEB_MAC_TEXT_SIZE]; // MAC in use since the start
     bool link_up;                 // Ethernet link reported by the driver
     uint16_t link_speed_mbps;     // 10 or 100 (0 = no link)

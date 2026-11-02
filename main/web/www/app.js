@@ -442,7 +442,10 @@
       led_blue_pin: String(s.led_blue_pin),
       led_ws2812_pin: String(s.led_ws2812_pin),
       mqtt_enabled: s.mqtt_enabled,
-      mqtt_uri: s.mqtt_uri,
+      mqtt_broker: s.mqtt_broker || '',
+      mqtt_port: s.mqtt_port ? String(s.mqtt_port) : '',
+      mqtt_tls: s.mqtt_tls,
+      mqtt_ca_pem: s.mqtt_ca_pem || '',
       mqtt_username: s.mqtt_username,
       mqtt_topic: s.mqtt_topic,
       mqtt_qos: String(s.mqtt_qos),
@@ -508,6 +511,7 @@
       if (name === 'ptp_loopback_pin' && value === '') text = t('off');
       if (name === 'led_brightness') text += ' %';
       if (name === 'mqtt_report_period') text += ' s';
+      if (name === 'mqtt_port' && value === '') text = t('automatic (8883 with TLS, 1883 without)');
       if (name === 'pps_holdover' || name === 'gnss_min_fix_age') text = value === '0' ? t('off') : text + ' s';
       if (name === 'gnss_min_satellites' && value === '0') text = t('off');
       if (name === 'pps_lost_serve_min') text = value === '0' ? t('no limit') : text + ' min';
@@ -630,6 +634,59 @@
   }
 
   // An input error of a field: the message is shown and the panel of the field opened (revealField)
+  // An IPv4 or IPv6 address or a DNS name (RFC 1123 labels; the last label is not all digits)
+  function hostValid(host) {
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return host.split('.').every((p) => Number(p) <= 255 && !/^0\d/.test(p));
+    if (host.includes(':')) {
+      if (!/^[0-9A-Fa-f:.]+$/.test(host) || host.length > 45) return false;
+      try { new URL('http://[' + host + ']/'); return true; } catch (e) { return false; }
+    }
+    if (host.length > 253) return false;
+    const labels = host.replace(/\.$/, '').split('.');
+    return labels.every((l) => /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(l)) && !/^\d+$/.test(labels[labels.length - 1]);
+  }
+
+  // MQTT broker, port, topic and CA certificate (the checks of the firmware, web_settings_validate)
+  function collectMqttBroker(body) {
+    if (body.mqtt_ca_pem !== '') body.mqtt_ca_pem += '\n';
+    const port = f.mqtt_port.value.trim();
+    body.mqtt_port = port === '' ? 0 : Number(port);
+    if (!Number.isInteger(body.mqtt_port) || body.mqtt_port < 0 || body.mqtt_port > 65535) throw fieldError('mqtt_port', t('MQTT port: 1 to 65535, or empty'));
+    if (/\.local\.?$/i.test(body.mqtt_broker)) throw fieldError('mqtt_broker', t('MQTT broker: .local names (mDNS) are not supported; use an address or a DNS name'));
+    if (body.mqtt_broker !== '' && !hostValid(body.mqtt_broker)) throw fieldError('mqtt_broker', t('MQTT broker: a host name or an IPv4 or IPv6 address expected'));
+    if (body.mqtt_enabled && body.mqtt_broker === '') throw fieldError('mqtt_broker', t('MQTT broker: required while MQTT is on'));
+    if (body.mqtt_topic === '' || /[+#\x00-\x1f\x7f]/.test(body.mqtt_topic) || body.mqtt_topic[0] === '$' || body.mqtt_topic.endsWith('/')) {
+      throw fieldError('mqtt_topic', t('MQTT topic: 1 to 100 characters without +, #, control characters, a leading $ or a trailing /'));
+    }
+    if (body.mqtt_ca_pem !== '' && !/^(\s*-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----)+\s*$/.test(body.mqtt_ca_pem)) {
+      throw fieldError('mqtt_ca_pem', t('MQTT CA certificate: PEM with one or more BEGIN CERTIFICATE / END CERTIFICATE blocks expected'));
+    }
+    if (body.mqtt_enabled && body.mqtt_tls && body.mqtt_ca_pem === '') throw fieldError('mqtt_ca_pem', t('MQTT: TLS needs the CA certificate of the broker (PEM)'));
+  }
+
+  // Connection state of the MQTT client under Status
+  function renderMqtt(st) {
+    const el = $('st-mqtt');
+    if (!st.mqtt_active) {
+      el.textContent = state.settings.mqtt_enabled ? t('on after the next restart') : t('off');
+      el.className = '';
+      return;
+    }
+    const where = st.mqtt_broker + ':' + st.mqtt_port + (st.mqtt_tls ? ' (TLS)' : '');
+    if (st.mqtt_connected) {
+      el.textContent = t('connected to {where} for {time}; {n} reports published, the latest {age}', {
+        where: where, time: duration(st.mqtt_connected_s), n: st.mqtt_published,
+        age: st.mqtt_publish_age_s < 0 ? t('none yet') : t('{n} s ago', { n: st.mqtt_publish_age_s }) });
+      el.className = 'good';
+    } else {
+      el.textContent = st.mqtt_error
+        ? t('not connected to {where}: {error} ({age} s ago)', { where: where, error: ts(st.mqtt_error), age: st.mqtt_error_age_s })
+        : t('connecting to {where} …', { where: where });
+      el.className = st.mqtt_error ? 'bad' : '';
+    }
+    if (st.mqtt_tf_queue) el.textContent += '; ' + t('reports queued on the TF card');
+  }
+
   function fieldError(field, text) {
     const err = new Error(text);
     err.field = field;
@@ -682,7 +739,9 @@
       led_ws2812_pin: pin('led_ws2812_pin', 'WS2812 data pin'),
       led_colors: {},
       mqtt_enabled: f.mqtt_enabled.checked,
-      mqtt_uri: f.mqtt_uri.value.trim(),
+      mqtt_broker: f.mqtt_broker.value.trim(),
+      mqtt_tls: f.mqtt_tls.checked,
+      mqtt_ca_pem: f.mqtt_ca_pem.value.replace(/\r/g, '').trim(),
       mqtt_username: f.mqtt_username.value,
       mqtt_password: f.mqtt_password.value,
       mqtt_password_clear: f.mqtt_password_clear.checked,
@@ -769,6 +828,7 @@
     if (!Number.isInteger(body.mqtt_tf_client_limit) || body.mqtt_tf_client_limit < 50 || body.mqtt_tf_client_limit > 1000) {
       throw fieldError('mqtt_tf_client_limit', t('MQTT client limit with the TF card: 50 to 1000'));
     }
+    collectMqttBroker(body);
     // MAC: lower case with ':'; the hardware MAC is sent as "" (= hardware MAC)
     const mac = normaliseMac(f.mac_address.value);
     if (mac === null) throw fieldError('mac_address', t('MAC address: xx:xx:xx:xx:xx:xx, xx-xx-xx-xx-xx-xx, xxxx.xxxx.xxxx or xxxxxxxxxxxx (hexadecimal) expected'));
@@ -868,10 +928,7 @@
     $('ptp-chip').textContent = st.chip_revision;
     $('st-uptime').textContent = duration(st.uptime_s);
     $('st-heap').textContent = Math.round(st.free_heap / 1024) + ' kB';
-    const mqttState = st.mqtt_connected ? t('connected') : t('not connected');
-    $('st-mqtt').textContent = state.settings.mqtt_enabled
-      ? (st.mqtt_tf_queue ? t('{state}, reports queued on the TF card', { state: mqttState }) : mqttState)
-      : t('off');
+    renderMqtt(st);
     const link = $('st-link');
     link.textContent = st.link_up
       ? t('link up, {speed} Mbit/s {duplex} duplex', { speed: st.link_speed_mbps, duplex: st.link_full_duplex ? t('full') : t('half') })
@@ -1391,9 +1448,9 @@
     e.preventDefault();
     const file = $('config-file').files[0];
     if (!file) return;
-    // The device takes at most 8192 bytes; a larger file is not even read
-    if (file.size > 8192) {
-      show(t('The file is too large for a configuration file (at most 8 kB).'), 'error');
+    // The device takes at most 12288 bytes; a larger file is not even read
+    if (file.size > 12288) {
+      show(t('The file is too large for a configuration file (at most 12 kB).'), 'error');
       return;
     }
     let body;

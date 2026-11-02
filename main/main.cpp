@@ -102,7 +102,9 @@ extern "C"
 #include "esp_log.h"
 #include "ff.h"
 #include "esp_mac.h"
-#include "esp_crt_bundle.h"
+#include "esp_tls.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/x509_crt.h"
 #include "esp_heap_caps.h"
 #include "soc/emac_dma_struct.h"
 #include "soc/emac_mac_struct.h"
@@ -1756,12 +1758,32 @@ static std::atomic<bool> s_tf_queue_available{false};
 static sdmmc_card_t *s_tf_card = nullptr;
 static uint64_t s_tf_queue_next_sequence = 0;
 static std::atomic<uint32_t> s_ntp_most_requests_per_second{0};
-static char s_mqtt_uri[WEB_MQTT_URI_SIZE] = "";
 static char s_mqtt_report_topic[128] = "";
 static char s_mqtt_status_topic[128] = "";
 
 static void mqtt_publish_final_report();
 static void mqtt_enqueue_ntp_request(const struct sockaddr_storage &source_address);
+
+// Connection state for the status page: the reason of the last failed connection (cleared by a connection), when it
+// happened, since when the client is connected, the reports published and when the latest one was
+static portMUX_TYPE s_mqtt_status_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_mqtt_error[96] = "";
+static int64_t s_mqtt_error_us = 0;
+static int64_t s_mqtt_connected_us = 0;
+static uint32_t s_mqtt_published = 0;
+static int64_t s_mqtt_publish_us = 0;
+
+// ESP-IDF 6.1 keeps the verify flags of a failed handshake only when mbedtls_ssl_get_peer_cert() returns the broker
+// certificate, and it returns it only after a completed handshake: every refused certificate ended as a generic TLS
+// error. So the CA certificate of the settings is attached through the crt_bundle_attach hook of esp-tls, together
+// with a verify callback that keeps the flags (the same check: authmode required, the broker name by esp-tls). The
+// chain is parsed again for every connection, as esp-tls does with its own CA: with CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT
+// the handshake frees it after the server certificate. The hook, the callback and the error event run in the task of
+// the MQTT client (taken from ESP32-WebTherm, mqtt/mqtt_publisher.cpp).
+static const char *s_mqtt_ca_pem = nullptr; // CA certificate of the client's settings (PEM)
+static mbedtls_x509_crt s_mqtt_ca_chain;
+static bool s_mqtt_ca_chain_parsed = false;
+static uint32_t s_mqtt_verify_flags = 0;
 #endif
 
 static void controlled_restart(const char *reason);
@@ -7790,6 +7812,112 @@ static void mqtt_note_ethernet_disconnected()
         s_eth_link_up_total_us.fetch_add(esp_timer_get_time() - connected_since_us);
 }
 
+// The reason of a failed connection for the status page; the console gets it once, not at every retry
+static void mqtt_set_error(const char *text)
+{
+    bool changed = false;
+    taskENTER_CRITICAL(&s_mqtt_status_lock);
+    changed = strcmp(s_mqtt_error, text) != 0;
+    snprintf(s_mqtt_error, sizeof(s_mqtt_error), "%s", text);
+    s_mqtt_error_us = esp_timer_get_time();
+    taskEXIT_CRITICAL(&s_mqtt_status_lock);
+    if (changed)
+        ESP_LOGW(TAG, "MQTT: %s", text);
+}
+
+static void mqtt_report_error(const esp_mqtt_error_codes_t *e)
+{
+    if (e == nullptr)
+        return mqtt_set_error("Connection error");
+    if (e->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED)
+    {
+        switch (e->connect_return_code)
+        {
+        case MQTT_CONNECTION_REFUSE_BAD_USERNAME:
+            return mqtt_set_error("The broker refused the user name or password");
+        case MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED:
+            return mqtt_set_error("The broker refused the connection: not authorised");
+        case MQTT_CONNECTION_REFUSE_ID_REJECTED:
+            return mqtt_set_error("The broker refused the client ID");
+        case MQTT_CONNECTION_REFUSE_SERVER_UNAVAILABLE:
+            return mqtt_set_error("The broker is not available");
+        default:
+            return mqtt_set_error("The broker refused the connection (protocol)");
+        }
+    }
+    const uint32_t own_flags = s_mqtt_verify_flags;
+    s_mqtt_verify_flags = 0; // a later failure without a handshake (no TCP connection) must not report these again
+    const int flags = e->esp_tls_cert_verify_flags != 0 ? e->esp_tls_cert_verify_flags : static_cast<int>(own_flags);
+    if ((flags & MBEDTLS_X509_BADCERT_CN_MISMATCH) != 0)
+        return mqtt_set_error("The broker certificate does not match the broker name (name or IP SAN)");
+    if ((flags & MBEDTLS_X509_BADCERT_EXPIRED) != 0)
+        return mqtt_set_error("The broker certificate has expired");
+    if ((flags & MBEDTLS_X509_BADCERT_FUTURE) != 0)
+        return mqtt_set_error("The broker certificate is not valid yet (is the clock set?)");
+    if ((flags & MBEDTLS_X509_BADCERT_NOT_TRUSTED) != 0)
+        return mqtt_set_error("The broker certificate is not signed by the CA certificate of the settings");
+    if (flags != 0)
+        return mqtt_set_error("The broker certificate was refused");
+    switch (e->esp_tls_last_esp_err)
+    {
+    case ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME:
+        return mqtt_set_error("The broker name could not be resolved (DNS)");
+    case ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST:
+    case ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET:
+        return mqtt_set_error("No connection to the broker (address and port?)");
+    case ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT:
+        return mqtt_set_error("The connection to the broker timed out");
+    case ESP_OK:
+        break;
+    default:
+        return mqtt_set_error("TLS connection to the broker failed (TLS 1.2/1.3 and the certificate?)");
+    }
+    if (e->esp_transport_sock_errno != 0)
+        return mqtt_set_error("The connection to the broker was closed");
+    mqtt_set_error("Connection error");
+}
+
+static int mqtt_verify_callback(void *, mbedtls_x509_crt *, int, uint32_t *flags)
+{
+    s_mqtt_verify_flags |= *flags; // every certificate of the chain; the name check is in the flags of depth 0
+    return 0;
+}
+
+static void mqtt_free_ca_chain()
+{
+    if (s_mqtt_ca_chain_parsed)
+        mbedtls_x509_crt_free(&s_mqtt_ca_chain); // also right after the dynamic free of the handshake (zeroed then)
+    s_mqtt_ca_chain_parsed = false;
+}
+
+// Called by esp-tls for every connection, after it set authmode required (its return value is not checked: a CA that
+// cannot be read leaves no chain, and the handshake fails as not trusted; Apply checked the CA already)
+static esp_err_t mqtt_attach_ca(void *conf)
+{
+    mbedtls_ssl_config *ssl_conf = static_cast<mbedtls_ssl_config *>(conf);
+    s_mqtt_verify_flags = 0;
+    mqtt_free_ca_chain(); // the previous connection's ssl config is gone
+    mbedtls_x509_crt_init(&s_mqtt_ca_chain);
+    s_mqtt_ca_chain_parsed = true;
+    if (s_mqtt_ca_pem == nullptr ||
+        mbedtls_x509_crt_parse(&s_mqtt_ca_chain, reinterpret_cast<const unsigned char *>(s_mqtt_ca_pem), strlen(s_mqtt_ca_pem) + 1) != 0)
+    {
+        mqtt_free_ca_chain();
+        return ESP_FAIL;
+    }
+    mbedtls_ssl_conf_ca_chain(ssl_conf, &s_mqtt_ca_chain, nullptr);
+    mbedtls_ssl_conf_verify(ssl_conf, mqtt_verify_callback, nullptr);
+    return ESP_OK;
+}
+
+static void mqtt_note_published()
+{
+    taskENTER_CRITICAL(&s_mqtt_status_lock);
+    ++s_mqtt_published;
+    s_mqtt_publish_us = esp_timer_get_time();
+    taskEXIT_CRITICAL(&s_mqtt_status_lock);
+}
+
 static void mqtt_event_handler(void *arguments, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     (void)arguments;
@@ -7799,12 +7927,21 @@ static void mqtt_event_handler(void *arguments, esp_event_base_t base, int32_t e
         s_mqtt_connected.store(true);
         s_mqtt_has_connected.store(true);
         s_mqtt_disconnected_since_us.store(0);
+        taskENTER_CRITICAL(&s_mqtt_status_lock);
+        const bool had_error = s_mqtt_error[0] != '\0';
+        s_mqtt_error[0] = '\0';
+        s_mqtt_connected_us = esp_timer_get_time();
+        taskEXIT_CRITICAL(&s_mqtt_status_lock);
+        if (had_error)
+            ESP_LOGI(TAG, "MQTT: connected to the broker");
     }
     else if (event_id == MQTT_EVENT_DISCONNECTED || event_id == MQTT_EVENT_ERROR)
     {
         s_mqtt_connected.store(false);
         if (s_mqtt_has_connected.load() && s_mqtt_disconnected_since_us.load() == 0)
             s_mqtt_disconnected_since_us.store(esp_timer_get_time());
+        if (event_id == MQTT_EVENT_ERROR)
+            mqtt_report_error(event_data != nullptr ? static_cast<esp_mqtt_event_t *>(event_data)->error_handle : nullptr);
     }
     else if (event_id == MQTT_EVENT_PUBLISHED)
     {
@@ -7819,7 +7956,10 @@ static bool mqtt_publish_report(const char *payload)
     if (!s_mqtt_connected.load())
         return false;
 
-    return esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, s_mqtt_qos, s_mqtt_retain) >= 0;
+    const bool published = esp_mqtt_client_publish(s_mqtt_client, s_mqtt_report_topic, payload, 0, s_mqtt_qos, s_mqtt_retain) >= 0;
+    if (published)
+        mqtt_note_published();
+    return published;
 }
 
 static std::vector<std::string> mqtt_tf_queue_files()
@@ -8707,7 +8847,7 @@ static void setup_mqtt()
     if (s_mqtt_on)
     {
 
-        if (s_cfg->mqtt_uri[0] == '\0' || s_mqtt_payload == nullptr || s_mqtt_qos < 0 || s_mqtt_qos > 2)
+        if (s_cfg->mqtt_broker[0] == '\0' || s_mqtt_payload == nullptr || s_mqtt_qos < 0 || s_mqtt_qos > 2)
         {
             s_mqtt_setup_failed.store(true);
             return;
@@ -8720,16 +8860,26 @@ static void setup_mqtt()
             s_mqtt_setup_failed.store(true);
             return;
         }
-        snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "%s", s_cfg->mqtt_uri); // validated: mqtt:// or mqtts://, host and port
         snprintf(s_mqtt_report_topic, sizeof(s_mqtt_report_topic), "%s/report", s_cfg->mqtt_topic); // topic: at most 100 characters
         snprintf(s_mqtt_status_topic, sizeof(s_mqtt_status_topic), "%s/status", s_cfg->mqtt_topic);
 
         esp_mqtt_client_config_t config{};
-        config.broker.address.uri = s_mqtt_uri;
-        config.credentials.username = s_cfg->mqtt_username;
-        config.credentials.authentication.password = s_cfg->mqtt_password;
-        if (strncmp(s_mqtt_uri, "mqtts://", 8) == 0)
-            config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach; // broker certificate checked against the IDF CA bundle
+        config.broker.address.hostname = s_cfg->mqtt_broker; // validated: an IPv4 or IPv6 address or a DNS name
+        config.broker.address.port = web_mqtt_port_in_use(*s_cfg);
+        config.broker.address.transport = s_cfg->mqtt_tls ? MQTT_TRANSPORT_OVER_SSL : MQTT_TRANSPORT_OVER_TCP;
+        if (s_cfg->mqtt_tls)
+        {
+            // Always checked: the CA certificate of the settings (mqtt_attach_ca) and the broker name or IP address
+            // (common_name nullptr = the host name)
+            s_mqtt_ca_pem = s_cfg->mqtt_ca_pem;
+            config.broker.verification.crt_bundle_attach = mqtt_attach_ca;
+            config.broker.verification.skip_cert_common_name_check = false;
+        }
+        if (s_cfg->mqtt_username[0] != '\0')
+        {
+            config.credentials.username = s_cfg->mqtt_username;
+            config.credentials.authentication.password = s_cfg->mqtt_password[0] != '\0' ? s_cfg->mqtt_password : nullptr;
+        }
         config.session.keepalive = MQTTFrequencyOfKeepAliveRequest;
         config.session.last_will.topic = s_mqtt_status_topic;
         config.session.last_will.msg = "offline";
@@ -8751,9 +8901,12 @@ static void setup_mqtt()
         }
         if (esp_mqtt_client_start(s_mqtt_client) != ESP_OK)
         {
+            mqtt_set_error("The MQTT client could not be started");
             s_mqtt_setup_failed.store(true);
             return;
         }
+        ESP_LOGI(TAG, "MQTT: connecting to %s port %u%s", s_cfg->mqtt_broker, static_cast<unsigned>(web_mqtt_port_in_use(*s_cfg)),
+                 s_cfg->mqtt_tls ? " with TLS" : "");
 
 #if DEBUG_ENABLED
         ESP_LOGI(TAG, "MQTT setup. Keep alive set at %u seconds", MQTTFrequencyOfKeepAliveRequest);
@@ -11638,6 +11791,21 @@ void app_get_status(web_app_status_t &status)
     status.led_active = s_led_type != web_led_type_t::none;
     status.mqtt_connected = s_mqtt_on && s_mqtt_connected.load(std::memory_order_acquire);
     status.mqtt_tf_queue = s_mqtt_on && s_tf_queue_available.load(std::memory_order_acquire);
+    status.mqtt_active = s_mqtt_on;
+    if (s_mqtt_on)
+    {
+        snprintf(status.mqtt_broker, sizeof(status.mqtt_broker), "%s", s_cfg->mqtt_broker);
+        status.mqtt_port = web_mqtt_port_in_use(*s_cfg);
+        status.mqtt_tls = s_cfg->mqtt_tls;
+    }
+    const int64_t now_us = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_mqtt_status_lock);
+    memcpy(status.mqtt_error, s_mqtt_error, sizeof(status.mqtt_error));
+    status.mqtt_error_age_s = s_mqtt_error[0] == '\0' ? -1 : static_cast<int32_t>((now_us - s_mqtt_error_us) / 1000000);
+    status.mqtt_connected_s = status.mqtt_connected ? static_cast<int32_t>((now_us - s_mqtt_connected_us) / 1000000) : -1;
+    status.mqtt_published = s_mqtt_published;
+    status.mqtt_publish_age_s = s_mqtt_publish_us == 0 ? -1 : static_cast<int32_t>((now_us - s_mqtt_publish_us) / 1000000);
+    taskEXIT_CRITICAL(&s_mqtt_status_lock);
     snprintf(status.mac_address, sizeof(status.mac_address), "%s", MACToBeUsed.c_str());
     // Link state, speed and duplex as the driver reports them (ETH_CMD_G_* return its stored values, no PHY access)
     status.link_up = s_ethernet_connected.load(std::memory_order_acquire);

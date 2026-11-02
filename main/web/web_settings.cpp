@@ -47,10 +47,12 @@ namespace
     // 10: minimum satellites in use before stratum 1 appended at the end (versions 5 to 9 are still read the same way);
     // 11: address families and the address shown on the LCD appended at the end (versions 5 to 10 are still read the
     //     same way);
-    // 12: uptime / restart button appended at the end (versions 5 to 11 are still read the same way).
+    // 12: uptime / restart button appended at the end (versions 5 to 11 are still read the same way);
+    // 13: MQTT broker, port, TLS and CA certificate appended at the end in the place of the broker URI, whose bytes
+    //     stay in the layout (mqtt_uri_unused): the URI of versions 5 to 12 is read into the new fields.
     // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
     // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
-    constexpr uint32_t BLOB_VERSION = 12;
+    constexpr uint32_t BLOB_VERSION = 13;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
     constexpr uint32_t BLOB_VERSION_7 = 7;
@@ -58,6 +60,7 @@ namespace
     constexpr uint32_t BLOB_VERSION_9 = 9;
     constexpr uint32_t BLOB_VERSION_10 = 10;
     constexpr uint32_t BLOB_VERSION_11 = 11;
+    constexpr uint32_t BLOB_VERSION_12 = 12;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -71,13 +74,14 @@ namespace
     constexpr size_t SETTINGS_SIZE_9 = settings_size_before(offsetof(web_settings_t, gnss_min_satellites));
     constexpr size_t SETTINGS_SIZE_10 = settings_size_before(offsetof(web_settings_t, ip_mode));
     constexpr size_t SETTINGS_SIZE_11 = settings_size_before(offsetof(web_settings_t, button_enabled));
+    constexpr size_t SETTINGS_SIZE_12 = settings_size_before(offsetof(web_settings_t, mqtt_broker));
     // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 12 may fit into that of the
     // version before: the version number tells them apart, and an older set always gets the defaults for the newer
     // fields instead of its padding bytes
     static_assert(SETTINGS_SIZE_5 <= SETTINGS_SIZE_6 && SETTINGS_SIZE_6 <= SETTINGS_SIZE_7 &&
                       SETTINGS_SIZE_7 <= SETTINGS_SIZE_8 && SETTINGS_SIZE_8 <= SETTINGS_SIZE_9 &&
                       SETTINGS_SIZE_9 <= SETTINGS_SIZE_10 && SETTINGS_SIZE_10 <= SETTINGS_SIZE_11 &&
-                      SETTINGS_SIZE_11 <= sizeof(web_settings_t),
+                      SETTINGS_SIZE_11 <= SETTINGS_SIZE_12 && SETTINGS_SIZE_12 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
     // Defaults of the fields that later blob versions appended (web_settings_defaults() uses them as well)
@@ -91,6 +95,7 @@ namespace
     constexpr uint8_t DEFAULT_GNSS_MIN_SATELLITES = 0;
     constexpr bool DEFAULT_BUTTON_ENABLED = false;
     constexpr int8_t DEFAULT_BUTTON_PIN = 3;
+    constexpr char DEFAULT_MQTT_TOPIC[] = "ESP32TimeServer";
 
     struct settings_blob_t
     {
@@ -127,7 +132,42 @@ namespace
         return false;
     }
 
-    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 11) and passes the CRC.
+    // Broker URI of versions 5 to 12 ("mqtt://host[:port]" or "mqtts://host[:port]", an IPv6 address in brackets)
+    // into broker, port and TLS. A URI that does not fit the checks of version 13 leaves the broker empty and MQTT
+    // off, and so does TLS (the URI was checked against the IDF CA bundle, version 13 needs the CA certificate of the
+    // broker): a saved set must stay valid, or every setting would fall back to its default.
+    void read_mqtt_uri(web_settings_t &s, const char *key)
+    {
+        char uri[WEB_MQTT_URI_SIZE];
+        memcpy(uri, s.mqtt_uri_unused, sizeof(uri));
+        uri[sizeof(uri) - 1] = '\0';
+        memset(s.mqtt_uri_unused, 0, sizeof(s.mqtt_uri_unused));
+        memset(s.mqtt_ca_pem, 0, sizeof(s.mqtt_ca_pem));
+        if (uri[0] == '\0')
+        {
+            memset(s.mqtt_broker, 0, sizeof(s.mqtt_broker));
+            s.mqtt_port = 0;
+            s.mqtt_tls = false;
+            s.mqtt_enabled = false; // the URI was required while MQTT is on
+            return;
+        }
+        if (!web_mqtt_split_uri(uri, s))
+        {
+            ESP_LOGW(TAG, "Stored web settings '%s': the MQTT broker URI %s does not fit the broker field, MQTT is off", key, uri);
+            s.mqtt_enabled = false;
+            return;
+        }
+        if (s.mqtt_tls && s.mqtt_enabled)
+        {
+            ESP_LOGW(TAG, "Stored web settings '%s': MQTT with TLS needs the CA certificate of the broker now, MQTT is off "
+                          "until it is set on the web page", key);
+            s.mqtt_enabled = false;
+        }
+        ESP_LOGI(TAG, "Stored web settings '%s': MQTT broker URI %s read as broker %s, port %u, %s", key, uri, s.mqtt_broker,
+                 static_cast<unsigned>(web_mqtt_port_in_use(s)), s.mqtt_tls ? "TLS" : "no TLS");
+    }
+
+    // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 12) and passes the CRC.
     // *had_ote_fields (optional): the stored set still held the former OTE device name or password (zeroed in blob)
     bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob, bool *had_ote_fields = nullptr)
     {
@@ -166,6 +206,7 @@ namespace
         const bool version_9 = header.version == BLOB_VERSION_9 && header.size == SETTINGS_SIZE_9;
         const bool version_10 = header.version == BLOB_VERSION_10 && header.size == SETTINGS_SIZE_10;
         const bool version_11 = header.version == BLOB_VERSION_11 && header.size == SETTINGS_SIZE_11;
+        const bool version_12 = header.version == BLOB_VERSION_12 && header.size == SETTINGS_SIZE_12;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
@@ -177,10 +218,11 @@ namespace
                                length != HEADER_SIZE + SETTINGS_SIZE_8 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_9 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_10 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_11 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_11 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_12 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
         else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9 && !version_10 &&
-                                                   !version_11) ||
+                                                   !version_11 && !version_12) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -239,11 +281,23 @@ namespace
                 // Appended in version 12
                 blob.settings.button_enabled = DEFAULT_BUTTON_ENABLED;
                 blob.settings.button_pin = DEFAULT_BUTTON_PIN;
-                blob.version = BLOB_VERSION;
-                blob.size = sizeof(web_settings_t);
                 if (version_11)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 11 read; the uptime / restart button has its default", key);
             }
+            if (!current)
+            {
+                // Version 13: the broker URI into broker, port and TLS; the topic rule is stricter now (no leading $,
+                // no trailing /)
+                read_mqtt_uri(blob.settings, key);
+                if (!web_mqtt_topic_valid(blob.settings.mqtt_topic))
+                {
+                    ESP_LOGW(TAG, "Stored web settings '%s': the MQTT topic does not fit the topic rules, the default is used", key);
+                    copy_text(blob.settings.mqtt_topic, DEFAULT_MQTT_TOPIC);
+                }
+                blob.version = BLOB_VERSION;
+                blob.size = sizeof(web_settings_t);
+            }
+            memset(blob.settings.mqtt_uri_unused, 0, sizeof(blob.settings.mqtt_uri_unused));
             // A set that used the keys of the former ESP32TimeServerSettingsSecrets.h: they no longer exist. NTP
             // authentication without a key would make the whole set invalid, so it is switched off.
             if (!blob.settings.ntp_key_override)
@@ -272,27 +326,35 @@ namespace
             return false;
         // Text fields are always terminated (the CRC covers them, this only protects against a firmware bug)
         blob.settings.fqdn[WEB_FQDN_SIZE - 1] = '\0';
+        blob.settings.mqtt_broker[WEB_FQDN_SIZE - 1] = '\0';
+        blob.settings.mqtt_ca_pem[WEB_MQTT_CA_SIZE - 1] = '\0';
         return true;
     }
 
     esp_err_t write_blob(const char *key, const web_settings_t &settings, uint32_t flags)
     {
-        settings_blob_t blob{};
-        blob.magic = BLOB_MAGIC;
-        blob.version = BLOB_VERSION;
-        blob.size = sizeof(web_settings_t);
-        blob.flags = flags;
-        blob.settings = settings;
-        blob.crc = blob_crc(blob);
+        // About 5.5 kB with the CA certificate: on the heap, not on the stack of the web server task
+        settings_blob_t *blob = static_cast<settings_blob_t *>(calloc(1, sizeof(settings_blob_t)));
+        if (blob == nullptr)
+            return ESP_ERR_NO_MEM;
+        blob->magic = BLOB_MAGIC;
+        blob->version = BLOB_VERSION;
+        blob->size = sizeof(web_settings_t);
+        blob->flags = flags;
+        blob->settings = settings;
+        blob->crc = blob_crc(*blob);
 
         nvs_handle_t handle = 0;
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
-        if (err != ESP_OK)
-            return err;
-        err = nvs_set_blob(handle, key, &blob, sizeof(blob));
         if (err == ESP_OK)
-            err = nvs_commit(handle);
-        nvs_close(handle);
+        {
+            err = nvs_set_blob(handle, key, blob, sizeof(settings_blob_t));
+            if (err == ESP_OK)
+                err = nvs_commit(handle);
+            nvs_close(handle);
+        }
+        memset(blob, 0, sizeof(settings_blob_t)); // contains secrets
+        free(blob);
         return err;
     }
 
@@ -508,6 +570,151 @@ bool web_hardware_mac(char (&out)[WEB_MAC_TEXT_SIZE])
     return true;
 }
 
+bool web_mqtt_is_mdns_name(const char *host)
+{
+    const size_t length = strlen(host);
+    const size_t end = length > 0 && host[length - 1] == '.' ? length - 1 : length;
+    return end >= 6 && strncasecmp(host + end - 6, ".local", 6) == 0;
+}
+
+bool web_mqtt_host_valid(const char *host)
+{
+    if (host == nullptr || host[0] == '\0')
+        return false;
+    uint8_t v6[16];
+    if (web_parse_ipv4(host, nullptr) || web_parse_ipv6(host, v6))
+        return true;
+    // DNS name (RFC 1123 labels, an optional final dot)
+    const size_t length = strlen(host);
+    if (length > 253)
+        return false;
+    size_t label = 0;
+    bool all_digits_last = true;
+    for (size_t i = 0; i < length; ++i)
+    {
+        const char c = host[i];
+        if (c == '.')
+        {
+            if (label == 0 || host[i - 1] == '-')
+                return false;
+            label = 0;
+            continue;
+        }
+        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        const bool digit = c >= '0' && c <= '9';
+        if (!letter && !digit && c != '-')
+            return false;
+        if (c == '-' && label == 0)
+            return false;
+        if (label == 0)
+            all_digits_last = true;
+        all_digits_last = all_digits_last && digit;
+        if (++label > 63)
+            return false;
+    }
+    if (label > 0 && host[length - 1] == '-')
+        return false;
+    // The last label (top-level domain) is not all digits: "1.2.3.400" is a wrong address, not a name
+    return !all_digits_last;
+}
+
+bool web_mqtt_split_uri(const char *uri, web_settings_t &s)
+{
+    memset(s.mqtt_broker, 0, sizeof(s.mqtt_broker));
+    s.mqtt_port = 0;
+    s.mqtt_tls = false;
+    const char *host = nullptr;
+    if (strncmp(uri, "mqtt://", 7) == 0)
+        host = uri + 7;
+    else if (strncmp(uri, "mqtts://", 8) == 0)
+    {
+        host = uri + 8;
+        s.mqtt_tls = true;
+    }
+    else
+        return false;
+    const char *host_end = nullptr;
+    const char *port = nullptr;
+    if (host[0] == '[')
+    {
+        ++host;
+        host_end = strchr(host, ']');
+        if (host_end != nullptr && host_end[1] == ':')
+            port = host_end + 2;
+        else if (host_end != nullptr && host_end[1] != '\0')
+            host_end = nullptr;
+    }
+    else
+    {
+        port = strrchr(host, ':');
+        host_end = port != nullptr ? port++ : host + strlen(host);
+    }
+    long port_value = 0;
+    if (port != nullptr)
+    {
+        char *end = nullptr;
+        port_value = strtol(port, &end, 10);
+        if (end == port || *end != '\0' || port_value < 1 || port_value > 65535)
+            host_end = nullptr;
+    }
+    const size_t host_length = host_end != nullptr ? static_cast<size_t>(host_end - host) : 0;
+    if (host_length > 0 && host_length < sizeof(s.mqtt_broker))
+    {
+        memcpy(s.mqtt_broker, host, host_length);
+        s.mqtt_broker[host_length] = '\0';
+    }
+    if (s.mqtt_broker[0] == '\0' || !web_mqtt_host_valid(s.mqtt_broker) || web_mqtt_is_mdns_name(s.mqtt_broker))
+    {
+        memset(s.mqtt_broker, 0, sizeof(s.mqtt_broker));
+        s.mqtt_tls = false;
+        return false;
+    }
+    s.mqtt_port = static_cast<uint16_t>(port_value);
+    return true;
+}
+
+bool web_mqtt_topic_valid(const char *topic)
+{
+    const size_t length = strnlen(topic, WEB_MQTT_TOPIC_SIZE);
+    if (length == 0 || length > WEB_MQTT_TOPIC_SIZE - 1 || topic[0] == '$' || topic[length - 1] == '/')
+        return false;
+    for (const char *c = topic; *c != '\0'; ++c)
+        if (*c == '+' || *c == '#' || static_cast<unsigned char>(*c) < 0x20 || *c == 0x7f)
+            return false;
+    return true;
+}
+
+bool web_pem_certificates_valid(const char *pem)
+{
+    static const char BEGIN[] = "-----BEGIN CERTIFICATE-----";
+    static const char END[] = "-----END CERTIFICATE-----";
+    const char *p = pem;
+    size_t blocks = 0;
+    for (;;)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+            ++p;
+        if (*p == '\0')
+            return blocks > 0;
+        if (strncmp(p, BEGIN, sizeof(BEGIN) - 1) != 0)
+            return false;
+        p += sizeof(BEGIN) - 1;
+        size_t characters = 0;
+        while (strncmp(p, END, sizeof(END) - 1) != 0)
+        {
+            const char c = *p++;
+            const bool base64 = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+            if (c == '\0' || (!base64 && c != '\r' && c != '\n' && c != ' ' && c != '\t'))
+                return false;
+            characters += base64 ? 1 : 0;
+        }
+        if (characters < 64)
+            return false;
+        p += sizeof(END) - 1;
+        ++blocks;
+    }
+}
+
 bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length)
 {
     volatile uint8_t difference = 0;
@@ -518,7 +725,7 @@ bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length)
 
 void web_settings_defaults(web_settings_t &out)
 {
-    out = web_settings_t{};
+    memset(&out, 0, sizeof(out)); // no temporary: about 5.5 kB
 
     // ---- Network: DHCP and SLAAC, both address families, the DNS servers they bring, the hardware MAC ----
     // The FQDN is the host name of the DHCP request and mDNS (<name>.local) and the name of the certificate
@@ -594,9 +801,12 @@ void web_settings_defaults(web_settings_t &out)
     out.led_rgb[static_cast<size_t>(web_led_state_t::critical)] = 0xFF0000; // red
     out.led_rgb[static_cast<size_t>(web_led_state_t::button)] = 0xFFC0CB;   // pink
 
-    // ---- MQTT (off; no broker) and the TF card slot of the Waveshare ESP32-P4 Ethernet boards ----
+    // ---- MQTT (off; no broker, port 0 = 8883 with TLS, 1883 without) and the TF card slot of the Waveshare ESP32-P4
+    // Ethernet boards ----
     out.mqtt_enabled = false;
-    copy_text(out.mqtt_topic, "ESP32TimeServer");
+    out.mqtt_port = 0;
+    out.mqtt_tls = false;
+    copy_text(out.mqtt_topic, DEFAULT_MQTT_TOPIC);
     out.mqtt_qos = 0;
     out.mqtt_retain = true;
     out.mqtt_report_period_s = 900;
@@ -627,7 +837,7 @@ void web_settings_load_boot()
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err == ESP_OK)
     {
-        static settings_blob_t blob; // static: about 1 kB, the caller (app_main) has a small stack
+        static settings_blob_t blob; // static: about 5.5 kB, the caller (app_main) has a small stack
         char error[96] = "";
         bool had_ote_fields = false;
         if (read_blob(handle, NVS_KEY_SAVED, blob, &had_ote_fields))
@@ -1006,42 +1216,26 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
 
     // ---- MQTT ----
     {
-        const size_t length = strnlen(s.mqtt_uri, WEB_MQTT_URI_SIZE);
-        if (length >= WEB_MQTT_URI_SIZE)
-            FAIL("MQTT broker URI is too long");
-        if (s.mqtt_enabled && length == 0)
-            FAIL("MQTT broker URI is required when MQTT is on");
-        if (length > 0)
-        {
-            const char *host = nullptr;
-            if (strncmp(s.mqtt_uri, "mqtt://", 7) == 0)
-                host = s.mqtt_uri + 7;
-            else if (strncmp(s.mqtt_uri, "mqtts://", 8) == 0)
-                host = s.mqtt_uri + 8;
-            else
-                FAIL("MQTT broker URI must start with mqtt:// or mqtts://");
-            if (!is_printable_ascii(s.mqtt_uri, 0x21, 0x7E) || strpbrk(host, "@/?#\"'<>\\`") != nullptr || host[0] == '\0' || host[0] == ':')
-                FAIL("MQTT broker URI: scheme://host[:port] without user, path or spaces");
-            const char *port = host[0] == '[' ? strstr(host, "]:") : strrchr(host, ':');
-            if (host[0] == '[' && strchr(host, ']') == nullptr)
-                FAIL("MQTT broker URI: IPv6 address must be in brackets");
-            if (port != nullptr)
-            {
-                port += host[0] == '[' ? 2 : 1;
-                char *end = nullptr;
-                const long value = strtol(port, &end, 10);
-                if (end == port || *end != '\0' || value < 1 || value > 65535)
-                    FAIL("MQTT broker URI: port 1 to 65535");
-            }
-        }
-        if (strnlen(s.mqtt_username, WEB_MQTT_CREDENTIAL_SIZE) >= WEB_MQTT_CREDENTIAL_SIZE || !is_printable_ascii(s.mqtt_username, 0x20, 0x7E))
+        if (memchr(s.mqtt_broker, '\0', sizeof(s.mqtt_broker)) == nullptr || memchr(s.mqtt_ca_pem, '\0', sizeof(s.mqtt_ca_pem)) == nullptr ||
+            memchr(s.mqtt_topic, '\0', sizeof(s.mqtt_topic)) == nullptr || memchr(s.mqtt_username, '\0', sizeof(s.mqtt_username)) == nullptr ||
+            memchr(s.mqtt_password, '\0', sizeof(s.mqtt_password)) == nullptr)
+            FAIL("MQTT: text is not terminated");
+        if (s.mqtt_broker[0] != '\0' && !web_mqtt_host_valid(s.mqtt_broker))
+            FAIL("MQTT broker: a host name or an IPv4 or IPv6 address expected");
+        if (web_mqtt_is_mdns_name(s.mqtt_broker))
+            FAIL("MQTT broker: .local names (mDNS) are not supported; use an address or a DNS name");
+        if (s.mqtt_enabled && s.mqtt_broker[0] == '\0')
+            FAIL("MQTT broker: required while MQTT is on");
+        if (!web_mqtt_topic_valid(s.mqtt_topic))
+            FAIL("MQTT topic: 1 to 100 characters without +, #, control characters, a leading $ or a trailing /");
+        if (!is_printable_ascii(s.mqtt_username, 0x20, 0x7E))
             FAIL("MQTT user name: at most 64 printable ASCII characters");
-        if (strnlen(s.mqtt_password, WEB_MQTT_CREDENTIAL_SIZE) >= WEB_MQTT_CREDENTIAL_SIZE || !is_printable_ascii(s.mqtt_password, 0x20, 0x7E))
+        if (!is_printable_ascii(s.mqtt_password, 0x20, 0x7E))
             FAIL("MQTT password: at most 64 printable ASCII characters");
-        const size_t topic_length = strnlen(s.mqtt_topic, WEB_MQTT_TOPIC_SIZE);
-        if (topic_length == 0 || topic_length >= WEB_MQTT_TOPIC_SIZE || !is_printable_ascii(s.mqtt_topic, 0x21, 0x7E) ||
-            strpbrk(s.mqtt_topic, "+#") != nullptr)
-            FAIL("MQTT topic: 1 to 100 printable ASCII characters without spaces, '+' and '#'");
+        if (s.mqtt_ca_pem[0] != '\0' && !web_pem_certificates_valid(s.mqtt_ca_pem))
+            FAIL("MQTT CA certificate: PEM with one or more BEGIN CERTIFICATE / END CERTIFICATE blocks expected");
+        if (s.mqtt_enabled && s.mqtt_tls && s.mqtt_ca_pem[0] == '\0')
+            FAIL("MQTT: TLS needs the CA certificate of the broker (PEM)");
         if (s.mqtt_qos > 2)
             FAIL("MQTT QoS: 0, 1 or 2");
         if (s.mqtt_report_period_s < 30 || s.mqtt_report_period_s > 86400)
@@ -1106,7 +1300,8 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            a.mqtt_report_period_s != b.mqtt_report_period_s || a.mqtt_client_reporting != b.mqtt_client_reporting ||
            a.mqtt_memory_reporting != b.mqtt_memory_reporting || a.mqtt_historical_reporting != b.mqtt_historical_reporting ||
            a.mqtt_distinguish_auth != b.mqtt_distinguish_auth || a.mqtt_tf_client_limit != b.mqtt_tf_client_limit ||
-           a.mqtt_enabled != b.mqtt_enabled || strcmp(a.mqtt_uri, b.mqtt_uri) != 0 ||
+           a.mqtt_enabled != b.mqtt_enabled || strcmp(a.mqtt_broker, b.mqtt_broker) != 0 || a.mqtt_port != b.mqtt_port ||
+           a.mqtt_tls != b.mqtt_tls || strcmp(a.mqtt_ca_pem, b.mqtt_ca_pem) != 0 ||
            strcmp(a.mqtt_username, b.mqtt_username) != 0 ||
            !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.mqtt_password),
                                     reinterpret_cast<const uint8_t *>(b.mqtt_password), WEB_MQTT_CREDENTIAL_SIZE) ||
