@@ -668,8 +668,9 @@
   function renderMqtt(st) {
     const el = $('st-mqtt');
     if (!st.mqtt_active) {
-      el.textContent = state.settings.mqtt_enabled ? t('on after the next restart') : t('off');
-      el.className = '';
+      // On, but the client did not start (memory): the reason; otherwise off
+      el.textContent = state.settings.mqtt_enabled && st.mqtt_error ? t('off: {error}', { error: ts(st.mqtt_error) }) : t('off');
+      el.className = state.settings.mqtt_enabled && st.mqtt_error ? 'bad' : '';
       return;
     }
     const where = st.mqtt_broker + ':' + st.mqtt_port + (st.mqtt_tls ? ' (TLS)' : '');

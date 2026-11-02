@@ -148,13 +148,19 @@ static const char *TAG = "main_cpp";
 // the mutex protected buffer below by app_apply_live_settings().
 static const web_settings_t *s_cfg = nullptr;
 static bool s_lcd_on = false;                         // LCD enabled for this boot
-static bool s_mqtt_on = false;                        // MQTT enabled for this boot (fixed after the start)
-static int s_mqtt_qos = 0;                            // MQTT QoS of this boot (0, 1 or 2)
-static int s_mqtt_retain = 1;                         // the broker retains the latest report
-static bool s_mqtt_client_reporting = false;          // MQTT report contents of this boot
-static bool s_mqtt_memory_reporting = false;
-static bool s_mqtt_historical_reporting = false;
-static bool s_mqtt_distinguish_auth = false;
+// MQTT settings take effect at once: the MQTT service task applies them (mqtt_apply_settings) and sets these
+static std::atomic<bool> s_mqtt_on{false};                  // MQTT client and report buffers set up
+static std::atomic<int> s_mqtt_qos{0};                      // MQTT QoS (0, 1 or 2)
+static std::atomic<int> s_mqtt_retain{1};                   // the broker retains the latest report
+static std::atomic<bool> s_mqtt_client_reporting{false};    // MQTT report contents
+static std::atomic<bool> s_mqtt_memory_reporting{false};
+static std::atomic<bool> s_mqtt_historical_reporting{false};
+static std::atomic<bool> s_mqtt_distinguish_auth{false};
+// The NTP and PPS paths count for the reports only while MQTT is on
+static inline bool mqtt_on()
+{
+    return s_mqtt_on.load(std::memory_order_relaxed);
+}
 static bool s_ote_on = false;                         // Over The Ethernet updates enabled for this boot
 static bool s_gnss_ublox = true;                      // GNSS protocol of this boot: true = u-blox UBX, false = NMEA
 static bool s_button_on = false;                      // uptime / restart button used in this boot
@@ -281,7 +287,7 @@ static constexpr size_t GNSS_Time_Sync_Task_Stack_Size = 2642;
 static constexpr size_t Hardware_NTP_Server_Task_Stack_Size = 2285;
 static constexpr size_t LED_LCD_Button_Task_Stack_Size = 3217;
 static constexpr size_t Ethernet_Setup_Task_Stack_Size = 4096;
-static constexpr size_t MQTT_Service_Task_Stack_Size = 3512;
+static constexpr size_t MQTT_Service_Task_Stack_Size = 6144; // was 3512: the task now (re)configures the client and mounts the TF card (measure again)
 static constexpr size_t NTP_Cache_Purge_Task_Stack_Size = 2247;
 static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
 static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
@@ -1745,7 +1751,7 @@ static size_t s_mqtt_client_count = 0;
 #endif
 
 static int64_t s_mqtt_last_link_up_us = 0;
-// The report buffers (about 76 kB) are allocated by setup_mqtt() only when MQTT is on for this boot
+// The report buffers (up to about 76 kB) are allocated by the MQTT service task while MQTT is on
 static mqtt_report_t *s_mqtt_reports = nullptr;        // [MQTT_REPORT_QUEUE_DEPTH]
 static char *s_mqtt_payload = nullptr;                 // [s_mqtt_payload_size]
 static size_t s_mqtt_payload_size = 0;
@@ -1753,7 +1759,8 @@ static char *s_mqtt_final_payload = nullptr;           // [MQTT_REPORT_SIZE]
 static size_t s_mqtt_report_head = 0;
 static std::atomic<size_t> s_mqtt_queued_messages_count{0};
 static uint32_t s_mqtt_queued_messages_discarded = 0;
-static mqtt_client_request_t *s_mqtt_clients = nullptr; // [s_cfg->mqtt_tf_client_limit], only with client reporting
+static mqtt_client_request_t *s_mqtt_clients = nullptr; // [s_mqtt_clients_size], only with client reporting
+static size_t s_mqtt_clients_size = 0;
 static std::atomic<bool> s_tf_queue_available{false};
 static sdmmc_card_t *s_tf_card = nullptr;
 static uint64_t s_tf_queue_next_sequence = 0;
@@ -1782,6 +1789,40 @@ static int64_t s_mqtt_publish_us = 0;
 // the MQTT client (taken from ESP32-WebTherm, mqtt/mqtt_publisher.cpp).
 static const char *s_mqtt_ca_pem = nullptr; // CA certificate of the client's settings (PEM)
 static mbedtls_x509_crt s_mqtt_ca_chain;
+
+// MQTT settings in use (the client keeps pointers to these texts; only the service task changes them) and the ones
+// handed over by the web admin (app_apply_live_settings). Both are allocated the first time MQTT is switched on.
+struct mqtt_config_t
+{
+    bool enabled;
+    char broker[WEB_FQDN_SIZE];
+    uint16_t port; // in use: 8883 / 1883 for the setting 0
+    bool tls;
+    char ca_pem[WEB_MQTT_CA_SIZE];
+    char username[WEB_MQTT_CREDENTIAL_SIZE];
+    char password[WEB_MQTT_CREDENTIAL_SIZE];
+    char topic[WEB_MQTT_TOPIC_SIZE];
+    uint8_t qos;
+    bool retain;
+    uint32_t report_period_s;
+    bool client_reporting;
+    bool memory_reporting;
+    bool historical_reporting;
+    bool distinguish_auth;
+    uint16_t tf_client_limit;
+};
+static mqtt_config_t *s_mqtt_active = nullptr;
+static mqtt_config_t *s_mqtt_wanted = nullptr; // s_mqtt_wanted_mutex
+static SemaphoreHandle_t s_mqtt_wanted_mutex = nullptr;
+static std::atomic<bool> s_mqtt_wanted_changed{false};
+static SemaphoreHandle_t s_mqtt_client_mutex = nullptr; // s_mqtt_client and the topics: changed by the service task, used by controlled_restart()
+static TaskHandle_t s_mqtt_service_task_handle = nullptr;
+static bool s_mqtt_service_allowed = false; // the network is set up (setup_mqtt): the service task may start
+static bool s_tf_mount_tried = false;
+// Broker of the client for the status page (s_mqtt_status_lock)
+static char s_mqtt_status_broker[WEB_FQDN_SIZE] = "";
+static uint16_t s_mqtt_status_port = 0;
+static bool s_mqtt_status_tls = false;
 static bool s_mqtt_ca_chain_parsed = false;
 static uint32_t s_mqtt_verify_flags = 0;
 #endif
@@ -3613,7 +3654,7 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     if (authentication_result != ntp_auth_result_t::unauthenticated && authentication_result != ntp_auth_result_t::valid)
     {
 #if MQTT_ENABLED
-        if (s_mqtt_on)
+        if (mqtt_on())
         {
             s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
             if (version == 4)
@@ -3665,7 +3706,7 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
 
     const uint64_t receive_time = ntp64_from_hardware_timestamp(receive_timestamp);
 #if MQTT_ENABLED
-    if (s_mqtt_on)
+    if (mqtt_on())
     {
         struct sockaddr_storage source_address{};
         if (ipv6)
@@ -3699,7 +3740,7 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         return ESP_OK;
     }
 #if MQTT_ENABLED
-    if (s_mqtt_on)
+    if (mqtt_on())
     {
         if (status.gnss_synchronized && status.pps_disciplined)
             s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
@@ -3837,7 +3878,7 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
         s_last_hardware_ntp_response_us.store(response_us);
         s_last_ntp_response_us.store(response_us);
 #if MQTT_ENABLED
-        if (s_mqtt_on)
+        if (mqtt_on())
         {
             s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
         }
@@ -3901,7 +3942,7 @@ static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uin
     }
 
 #if MQTT_ENABLED
-    if (s_mqtt_on)
+    if (mqtt_on())
     {
         s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
     }
@@ -4249,7 +4290,7 @@ static void ethernet_transport_recovery_task(void *parameter)
             link_missing_since_us = now_us;
         bool mqtt_unavailable = false;
 #if MQTT_ENABLED
-        if (s_mqtt_on)
+        if (mqtt_on())
         {
             mqtt_unavailable = s_mqtt_has_connected.load(std::memory_order_relaxed) &&
                                !s_mqtt_connected.load(std::memory_order_relaxed);
@@ -5395,7 +5436,7 @@ static bool wait_for_pps_capture_event(PpsCaptureEvent *event, TickType_t timeou
 static void finish_ntp_request_rate_second()
 {
 #if MQTT_ENABLED
-    if (s_mqtt_on)
+    if (mqtt_on())
     {
         const uint32_t requests_this_second = s_ntp_requests_this_second.exchange(0, std::memory_order_relaxed);
         uint32_t most_requests_per_second = s_ntp_most_requests_per_second.load(std::memory_order_relaxed);
@@ -6697,7 +6738,7 @@ static void pps_discipline_task(void *parameter)
             last_pps_us = edge_us;
             s_pps_discipline_active.store(true);
 #if MQTT_ENABLED
-            if (s_mqtt_on)
+            if (mqtt_on())
             {
                 s_pps_pulses.fetch_add(1);
             }
@@ -7233,7 +7274,7 @@ static void setup_gnss_ublox_receiver()
 static void gnss_note_satellites(uint8_t count)
 {
 #if MQTT_ENABLED
-    if (s_mqtt_on)
+    if (mqtt_on())
         mqtt_note_satellite_count(count);
 #else
     (void)count;
@@ -7735,7 +7776,7 @@ static void format_time_to_ISO8601(time_t value, char *output, size_t output_siz
 
 static void mqtt_enqueue_ntp_request(const struct sockaddr_storage &source_address)
 {
-    if (!s_mqtt_client_reporting) // the events only feed the client table
+    if (!s_mqtt_client_reporting.load(std::memory_order_relaxed)) // the events only feed the client table
         return;
     if (ntp_load_shedding_active() || s_mqtt_ntp_event_queue == nullptr ||
         xQueueSend(s_mqtt_ntp_event_queue, &source_address, 0) != pdTRUE)
@@ -7775,7 +7816,7 @@ static void mqtt_note_ntp_request(const struct sockaddr_storage &source_address)
         }
     }
 
-    if (s_mqtt_client_count < (s_tf_queue_available.load() ? s_cfg->mqtt_tf_client_limit : MQTT_CLIENT_LIMIT))
+    if (s_mqtt_client_count < std::min(s_mqtt_clients_size, s_tf_queue_available.load() ? s_mqtt_clients_size : MQTT_CLIENT_LIMIT))
     {
         mqtt_client_request_t &client = s_mqtt_clients[s_mqtt_client_count];
         client.address_family = source_address.ss_family;
@@ -8503,13 +8544,28 @@ static bool mqtt_publish_pending_restart_notification()
     return delivered_or_queued && result == ESP_OK;
 }
 
+static bool mqtt_apply_settings();
+
 static void mqtt_service_task(void *parameter)
 {
     bool previously_connected = false;
-    const TickType_t period = pdMS_TO_TICKS(s_cfg->mqtt_report_period_s * 1000UL); // at most 86400 s
-    TickType_t next_report = xTaskGetTickCount() + period;
+    TickType_t period = pdMS_TO_TICKS(MQTT_QUEUED_PUBLISH_DELAY_MS);
+    TickType_t next_report = xTaskGetTickCount();
     for (;;)
     {
+        if (s_mqtt_wanted_changed.exchange(false) && mqtt_apply_settings())
+        {
+            period = pdMS_TO_TICKS(s_mqtt_active->report_period_s * 1000UL); // at most 86400 s
+            next_report = xTaskGetTickCount() + period;
+            previously_connected = false;
+        }
+        if (!mqtt_on())
+        {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            task_stack_checkpoint(MQTT_Service);
+            continue;
+        }
+
         struct sockaddr_storage source_address{};
         for (size_t count = 0; count < MQTT_NTP_EVENT_BATCH_LIMIT &&
                                xQueueReceive(s_mqtt_ntp_event_queue, &source_address, 0) == pdTRUE;
@@ -8596,7 +8652,8 @@ static void controlled_restart(const char *reason)
 #endif
 
 #if MQTT_ENABLED
-    if (s_mqtt_on)
+    // The service task may be replacing the client (Apply): wait for it at most 1 s
+    if (mqtt_on() && s_mqtt_client_mutex != nullptr && xSemaphoreTake(s_mqtt_client_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
     {
 
         mqtt_publish_final_report();
@@ -8674,6 +8731,8 @@ static void controlled_restart(const char *reason)
                 }
             }
         }
+        if (s_mqtt_client_mutex != nullptr)
+            xSemaphoreGive(s_mqtt_client_mutex);
     }
 #endif
 
@@ -8686,40 +8745,12 @@ static void controlled_restart(const char *reason)
     return;
 }
 
-static void setup_mqtt_tf_queue()
+// TF card queue for the reports of QoS 1 and 2 (pins of the start): mounted by the service task the first time MQTT runs
+// with QoS 1 or 2
+static void mqtt_tf_mount()
 {
-
 #if MQTT_ENABLED
-    if (s_mqtt_on)
     {
-        // Report buffers: only allocated when MQTT is on for this boot
-        s_mqtt_reports = new (std::nothrow) mqtt_report_t[MQTT_REPORT_QUEUE_DEPTH]();
-        // Without the client list a report fits into MQTT_REPORT_SIZE; with it the buffer is sized for the client limit
-        s_mqtt_payload_size = s_mqtt_client_reporting ? web_mqtt_report_size(s_cfg->mqtt_tf_client_limit) : MQTT_REPORT_SIZE;
-        s_mqtt_payload = static_cast<char *>(calloc(s_mqtt_payload_size, 1));
-        s_mqtt_final_payload = static_cast<char *>(calloc(MQTT_REPORT_SIZE, 1));
-        if (s_mqtt_client_reporting)
-            s_mqtt_clients = new (std::nothrow) mqtt_client_request_t[s_cfg->mqtt_tf_client_limit]();
-        if (s_mqtt_reports == nullptr || s_mqtt_payload == nullptr || s_mqtt_final_payload == nullptr ||
-            (s_mqtt_client_reporting && s_mqtt_clients == nullptr))
-        {
-            ESP_LOGE(TAG, "MQTT: not enough memory for the report buffers, MQTT is off for this start");
-            delete[] s_mqtt_reports;
-            free(s_mqtt_payload);
-            free(s_mqtt_final_payload);
-            delete[] s_mqtt_clients;
-            s_mqtt_reports = nullptr;
-            s_mqtt_payload = nullptr;
-            s_mqtt_final_payload = nullptr;
-            s_mqtt_clients = nullptr;
-            s_mqtt_setup_failed.store(true);
-            s_mqtt_on = false;
-            return;
-        }
-
-        if (s_mqtt_qos == 0)
-            return;
-
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
         sd_pwr_ctrl_ldo_config_t ldo_config{};
         ldo_config.ldo_chan_id = 4;
@@ -8841,78 +8872,279 @@ static void setup_mqtt_tf_queue()
 #endif
 }
 
+#if MQTT_ENABLED
+static void mqtt_config_from_settings(const web_settings_t &s, mqtt_config_t &c)
+{
+    memset(&c, 0, sizeof(c));
+    c.enabled = s.mqtt_enabled;
+    memcpy(c.broker, s.mqtt_broker, sizeof(c.broker));
+    c.port = web_mqtt_port_in_use(s);
+    c.tls = s.mqtt_tls;
+    memcpy(c.ca_pem, s.mqtt_ca_pem, sizeof(c.ca_pem));
+    memcpy(c.username, s.mqtt_username, sizeof(c.username));
+    memcpy(c.password, s.mqtt_password, sizeof(c.password));
+    memcpy(c.topic, s.mqtt_topic, sizeof(c.topic));
+    c.qos = s.mqtt_qos;
+    c.retain = s.mqtt_retain;
+    c.report_period_s = s.mqtt_report_period_s;
+    c.client_reporting = s.mqtt_client_reporting;
+    c.memory_reporting = s.mqtt_memory_reporting;
+    c.historical_reporting = s.mqtt_historical_reporting;
+    c.distinguish_auth = s.mqtt_distinguish_auth;
+    c.tf_client_limit = s.mqtt_tf_client_limit;
+}
+
+// The fields the connection is made with (the last will has the topic and the QoS)
+static bool mqtt_connection_differs(const mqtt_config_t &a, const mqtt_config_t &b)
+{
+    return a.enabled != b.enabled || strcmp(a.broker, b.broker) != 0 || a.port != b.port || a.tls != b.tls ||
+           strcmp(a.ca_pem, b.ca_pem) != 0 || strcmp(a.username, b.username) != 0 || strcmp(a.password, b.password) != 0 ||
+           strcmp(a.topic, b.topic) != 0 || a.qos != b.qos;
+}
+
+// A planned stop: "offline" on the status topic (no last will), then the client is gone
+static void mqtt_stop_client()
+{
+    xSemaphoreTake(s_mqtt_client_mutex, portMAX_DELAY);
+    if (s_mqtt_client != nullptr)
+    {
+        if (s_mqtt_connected.load())
+        {
+            esp_mqtt_client_publish(s_mqtt_client, s_mqtt_status_topic, "offline", 0, 1, 1);
+            vTaskDelay(pdMS_TO_TICKS(200)); // let the client send it
+        }
+        esp_mqtt_client_stop(s_mqtt_client);
+        esp_mqtt_client_destroy(s_mqtt_client);
+        s_mqtt_client = nullptr;
+        mqtt_free_ca_chain(); // after the client task ended
+    }
+    s_mqtt_connected.store(false);
+    s_mqtt_has_connected.store(false);
+    s_mqtt_disconnected_since_us.store(0);
+    xSemaphoreGive(s_mqtt_client_mutex);
+}
+
+static bool mqtt_start_client()
+{
+    const mqtt_config_t &a = *s_mqtt_active;
+    xSemaphoreTake(s_mqtt_client_mutex, portMAX_DELAY);
+    snprintf(s_mqtt_report_topic, sizeof(s_mqtt_report_topic), "%s/report", a.topic); // topic: at most 100 characters
+    snprintf(s_mqtt_status_topic, sizeof(s_mqtt_status_topic), "%s/status", a.topic);
+    esp_mqtt_client_config_t config{};
+    config.broker.address.hostname = a.broker; // validated: an IPv4 or IPv6 address or a DNS name
+    config.broker.address.port = a.port;
+    config.broker.address.transport = a.tls ? MQTT_TRANSPORT_OVER_SSL : MQTT_TRANSPORT_OVER_TCP;
+    if (a.tls)
+    {
+        // Always checked: the CA certificate of the settings (mqtt_attach_ca) and the broker name or IP address
+        // (common_name nullptr = the host name)
+        s_mqtt_ca_pem = a.ca_pem;
+        config.broker.verification.crt_bundle_attach = mqtt_attach_ca;
+        config.broker.verification.skip_cert_common_name_check = false;
+    }
+    if (a.username[0] != '\0')
+    {
+        config.credentials.username = a.username;
+        config.credentials.authentication.password = a.password[0] != '\0' ? a.password : nullptr;
+    }
+    config.session.keepalive = MQTTFrequencyOfKeepAliveRequest;
+    config.session.last_will.topic = s_mqtt_status_topic;
+    config.session.last_will.msg = "offline";
+    config.session.last_will.qos = a.qos;
+    config.session.last_will.retain = 1;
+    // Below every timing task (PPS 14, GNSS 15, hardware NTP 17, lwIP 18, NTP socket server 20): an MQTT (TLS) connect
+    // must not delay the NTP replies. 5 = esp-mqtt default (was 23)
+    config.task.priority = 5;
+    s_mqtt_client = esp_mqtt_client_init(&config);
+    bool started = s_mqtt_client != nullptr;
+    if (!started)
+        mqtt_set_error("The MQTT client could not be created (memory)");
+    else if (esp_mqtt_client_register_event(s_mqtt_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr) != ESP_OK ||
+             esp_mqtt_client_start(s_mqtt_client) != ESP_OK)
+    {
+        mqtt_set_error("The MQTT client could not be started");
+        esp_mqtt_client_destroy(s_mqtt_client);
+        s_mqtt_client = nullptr;
+        started = false;
+    }
+    xSemaphoreGive(s_mqtt_client_mutex);
+    if (started)
+        ESP_LOGI(TAG, "MQTT: connecting to %s port %u%s", a.broker, static_cast<unsigned>(a.port), a.tls ? " with TLS" : "");
+#if DEBUG_ENABLED
+    ESP_LOGI(TAG, "MQTT setup. Keep alive set at %u seconds", MQTTFrequencyOfKeepAliveRequest);
+#endif
+    return started;
+}
+
+// Report buffers for the settings in use: the payload is sized for the client list (client reporting with the client
+// limit, else MQTT_REPORT_SIZE); the RAM queue and the final report are allocated once
+static bool mqtt_allocate_buffers()
+{
+    const mqtt_config_t &a = *s_mqtt_active;
+    const size_t payload_size = a.client_reporting ? web_mqtt_report_size(a.tf_client_limit) : MQTT_REPORT_SIZE;
+    const size_t clients_size = a.client_reporting ? a.tf_client_limit : 0;
+    if (s_mqtt_reports == nullptr)
+        s_mqtt_reports = new (std::nothrow) mqtt_report_t[MQTT_REPORT_QUEUE_DEPTH]();
+    if (s_mqtt_final_payload == nullptr)
+        s_mqtt_final_payload = static_cast<char *>(calloc(MQTT_REPORT_SIZE, 1));
+    if (payload_size != s_mqtt_payload_size || s_mqtt_payload == nullptr)
+    {
+        free(s_mqtt_payload);
+        s_mqtt_payload = static_cast<char *>(calloc(payload_size, 1));
+        s_mqtt_payload_size = s_mqtt_payload != nullptr ? payload_size : 0;
+    }
+    if (clients_size != s_mqtt_clients_size)
+    {
+        // The table is only used by this task and mqtt_build_report() (under the statistics mutex)
+        xSemaphoreTake(s_mqtt_stats_mutex, portMAX_DELAY);
+        delete[] s_mqtt_clients;
+        s_mqtt_clients = clients_size > 0 ? new (std::nothrow) mqtt_client_request_t[clients_size]() : nullptr;
+        s_mqtt_clients_size = s_mqtt_clients != nullptr ? clients_size : 0;
+        s_mqtt_client_count = 0;
+        xSemaphoreGive(s_mqtt_stats_mutex);
+    }
+    return s_mqtt_reports != nullptr && s_mqtt_final_payload != nullptr && s_mqtt_payload != nullptr &&
+           (clients_size == 0 || s_mqtt_clients != nullptr);
+}
+
+// MQTT off: the client stops, the payload and the client table are freed (the RAM queue and the final report stay)
+static void mqtt_free_buffers()
+{
+    free(s_mqtt_payload);
+    s_mqtt_payload = nullptr;
+    s_mqtt_payload_size = 0;
+    xSemaphoreTake(s_mqtt_stats_mutex, portMAX_DELAY);
+    delete[] s_mqtt_clients;
+    s_mqtt_clients = nullptr;
+    s_mqtt_clients_size = 0;
+    s_mqtt_client_count = 0;
+    xSemaphoreGive(s_mqtt_stats_mutex);
+}
+
+// Service task: takes the settings the web admin handed over. A change of the connection (broker, port, TLS, CA,
+// credentials, topic, QoS) stops the client and starts it again; the rest takes effect with the next report.
+// Returns true when MQTT runs with the new settings.
+static bool mqtt_apply_settings()
+{
+    xSemaphoreTake(s_mqtt_wanted_mutex, portMAX_DELAY);
+    const bool connection_changed = mqtt_connection_differs(*s_mqtt_wanted, *s_mqtt_active) || s_mqtt_client == nullptr;
+    xSemaphoreGive(s_mqtt_wanted_mutex);
+
+    // Off first: the NTP path stops counting and queueing before anything is freed
+    s_mqtt_client_reporting.store(false);
+    if (connection_changed)
+    {
+        s_mqtt_on.store(false);
+        mqtt_stop_client();
+    }
+    xSemaphoreTake(s_mqtt_wanted_mutex, portMAX_DELAY);
+    *s_mqtt_active = *s_mqtt_wanted;
+    xSemaphoreGive(s_mqtt_wanted_mutex);
+    const mqtt_config_t &a = *s_mqtt_active;
+
+    taskENTER_CRITICAL(&s_mqtt_status_lock);
+    memcpy(s_mqtt_status_broker, a.broker, sizeof(s_mqtt_status_broker));
+    s_mqtt_status_port = a.port;
+    s_mqtt_status_tls = a.tls;
+    if (connection_changed)
+    {
+        s_mqtt_error[0] = '\0';
+        s_mqtt_error_us = 0;
+    }
+    taskEXIT_CRITICAL(&s_mqtt_status_lock);
+
+    if (!a.enabled || a.broker[0] == '\0')
+    {
+        s_mqtt_on.store(false);
+        mqtt_free_buffers();
+        s_mqtt_setup_failed.store(false);
+        ESP_LOGI(TAG, "MQTT: off");
+        return false;
+    }
+    s_mqtt_qos.store(a.qos);
+    s_mqtt_retain.store(a.retain ? 1 : 0);
+    s_mqtt_memory_reporting.store(a.memory_reporting);
+    s_mqtt_historical_reporting.store(a.historical_reporting);
+    s_mqtt_distinguish_auth.store(a.distinguish_auth);
+    if (!mqtt_allocate_buffers())
+    {
+        ESP_LOGE(TAG, "MQTT: not enough memory for the report buffers, MQTT is off");
+        mqtt_set_error("The MQTT client could not be created (memory)");
+        s_mqtt_on.store(false);
+        mqtt_stop_client();
+        mqtt_free_buffers();
+        s_mqtt_setup_failed.store(true);
+        return false;
+    }
+    if (a.qos > 0 && !s_tf_mount_tried)
+    {
+        s_tf_mount_tried = true;
+        mqtt_tf_mount();
+    }
+    s_mqtt_client_reporting.store(a.client_reporting);
+    const bool running = !connection_changed || mqtt_start_client();
+    s_mqtt_setup_failed.store(!running);
+    s_mqtt_on.store(running);
+    return running;
+}
+
+// Hands the MQTT settings over to the service task (at the start and with every Apply). Nothing is allocated while
+// MQTT was never on; the task starts once the network is set up (setup_mqtt).
+static void mqtt_hand_over_settings(const web_settings_t &settings)
+{
+    if (s_mqtt_wanted == nullptr)
+    {
+        if (!settings.mqtt_enabled)
+            return;
+        s_mqtt_wanted = static_cast<mqtt_config_t *>(calloc(1, sizeof(mqtt_config_t)));
+        s_mqtt_active = static_cast<mqtt_config_t *>(calloc(1, sizeof(mqtt_config_t)));
+        s_mqtt_wanted_mutex = xSemaphoreCreateMutex();
+        s_mqtt_client_mutex = xSemaphoreCreateMutex();
+        s_mqtt_stats_mutex = xSemaphoreCreateMutex();
+        s_mqtt_ntp_event_queue = xQueueCreate(MQTT_NTP_EVENT_QUEUE_DEPTH, sizeof(struct sockaddr_storage));
+        if (s_mqtt_wanted == nullptr || s_mqtt_active == nullptr || s_mqtt_wanted_mutex == nullptr || s_mqtt_client_mutex == nullptr ||
+            s_mqtt_stats_mutex == nullptr || s_mqtt_ntp_event_queue == nullptr)
+        {
+            ESP_LOGE(TAG, "MQTT: not enough memory, MQTT is off");
+            mqtt_set_error("The MQTT client could not be created (memory)");
+            s_mqtt_setup_failed.store(true);
+            free(s_mqtt_wanted);
+            s_mqtt_wanted = nullptr; // tried again with the next Apply (the rest is kept)
+            return;
+        }
+    }
+    xSemaphoreTake(s_mqtt_wanted_mutex, portMAX_DELAY);
+    mqtt_config_from_settings(settings, *s_mqtt_wanted);
+    xSemaphoreGive(s_mqtt_wanted_mutex);
+    s_mqtt_wanted_changed.store(true);
+    if (s_mqtt_service_allowed && s_mqtt_service_task_handle == nullptr &&
+        xTaskCreatePinnedToCore(mqtt_service_task, "mqtt_service", MQTT_Service_Task_Stack_Size, nullptr, 5, &s_mqtt_service_task_handle, 0) != pdPASS)
+    {
+        s_mqtt_service_task_handle = nullptr;
+        mqtt_set_error("The MQTT client could not be started");
+        s_mqtt_setup_failed.store(true);
+    }
+}
+#endif
+
 static void setup_mqtt()
 {
 #if MQTT_ENABLED
-    if (s_mqtt_on)
+    // The network is set up: the service task may start now (with the settings handed over at the start, or since then
+    // by Apply). Later changes come through app_apply_live_settings().
+    s_mqtt_service_allowed = true;
+    if (s_mqtt_wanted != nullptr)
     {
-
-        if (s_cfg->mqtt_broker[0] == '\0' || s_mqtt_payload == nullptr || s_mqtt_qos < 0 || s_mqtt_qos > 2)
+        web_settings_t *running = new (std::nothrow) web_settings_t; // about 5.5 kB: not on the main task stack
+        if (running != nullptr)
         {
-            s_mqtt_setup_failed.store(true);
-            return;
+            web_settings_get_running(*running);
+            mqtt_hand_over_settings(*running);
+            memset(running, 0, sizeof(web_settings_t));
+            delete running;
         }
-
-        s_mqtt_stats_mutex = xSemaphoreCreateMutex();
-        s_mqtt_ntp_event_queue = xQueueCreate(MQTT_NTP_EVENT_QUEUE_DEPTH, sizeof(struct sockaddr_storage));
-        if (s_mqtt_stats_mutex == nullptr || s_mqtt_ntp_event_queue == nullptr)
-        {
-            s_mqtt_setup_failed.store(true);
-            return;
-        }
-        snprintf(s_mqtt_report_topic, sizeof(s_mqtt_report_topic), "%s/report", s_cfg->mqtt_topic); // topic: at most 100 characters
-        snprintf(s_mqtt_status_topic, sizeof(s_mqtt_status_topic), "%s/status", s_cfg->mqtt_topic);
-
-        esp_mqtt_client_config_t config{};
-        config.broker.address.hostname = s_cfg->mqtt_broker; // validated: an IPv4 or IPv6 address or a DNS name
-        config.broker.address.port = web_mqtt_port_in_use(*s_cfg);
-        config.broker.address.transport = s_cfg->mqtt_tls ? MQTT_TRANSPORT_OVER_SSL : MQTT_TRANSPORT_OVER_TCP;
-        if (s_cfg->mqtt_tls)
-        {
-            // Always checked: the CA certificate of the settings (mqtt_attach_ca) and the broker name or IP address
-            // (common_name nullptr = the host name)
-            s_mqtt_ca_pem = s_cfg->mqtt_ca_pem;
-            config.broker.verification.crt_bundle_attach = mqtt_attach_ca;
-            config.broker.verification.skip_cert_common_name_check = false;
-        }
-        if (s_cfg->mqtt_username[0] != '\0')
-        {
-            config.credentials.username = s_cfg->mqtt_username;
-            config.credentials.authentication.password = s_cfg->mqtt_password[0] != '\0' ? s_cfg->mqtt_password : nullptr;
-        }
-        config.session.keepalive = MQTTFrequencyOfKeepAliveRequest;
-        config.session.last_will.topic = s_mqtt_status_topic;
-        config.session.last_will.msg = "offline";
-        config.session.last_will.qos = s_mqtt_qos;
-        config.session.last_will.retain = 1;
-        // Below every timing task (PPS 14, GNSS 15, hardware NTP 17, lwIP 18, NTP socket server 20): an MQTT (TLS) connect
-        // must not delay the NTP replies. 5 = esp-mqtt default (was 23)
-        config.task.priority = 5;
-        s_mqtt_client = esp_mqtt_client_init(&config);
-        if (s_mqtt_client == nullptr)
-        {
-            s_mqtt_setup_failed.store(true);
-            return;
-        }
-        if (esp_mqtt_client_register_event(s_mqtt_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr) != ESP_OK)
-        {
-            s_mqtt_setup_failed.store(true);
-            return;
-        }
-        if (esp_mqtt_client_start(s_mqtt_client) != ESP_OK)
-        {
-            mqtt_set_error("The MQTT client could not be started");
-            s_mqtt_setup_failed.store(true);
-            return;
-        }
-        ESP_LOGI(TAG, "MQTT: connecting to %s port %u%s", s_cfg->mqtt_broker, static_cast<unsigned>(web_mqtt_port_in_use(*s_cfg)),
-                 s_cfg->mqtt_tls ? " with TLS" : "");
-
-#if DEBUG_ENABLED
-        ESP_LOGI(TAG, "MQTT setup. Keep alive set at %u seconds", MQTTFrequencyOfKeepAliveRequest);
-#endif
-        if (xTaskCreatePinnedToCore(mqtt_service_task, "mqtt_service", MQTT_Service_Task_Stack_Size, nullptr, 5, nullptr, 0) != pdPASS)
-            s_mqtt_setup_failed.store(true);
+        else
+            mqtt_hand_over_settings(*s_cfg);
     }
 #endif
 }
@@ -8941,7 +9173,7 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
             refresh_network_ipv6_addresses();
         }
 #if MQTT_ENABLED
-        if (s_mqtt_on)
+        if (mqtt_on())
         {
             s_eth_link_connected_us.store(esp_timer_get_time());
             if (s_mqtt_has_connected.load(std::memory_order_acquire))
@@ -8961,7 +9193,7 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
         s_first_ntp_input_us.store(0);
         s_last_ntp_response_us.store(0);
 #if MQTT_ENABLED
-        if (s_mqtt_on)
+        if (mqtt_on())
         {
             mqtt_note_ethernet_disconnected();
         }
@@ -8979,7 +9211,7 @@ static void ethernet_event_handler(void *, esp_event_base_t, int32_t event, void
         s_first_ntp_input_us.store(0);
         s_last_ntp_response_us.store(0);
 #if MQTT_ENABLED
-        if (s_mqtt_on)
+        if (mqtt_on())
         {
             mqtt_note_ethernet_disconnected();
         }
@@ -9013,7 +9245,7 @@ static void ethernet_ip_event_handler(void *, esp_event_base_t, int32_t event, v
         s_ipv4_ever_acquired.store(true, std::memory_order_relaxed);
         set_network_ipv4_address(info.ip_info.ip);
 #if MQTT_ENABLED
-        if (s_mqtt_on)
+        if (mqtt_on())
         {
             if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
                 s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
@@ -9038,7 +9270,7 @@ static void ethernet_ip_event_handler(void *, esp_event_base_t, int32_t event, v
         const bool routable_ipv6_acquired = set_network_ipv6_address(info.ip6_info.ip);
         refresh_own_ipv6_addresses();
 #if MQTT_ENABLED
-        if (s_mqtt_on)
+        if (mqtt_on())
         {
             if (s_mqtt_has_connected.load(std::memory_order_acquire) && !s_mqtt_connected.load(std::memory_order_acquire))
                 s_mqtt_disconnected_since_us.store(esp_timer_get_time(), std::memory_order_release);
@@ -9289,7 +9521,7 @@ void write_settings_messages_to_the_console()
     else
         ESP_LOGW(TAG, "Symmetric-key authentication support: Disabled");
 
-    if (s_mqtt_on)
+    if (cfg.mqtt_enabled)
     {
         ESP_LOGI(TAG, "MQTT support: Enabled");
         ESP_LOGI(TAG, "MQTT topic: %s, QoS %d, retain %s, reporting period %lu s", cfg.mqtt_topic, static_cast<int>(cfg.mqtt_qos),
@@ -9341,13 +9573,6 @@ void setup_NVS_storage(void)
     web_settings_load_boot();
     s_cfg = &web_settings_boot();
     s_lcd_on = s_cfg->lcd_enabled;
-    s_mqtt_on = s_cfg->mqtt_enabled;
-    s_mqtt_qos = s_cfg->mqtt_qos;
-    s_mqtt_retain = s_cfg->mqtt_retain ? 1 : 0;
-    s_mqtt_client_reporting = s_cfg->mqtt_client_reporting;
-    s_mqtt_memory_reporting = s_cfg->mqtt_memory_reporting;
-    s_mqtt_historical_reporting = s_cfg->mqtt_historical_reporting;
-    s_mqtt_distinguish_auth = s_cfg->mqtt_distinguish_auth;
     s_ote_on = s_cfg->ote_enabled;
     s_gnss_ublox = s_cfg->gnss_ublox;
     s_led_type = s_cfg->led_type;
@@ -10519,7 +10744,7 @@ static void ntp_server_task(void *parameter)
                 if (len < static_cast<int>(NTP_PACKET_SIZE) || len > static_cast<int>(NTP_MAX_PACKET_SIZE))
                 {
 #if MQTT_ENABLED
-                    if (s_mqtt_on)
+                    if (mqtt_on())
                     {
                         s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
@@ -10540,7 +10765,7 @@ static void ntp_server_task(void *parameter)
                 if (ntp_version < 3 || ntp_version > 4 || ntp_mode != 3)
                 {
 #if MQTT_ENABLED
-                    if (s_mqtt_on)
+                    if (mqtt_on())
                     {
                         s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
@@ -10562,7 +10787,7 @@ static void ntp_server_task(void *parameter)
                 if (authentication_result != ntp_auth_result_t::unauthenticated && authentication_result != ntp_auth_result_t::valid)
                 {
 #if MQTT_ENABLED
-                    if (s_mqtt_on)
+                    if (mqtt_on())
                     {
                         s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
                         if (ntp_version == 4)
@@ -10585,7 +10810,7 @@ static void ntp_server_task(void *parameter)
                 if (!internal_request && !admit_ntp_request())
                 {
 #if MQTT_ENABLED
-                    if (s_mqtt_on)
+                    if (mqtt_on())
                     {
                         s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -10617,7 +10842,7 @@ static void ntp_server_task(void *parameter)
                 {
                     s_ntp_rate_limited_requests.fetch_add(1, std::memory_order_relaxed);
 #if MQTT_ENABLED
-                    if (s_mqtt_on)
+                    if (mqtt_on())
                     {
                         s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -10626,7 +10851,7 @@ static void ntp_server_task(void *parameter)
                 }
 
 #if MQTT_ENABLED
-                if (s_mqtt_on)
+                if (mqtt_on())
                 {
                     s_ntp_requests_this_second.fetch_add(1, std::memory_order_relaxed);
                     s_ntp_valid_requests.fetch_add(1, std::memory_order_relaxed);
@@ -10642,7 +10867,7 @@ static void ntp_server_task(void *parameter)
                 if (!status.serve && !internal_request) // PPS lost for longer than the holdover, set to stop serving
                     continue;
 #if MQTT_ENABLED
-                if (s_mqtt_on)
+                if (mqtt_on())
                 {
                     if (status.gnss_synchronized && status.pps_disciplined)
                         s_ntp_responses_synchronized_and_disciplined.fetch_add(1, std::memory_order_relaxed);
@@ -10693,7 +10918,7 @@ static void ntp_server_task(void *parameter)
                     }
                 }
 #if MQTT_ENABLED
-                if (s_mqtt_on)
+                if (mqtt_on())
                 {
                     if (sent == static_cast<int>(reply_length))
                         s_ntp_responses.fetch_add(1, std::memory_order_relaxed);
@@ -11276,11 +11501,11 @@ static int get_required_top_line_message()
              !has_usable_network_address(xEventGroupGetBits(s_net_event_group)))
         required_top_line_message = 13;
 #if MQTT_ENABLED
-    else if (s_mqtt_on && s_mqtt_queued_messages_count.load() > 0)
+    else if (mqtt_on() && s_mqtt_queued_messages_count.load() > 0)
         required_top_line_message = 3;
-    else if (s_mqtt_on && s_mqtt_setup_failed.load())
+    else if (mqtt_on() && s_mqtt_setup_failed.load())
         required_top_line_message = 2;
-    else if (s_mqtt_on && !s_mqtt_connected.load())
+    else if (mqtt_on() && !s_mqtt_connected.load())
         required_top_line_message = 11;
 #endif
     if (s_ntp_transport_health.load(std::memory_order_relaxed) == ntp_transport_health_t::stalled &&
@@ -11660,6 +11885,9 @@ void app_apply_live_settings(const web_settings_t &settings)
     for (size_t i = 0; i < key_count; ++i)
         keys[i] = {settings.ntp_keys[i].id, settings.ntp_keys[i].key};
     ntp_auth_configure(settings.ntp_auth_enabled, keys, key_count);
+#if MQTT_ENABLED
+    mqtt_hand_over_settings(settings);
+#endif
 }
 
 void app_controlled_restart(const char *reason)
@@ -11789,17 +12017,14 @@ void app_get_status(web_app_status_t &status)
     }
     status.lcd_present = s_lcd_ready;
     status.led_active = s_led_type != web_led_type_t::none;
-    status.mqtt_connected = s_mqtt_on && s_mqtt_connected.load(std::memory_order_acquire);
-    status.mqtt_tf_queue = s_mqtt_on && s_tf_queue_available.load(std::memory_order_acquire);
-    status.mqtt_active = s_mqtt_on;
-    if (s_mqtt_on)
-    {
-        snprintf(status.mqtt_broker, sizeof(status.mqtt_broker), "%s", s_cfg->mqtt_broker);
-        status.mqtt_port = web_mqtt_port_in_use(*s_cfg);
-        status.mqtt_tls = s_cfg->mqtt_tls;
-    }
+    status.mqtt_connected = mqtt_on() && s_mqtt_connected.load(std::memory_order_acquire);
+    status.mqtt_tf_queue = mqtt_on() && s_tf_queue_available.load(std::memory_order_acquire);
+    status.mqtt_active = mqtt_on();
     const int64_t now_us = esp_timer_get_time();
     taskENTER_CRITICAL(&s_mqtt_status_lock);
+    memcpy(status.mqtt_broker, s_mqtt_status_broker, sizeof(status.mqtt_broker));
+    status.mqtt_port = s_mqtt_status_port;
+    status.mqtt_tls = s_mqtt_status_tls;
     memcpy(status.mqtt_error, s_mqtt_error, sizeof(status.mqtt_error));
     status.mqtt_error_age_s = s_mqtt_error[0] == '\0' ? -1 : static_cast<int32_t>((now_us - s_mqtt_error_us) / 1000000);
     status.mqtt_connected_s = status.mqtt_connected ? static_cast<int32_t>((now_us - s_mqtt_connected_us) / 1000000) : -1;
@@ -12146,8 +12371,6 @@ extern "C" void app_main()
     start_app_update_check(); // first start of a firmware written by an update (review E-06)
 
     write_settings_messages_to_the_console();
-
-    setup_mqtt_tf_queue();
 
     setup_mutexes_and_semaphores();
 

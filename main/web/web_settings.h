@@ -129,7 +129,8 @@ struct web_settings_t
     int8_t led_ws2812_pin;
     uint32_t led_rgb[WEB_LED_STATE_COUNT]; // colour per state, 0xRRGGBB
 
-    // MQTT (the broker, its port, TLS and CA certificate are appended at the end, version 13)
+    // MQTT (takes effect at once with Apply: the client reconnects; the broker, its port, TLS and CA certificate are
+    // appended at the end, version 13)
     bool mqtt_enabled;
     // Former broker URI (mqtt:// or mqtts://, versions up to 12): read into mqtt_broker, mqtt_port and mqtt_tls, then
     // always zero; only keeps the layout of the saved settings
@@ -146,7 +147,7 @@ struct web_settings_t
     bool mqtt_distinguish_auth;      // separate counts for authenticated and unauthenticated requests
     uint16_t mqtt_tf_client_limit;   // client addresses per report while the reports are queued on the TF card
 
-    // TF card (MQTT report queue for QoS 1 and 2), SDMMC slot 1 in 4-bit mode
+    // TF card (MQTT report queue for QoS 1 and 2), SDMMC slot 1 in 4-bit mode (the pins need a restart)
     int8_t tf_cmd_pin;
     int8_t tf_clk_pin;
     int8_t tf_d0_pin;

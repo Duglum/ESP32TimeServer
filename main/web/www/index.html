@@ -382,7 +382,7 @@
 
       <section class="card">
         <details class="panel">
-          <summary><h2>MQTT <span class="badge restart">restart</span></h2><span class="panel-changed" hidden></span></summary>
+          <summary><h2>MQTT</h2><span class="panel-changed" hidden></span></summary>
           <div class="grid">
             <label class="switch span2"><input type="checkbox" name="mqtt_enabled"> MQTT reporting</label>
             <label><span class="lt">Broker (IPv4 or IPv6 address or DNS name)</span>
@@ -408,6 +408,7 @@
             <label class="switch span2"><input type="checkbox" name="mqtt_password_clear"> Clear the MQTT password</label>
           </div>
           <p class="hint">An empty password field keeps the stored password. Secrets are never sent back to the browser.</p>
+          <p class="hint">The settings take effect at once with <em>Apply</em> (the client connects again); the connection state is shown under <em>Status</em>.</p>
           <div class="grid section-gap">
             <label><span class="lt">Topic</span>
               <input type="text" name="mqtt_topic" maxlength="100" spellcheck="false" autocomplete="off">

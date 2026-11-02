@@ -58,7 +58,7 @@ Request bodies are limited to 4096 bytes; `/api/apply`, `/api/save` and `/api/co
 
 Notes on `/api/apply`:
 - A network change must be confirmed within 120 s, otherwise the previous network settings are restored.
-- A change of a restart field (FQDN, pins, LED module, MQTT, ...) writes a one-shot set and restarts once with it.
+- A change of a restart field (FQDN, pins, LED module, OTE, ...) writes a one-shot set and restarts once with it. The MQTT settings (except the TF card pins) take effect at once: the client stops and connects again with the new settings.
 - MQTT broker: `mqtt_broker` (IPv4 or IPv6 address or DNS name, no `.local`), `mqtt_port` (0 = 8883 with TLS, 1883 without), `mqtt_tls`, `mqtt_ca_pem` (CA certificate of the broker in PEM, at most 4096 characters, required with TLS; parsed with mbedTLS, `400` if it cannot be read). With TLS the broker certificate is checked against this CA and the broker name or IP address (SAN). The former field `mqtt_uri` (`mqtt://host[:port]` or `mqtts://host[:port]`) is still accepted and sets broker, port and TLS; fields sent with it replace these values.
 
 **Static files** need no login; only the allow-list applies: `/`, `/app.js`, `/app.css`, `/i18n.js`, `/favicon.ico`.

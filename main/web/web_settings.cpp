@@ -1296,15 +1296,6 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            strcmp(a.mac_address, b.mac_address) != 0 || a.ip_mode != b.ip_mode ||
            a.tf_cmd_pin != b.tf_cmd_pin || a.tf_clk_pin != b.tf_clk_pin || a.tf_d0_pin != b.tf_d0_pin ||
            a.tf_d1_pin != b.tf_d1_pin || a.tf_d2_pin != b.tf_d2_pin || a.tf_d3_pin != b.tf_d3_pin ||
-           strcmp(a.mqtt_topic, b.mqtt_topic) != 0 || a.mqtt_qos != b.mqtt_qos || a.mqtt_retain != b.mqtt_retain ||
-           a.mqtt_report_period_s != b.mqtt_report_period_s || a.mqtt_client_reporting != b.mqtt_client_reporting ||
-           a.mqtt_memory_reporting != b.mqtt_memory_reporting || a.mqtt_historical_reporting != b.mqtt_historical_reporting ||
-           a.mqtt_distinguish_auth != b.mqtt_distinguish_auth || a.mqtt_tf_client_limit != b.mqtt_tf_client_limit ||
-           a.mqtt_enabled != b.mqtt_enabled || strcmp(a.mqtt_broker, b.mqtt_broker) != 0 || a.mqtt_port != b.mqtt_port ||
-           a.mqtt_tls != b.mqtt_tls || strcmp(a.mqtt_ca_pem, b.mqtt_ca_pem) != 0 ||
-           strcmp(a.mqtt_username, b.mqtt_username) != 0 ||
-           !web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.mqtt_password),
-                                    reinterpret_cast<const uint8_t *>(b.mqtt_password), WEB_MQTT_CREDENTIAL_SIZE) ||
            a.ote_enabled != b.ote_enabled || a.button_enabled != b.button_enabled || a.button_pin != b.button_pin;
 }
 
@@ -1320,6 +1311,15 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
            a.pps_dispersion_ppm == b.pps_dispersion_ppm && a.ntp_client_rate_limit == b.ntp_client_rate_limit &&
            a.gnss_min_fix_age_s == b.gnss_min_fix_age_s && a.gnss_min_satellites == b.gnss_min_satellites &&
            a.ntp_auth_enabled == b.ntp_auth_enabled &&
+           // MQTT takes effect at once (the service task reconnects)
+           a.mqtt_enabled == b.mqtt_enabled && strcmp(a.mqtt_broker, b.mqtt_broker) == 0 && a.mqtt_port == b.mqtt_port &&
+           a.mqtt_tls == b.mqtt_tls && strcmp(a.mqtt_ca_pem, b.mqtt_ca_pem) == 0 && strcmp(a.mqtt_username, b.mqtt_username) == 0 &&
+           web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.mqtt_password), reinterpret_cast<const uint8_t *>(b.mqtt_password),
+                                   WEB_MQTT_CREDENTIAL_SIZE) &&
+           strcmp(a.mqtt_topic, b.mqtt_topic) == 0 && a.mqtt_qos == b.mqtt_qos && a.mqtt_retain == b.mqtt_retain &&
+           a.mqtt_report_period_s == b.mqtt_report_period_s && a.mqtt_client_reporting == b.mqtt_client_reporting &&
+           a.mqtt_memory_reporting == b.mqtt_memory_reporting && a.mqtt_historical_reporting == b.mqtt_historical_reporting &&
+           a.mqtt_distinguish_auth == b.mqtt_distinguish_auth && a.mqtt_tf_client_limit == b.mqtt_tf_client_limit &&
            a.ntp_key_count == b.ntp_key_count &&
            web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_keys), reinterpret_cast<const uint8_t *>(b.ntp_keys), sizeof(a.ntp_keys));
 }

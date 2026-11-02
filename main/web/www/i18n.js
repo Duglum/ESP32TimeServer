@@ -415,7 +415,8 @@
     'LED colour "{name}": #RRGGBB expected': 'LED-Farbe „{name}“: #RRGGBB erwartet',
 
     // ---- MQTT ----
-    'MQTT <span class="badge restart">restart</span>': 'MQTT <span class="badge restart">Neustart</span>',
+    'The settings take effect at once with <em>Apply</em> (the client connects again); the connection state is shown under <em>Status</em>.':
+      'Die Einstellungen wirken sofort mit <em>Übernehmen</em> (der Client verbindet sich neu); der Verbindungszustand steht unter <em>Status</em>.',
     'MQTT reporting': 'MQTT-Berichte',
     'Broker (IPv4 or IPv6 address or DNS name)': 'Broker (IPv4- oder IPv6-Adresse oder DNS-Name)',
     'No .local names (mDNS) and no discovery.': 'Keine .local-Namen (mDNS) und keine Discovery.',
@@ -432,8 +433,8 @@
     'MQTT CA certificate: PEM with one or more BEGIN CERTIFICATE / END CERTIFICATE blocks expected': 'MQTT-CA-Zertifikat: PEM mit einem oder mehreren Blöcken BEGIN CERTIFICATE / END CERTIFICATE erwartet',
     'MQTT: TLS needs the CA certificate of the broker (PEM)': 'MQTT: TLS braucht das CA-Zertifikat des Brokers (PEM)',
     'MQTT: text is not terminated': 'MQTT: Text ist nicht abgeschlossen',
-    'on after the next restart': 'an nach dem nächsten Neustart',
-    'connected to {where} for {time}; {n} reports published, the latest {age}': 'verbunden mit {where} seit {time}; {n} Berichte gesendet, der letzte {age}',
+    'off: {error}': 'aus: {error}',
+    'connected to {where} for {time}; {n} reports published, the latest {age}': 'verbunden mit {where} (Dauer {time}); {n} Berichte gesendet, der letzte {age}',
     'none yet': 'noch keiner',
     '{n} s ago': 'vor {n} s',
     'not connected to {where}: {error} ({age} s ago)': 'nicht verbunden mit {where}: {error} (vor {age} s)',
