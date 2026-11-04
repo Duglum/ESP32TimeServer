@@ -83,6 +83,8 @@ Release/
 
 # testing file
 testing/drift/DoNotPublish
+# Test certificates and private keys of testing/web_certs/web_certs.py: never commit them
+web-certs/
 testing/RFC_9769_compliance/background
 
 _switch*.bat

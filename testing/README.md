@@ -23,6 +23,15 @@ the network it is running on doesn't support IPv6.
 RFC 9769 compliance testing ensures network time synchronization implements the RFC 9769 NTP interleaved modes specification for NTPv4 replies. While this testing is covered off by two testing methods above, a python testing tool is also available to specifically test RFC 9769 compliance, for more information please see: [/testing/RFC_9769_compliance/README.md](/testing/RFC_9769_compliance/README.md)
 
 
+### Own TLS certificate of the web admin
+[/testing/web_certs/web_certs.py](/testing/web_certs/web_certs.py) writes test certificates for *Security*, *TLS certificate of the web admin* into `web-certs/` (in `.gitignore`: it holds private keys, never commit one): a test CA, ECDSA P-256 and RSA 2048 chains with their keys, an expired chain, a P-521 pair and a foreign and an encrypted key (refused). It needs OpenSSL 3.4 or newer (the one of Git for Windows will do):
+
+```
+python -I testing/web_certs/web_certs.py --ip <address> --dns <FQDN>
+```
+
+Copy a file to the clipboard with `Get-Content web-certs\chain-ecdsa.pem -Raw | Set-Clipboard` (PowerShell) and paste the chain into *Certificate chain* and the key into *Private key*.
+
 ## Memory Leak Testing
 A memory leak occurs when a program allocates memory but fails to release it when no longer needed. Over time, leaked memory can degrade performance and potentially cause application failures.  For more information please see: [/testing/memory_leak_testing/README.md](/testing/memory_leak_testing/README.md)
 

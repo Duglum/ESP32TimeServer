@@ -684,6 +684,55 @@ bool web_mqtt_topic_valid(const char *topic)
     return true;
 }
 
+namespace
+{
+    // A PEM block with one of the labels at p (after white space): moves p past it; false if it is none or malformed
+    bool pem_block(const char *&p, const char *const *labels, size_t label_count)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+            ++p;
+        for (size_t i = 0; i < label_count; ++i)
+        {
+            char begin[48];
+            char end[48];
+            snprintf(begin, sizeof(begin), "-----BEGIN %s-----", labels[i]);
+            snprintf(end, sizeof(end), "-----END %s-----", labels[i]);
+            if (strncmp(p, begin, strlen(begin)) != 0)
+                continue;
+            const char *q = p + strlen(begin);
+            size_t characters = 0;
+            while (strncmp(q, end, strlen(end)) != 0)
+            {
+                const char c = *q++;
+                const bool base64 = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+                if (c == '\0' || (!base64 && c != '\r' && c != '\n' && c != ' ' && c != '\t'))
+                    return false;
+                characters += base64 ? 1 : 0;
+            }
+            if (characters < 16)
+                return false;
+            p = q + strlen(end);
+            return true;
+        }
+        return false;
+    }
+} // namespace
+
+bool web_pem_private_key_valid(const char *pem)
+{
+    static const char *const PARAMETERS[] = {"EC PARAMETERS"};
+    static const char *const KEYS[] = {"PRIVATE KEY", "EC PRIVATE KEY", "RSA PRIVATE KEY"};
+    const char *p = pem;
+    const char *after_parameters = p;
+    if (pem_block(after_parameters, PARAMETERS, 1))
+        p = after_parameters;
+    if (!pem_block(p, KEYS, 3))
+        return false;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    return *p == '\0';
+}
+
 bool web_pem_certificates_valid(const char *pem)
 {
     static const char BEGIN[] = "-----BEGIN CERTIFICATE-----";

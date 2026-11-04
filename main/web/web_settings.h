@@ -268,6 +268,9 @@ bool web_mqtt_is_mdns_name(const char *host);
 bool web_mqtt_host_valid(const char *host);
 bool web_mqtt_topic_valid(const char *topic);
 bool web_pem_certificates_valid(const char *pem);
+// PEM text with one private key block (PRIVATE KEY, EC PRIVATE KEY or RSA PRIVATE KEY) of base64, optionally after an
+// EC PARAMETERS block (openssl ecparam -genkey); no header lines, so an encrypted key does not pass (web/web_tls.h)
+bool web_pem_private_key_valid(const char *pem);
 // Former broker URI "mqtt://host[:port]" or "mqtts://host[:port]" (an IPv6 address in brackets) into mqtt_broker,
 // mqtt_port (0 without a port) and mqtt_tls; false (broker empty) if it is no such URI or the host does not fit the
 // broker field

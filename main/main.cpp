@@ -61,6 +61,7 @@
 #include "web/web_net.h"
 #include "web/web_server.h"
 #include "web/web_settings.h"
+#include "web/web_tls.h"
 
 // ---- Features that can be switched on the web admin page ----
 // All settings are made on the web page (web/web_settings.cpp has the defaults); there is no settings file. The code
@@ -9849,7 +9850,8 @@ static void setup_the_button()
     s_button_ready = true;
 
     // Recovery of a forgotten web admin password: holding the button for 10 s while the device starts erases the
-    // web settings, the password and the allow-list (like the reset to defaults on the page) and restarts
+    // web settings, the password, the allow-list and the own TLS certificate (like the reset to defaults on the page)
+    // and restarts
     vTaskDelay(pdMS_TO_TICKS(20));
     if (gpio_get_level(static_cast<gpio_num_t>(s_button_pin)) != 0)
         return;
@@ -9868,7 +9870,8 @@ static void setup_the_button()
         }
     }
     const esp_err_t err = web_settings_factory_reset();
-    ESP_LOGW(TAG, "Web settings, password and allow-list erased by the button (%s), restarting", esp_err_to_name(err));
+    web_tls_clear_own();
+    ESP_LOGW(TAG, "Web settings, password, allow-list and own certificate erased by the button (%s), restarting", esp_err_to_name(err));
     display_line(1, "Web settings reset");
     display_line(2, "Release the button");
     while (gpio_get_level(static_cast<gpio_num_t>(s_button_pin)) == 0)

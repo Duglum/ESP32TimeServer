@@ -39,6 +39,7 @@ extern "C"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/platform_util.h"
 #include "mbedtls/ssl_ciphersuites.h"
 #include "mbedtls/x509_crt.h"
 }
@@ -64,9 +65,12 @@ namespace
     constexpr size_t MAX_BODY = 4096;
     // Apply and Save: every setting of the page, with an MQTT CA certificate of up to 4096 characters
     constexpr size_t SETTINGS_BODY_MAX = 12288;
+    // /api/tls: the own certificate chain and key with JSON escapes and the other fields
+    constexpr size_t TLS_BODY_MAX = WEB_TLS_CERT_PEM_MAX + WEB_TLS_KEY_PEM_MAX + 1024;
     // Configuration files (import): a complete settings set with the secrets, the allow-list and the information
-    // fields, formatted (about 4 kB, and up to 4.2 kB more with the MQTT CA certificate)
-    constexpr size_t CONFIG_BODY_MAX = 12288;
+    // fields, formatted (about 4 kB, and up to 4.2 kB more with the MQTT CA certificate), plus the own TLS certificate
+    // and key
+    constexpr size_t CONFIG_BODY_MAX = 12288 + TLS_BODY_MAX;
     // Marker and format version of a configuration file (export and import, /api/config)
     constexpr char CONFIG_MARKER[] = "timeserver_config";
     constexpr int CONFIG_FORMAT = 1;
@@ -1055,6 +1059,47 @@ namespace
         return send_ok(req, nullptr);
     }
 
+    // "tls": the certificate in use and the stored own one (no key)
+    void add_tls_json(cJSON *parent)
+    {
+        cJSON *tls = cJSON_AddObjectToObject(parent, "tls");
+        cJSON_AddStringToObject(tls, "mode", s_identity.own ? "own" : "self");
+        cJSON_AddStringToObject(tls, "fingerprint", s_identity.fingerprint);
+        web_tls_info_t *info = new (std::nothrow) web_tls_info_t{}; // about 1 kB: not on the server task stack
+        if (info == nullptr || !web_tls_own_info(*info))
+        {
+            cJSON_AddNullToObject(tls, "own");
+            delete info;
+            return;
+        }
+        const auto add_utc = [](cJSON *object, const char *name, int64_t when) {
+            const time_t t = static_cast<time_t>(when);
+            struct tm utc{};
+            gmtime_r(&t, &utc);
+            char text[32] = "";
+            strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc);
+            cJSON_AddStringToObject(object, name, text);
+        };
+        cJSON *own = cJSON_AddObjectToObject(tls, "own");
+        cJSON_AddStringToObject(own, "subject", info->subject);
+        cJSON_AddStringToObject(own, "issuer", info->issuer);
+        cJSON *san = cJSON_AddArrayToObject(own, "san");
+        for (size_t i = 0; i < info->san_count; ++i)
+            cJSON_AddItemToArray(san, cJSON_CreateString(info->san[i]));
+        add_utc(own, "not_before", info->not_before);
+        add_utc(own, "not_after", info->not_after);
+        const time_t now = time(nullptr);
+        if (now > 1767225600) // after 2026-01-01: the clock is set
+            cJSON_AddNumberToObject(own, "days_left", static_cast<double>((info->not_after - now) / 86400));
+        else
+            cJSON_AddNullToObject(own, "days_left");
+        cJSON_AddBoolToObject(own, "valid_now", now <= 1767225600 || (now >= info->not_before && now <= info->not_after));
+        cJSON_AddStringToObject(own, "key_type", info->key_type);
+        cJSON_AddNumberToObject(own, "chain_length", static_cast<double>(info->chain_length));
+        cJSON_AddStringToObject(own, "fingerprint", info->fingerprint);
+        delete info;
+    }
+
     esp_err_t handle_state(httpd_req_t *req)
     {
         char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
@@ -1083,6 +1128,7 @@ namespace
         cJSON_AddStringToObject(root, "csrf", csrf);
         cJSON_AddBoolToObject(root, "default_password", web_auth_default_password_active());
         cJSON_AddStringToObject(root, "fingerprint", s_identity.fingerprint);
+        add_tls_json(root);
         settings_to_json(cJSON_AddObjectToObject(root, "settings"), sets->running);
         settings_to_json(cJSON_AddObjectToObject(root, "defaults"), sets->defaults);
         if (saved)
@@ -1353,8 +1399,9 @@ namespace
             return send_error(req, "403 Forbidden", "Wrong password");
         if (web_settings_factory_reset() != ESP_OK)
             return send_error(req, "500 Internal Server Error", "NVS could not be erased");
+        web_tls_clear_own();
         web_auth_end_all_sessions();
-        ESP_LOGW(TAG, "Web admin: reset to defaults (settings, password and allow-list erased), restarting");
+        ESP_LOGW(TAG, "Web admin: reset to defaults (settings, password, allow-list and own certificate erased), restarting");
         const esp_err_t err = send_ok(req, "Reset to defaults done. The device restarts with the default settings.");
         schedule_restart("web_admin_factory_reset");
         return err;
@@ -1925,6 +1972,80 @@ namespace
         return send_ok(req, count == 0 ? "Allow-list cleared: every source address may connect." : "Allow-list stored and active.");
     }
 
+    // ---- TLS certificate of the web admin ----
+    // Closes every connection, so that the browser connects again with the certificate in use now. Runs in the
+    // server task after the handler that changed it has sent its answer.
+    void close_sessions_work(void *)
+    {
+        size_t count = MAX_SOCKETS;
+        int fds[MAX_SOCKETS];
+        if (httpd_get_client_list(s_server, &count, fds) != ESP_OK)
+            return;
+        for (size_t i = 0; i < count; ++i)
+            httpd_sess_trigger_close(s_server, fds[i]);
+    }
+
+    // New connections use identity: a TLS session copies the certificate and key when it starts, and starts in this
+    // same task (transport_open), so no lock is needed
+    void use_identity(const web_tls_identity_t &identity)
+    {
+        s_identity = identity;
+        s_tls_config.servercert_buf = s_identity.certificate;
+        s_tls_config.servercert_bytes = s_identity.certificate_length;
+        s_tls_config.serverkey_buf = s_identity.key;
+        s_tls_config.serverkey_bytes = s_identity.key_length;
+    }
+
+    esp_err_t handle_tls_get(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, false, token) != gate_t::passed)
+            return ESP_OK;
+        cJSON *root = cJSON_CreateObject();
+        add_tls_json(root);
+        return send_json(req, "200 OK", root);
+    }
+
+    // {"mode":"own","certificate":"<PEM chain>","key":"<PEM>"} (certificate or key empty or missing: the stored one)
+    // or {"mode":"self"}
+    esp_err_t handle_tls_post(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        cJSON *root = read_json(req, TLS_BODY_MAX);
+        if (root == nullptr)
+            return ESP_OK;
+        const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+        const cJSON *certificate = cJSON_GetObjectItemCaseSensitive(root, "certificate");
+        cJSON *key = cJSON_GetObjectItemCaseSensitive(root, "key");
+        char err[192] = "";
+        bool ok = false;
+        bool own = false;
+        web_tls_identity_t identity{};
+        if (!cJSON_IsString(mode) || (strcmp(mode->valuestring, "own") != 0 && strcmp(mode->valuestring, "self") != 0))
+            snprintf(err, sizeof(err), "mode: own or self");
+        else if ((own = strcmp(mode->valuestring, "own") == 0) && ((certificate != nullptr && !cJSON_IsString(certificate)) || (key != nullptr && !cJSON_IsString(key))))
+            snprintf(err, sizeof(err), "certificate and key: text (PEM) expected");
+        else
+            ok = web_tls_set(own, own && certificate != nullptr ? certificate->valuestring : nullptr, own && key != nullptr ? key->valuestring : nullptr,
+                             identity, err, sizeof(err));
+        if (cJSON_IsString(key))
+            mbedtls_platform_zeroize(key->valuestring, strlen(key->valuestring));
+        cJSON_Delete(root);
+        if (!ok)
+            return send_error(req, "400 Bad Request", err);
+        use_identity(identity);
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddStringToObject(reply, "message", own ? "Own certificate stored and in use. The page connects again with it."
+                                                      : "The self-signed certificate is in use again. The page connects again with it.");
+        add_tls_json(reply);
+        const esp_err_t send_err = send_json(req, "200 OK", reply);
+        httpd_queue_work(s_server, close_sessions_work, nullptr);
+        return send_err;
+    }
+
     // ---- Configuration file ----
     // Export: the settings in use (secrets included) and the allow-list as a JSON file. A read that carries secrets:
     // besides the session it needs the CSRF header, which a page of another site cannot set, and a browser that sends
@@ -1974,7 +2095,16 @@ namespace
             web_auth_format_cidr(entries[i], text, sizeof(text));
             cJSON_AddItemToArray(allow, cJSON_CreateString(text));
         }
+        cJSON *tls = cJSON_AddObjectToObject(root, "tls");
+        cJSON_AddStringToObject(tls, "mode", s_identity.own ? "own" : "self");
+        if (web_tls_own_certificate_pem() != nullptr && web_tls_own_key_pem() != nullptr)
+        {
+            cJSON_AddStringToObject(tls, "certificate", web_tls_own_certificate_pem());
+            cJSON_AddStringToObject(tls, "key", web_tls_own_key_pem());
+        }
         char *text = cJSON_Print(root);
+        if (cJSON *key = cJSON_GetObjectItemCaseSensitive(tls, "key"); cJSON_IsString(key))
+            mbedtls_platform_zeroize(key->valuestring, strlen(key->valuestring));
         cJSON_Delete(root);
         if (text == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
@@ -2019,7 +2149,7 @@ namespace
         }
         web_settings_get_running(sets->running);
         web_settings_defaults(sets->defaults);
-        char err[128] = "";
+        char err[192] = ""; // the longest message of web_tls has 129 characters
         bool ok = true;
         const cJSON *format = cJSON_GetObjectItemCaseSensitive(root, CONFIG_MARKER);
         cJSON *settings = cJSON_GetObjectItemCaseSensitive(root, "settings");
@@ -2063,12 +2193,64 @@ namespace
         }
         // The settings onto the defaults: every field of the file replaces its value, a missing one keeps the default
         ok = ok && settings_from_json(settings, sets->defaults, sets->candidate, err, sizeof(err));
-        cJSON_Delete(root);
-        if (!ok || !settings_valid(sets->candidate, err, sizeof(err)))
+        // "tls" (optional; files of older firmware have none): {"mode":"self"} or {"mode":"own","certificate","key"}
+        cJSON *tls = ok ? cJSON_GetObjectItemCaseSensitive(root, "tls") : nullptr;
+        const bool has_tls = tls != nullptr;
+        bool tls_own = false;
+        char *tls_cert = nullptr;
+        char *tls_key = nullptr;
+        if (has_tls)
         {
+            const cJSON *mode = cJSON_GetObjectItemCaseSensitive(tls, "mode");
+            const cJSON *certificate = cJSON_GetObjectItemCaseSensitive(tls, "certificate");
+            cJSON *key = cJSON_GetObjectItemCaseSensitive(tls, "key");
+            if (!cJSON_IsObject(tls) || !cJSON_IsString(mode) || (strcmp(mode->valuestring, "own") != 0 && strcmp(mode->valuestring, "self") != 0))
+            {
+                snprintf(err, sizeof(err), "Configuration file: tls.mode must be own or self");
+                ok = false;
+            }
+            else if ((tls_own = strcmp(mode->valuestring, "own") == 0) && (!cJSON_IsString(certificate) || !cJSON_IsString(key)))
+            {
+                snprintf(err, sizeof(err), "Configuration file: tls needs the certificate and the key with mode own");
+                ok = false;
+            }
+            else if (tls_own)
+            {
+                tls_cert = strdup(certificate->valuestring);
+                tls_key = strdup(key->valuestring);
+                if (tls_cert == nullptr || tls_key == nullptr)
+                {
+                    snprintf(err, sizeof(err), "Out of memory");
+                    ok = false;
+                }
+            }
+            if (cJSON_IsString(key))
+                mbedtls_platform_zeroize(key->valuestring, strlen(key->valuestring));
+        }
+        const auto free_tls = [&]() {
+            if (tls_key != nullptr)
+                mbedtls_platform_zeroize(tls_key, strlen(tls_key));
+            free(tls_cert);
+            free(tls_key);
+            tls_cert = tls_key = nullptr;
+        };
+        cJSON_Delete(root);
+        web_tls_info_t *tls_info = ok && tls_own ? new (std::nothrow) web_tls_info_t{} : nullptr;
+        if (ok && tls_own && tls_info == nullptr)
+        {
+            snprintf(err, sizeof(err), "Out of memory");
+            ok = false;
+        }
+        // The certificate is checked with the rest, before anything is applied
+        if (!ok || !settings_valid(sets->candidate, err, sizeof(err)) ||
+            (tls_own && !web_tls_check_own(tls_cert, tls_key, *tls_info, err, sizeof(err))))
+        {
+            delete tls_info;
+            free_tls();
             delete sets;
             return send_error(req, "400 Bad Request", err);
         }
+        delete tls_info;
         // The allow-list first: it is refused when it would lock out the address of this request
         if (has_allow)
         {
@@ -2077,11 +2259,27 @@ namespace
             const esp_err_t result = web_auth_set_allow_list(sets->entries, allow_count, peer);
             if (result != ESP_OK)
             {
+                free_tls();
                 delete sets;
                 return result == ESP_ERR_INVALID_STATE
                            ? send_error(req, "409 Conflict", "Refused: the allow-list of the file does not allow your own address")
                            : send_error(req, "500 Internal Server Error", "Allow-list could not be stored");
             }
+        }
+        // The certificate: stored now, new connections use it (the import closes them below when it changed)
+        bool tls_changed = false;
+        if (has_tls)
+        {
+            web_tls_identity_t identity{};
+            const bool stored = web_tls_set(tls_own, tls_cert, tls_key, identity, err, sizeof(err));
+            free_tls();
+            if (!stored)
+            {
+                delete sets;
+                return send_error(req, "500 Internal Server Error", err);
+            }
+            tls_changed = strcmp(identity.fingerprint, s_identity.fingerprint) != 0;
+            use_identity(identity);
         }
         const bool network_changed = web_settings_network_differs(sets->candidate, sets->running);
         const bool restart = web_settings_restart_fields_differ(sets->candidate, sets->running);
@@ -2136,6 +2334,8 @@ namespace
         const esp_err_t send_err = send_json(req, "200 OK", reply);
         if (restart)
             schedule_restart("web_admin_configuration_imported");
+        else if (tls_changed)
+            httpd_queue_work(s_server, close_sessions_work, nullptr);
         return send_err;
     }
 
@@ -2164,6 +2364,8 @@ namespace
             {"/api/factory-reset", HTTP_POST, handle_factory_reset},
             {"/api/password", HTTP_POST, handle_password},
             {"/api/allow-list", HTTP_POST, handle_allow_list},
+            {"/api/tls", HTTP_GET, handle_tls_get},
+            {"/api/tls", HTTP_POST, handle_tls_post},
             {"/api/reboot", HTTP_POST, handle_reboot},
             {"/api/ote", HTTP_POST, handle_ote},
             {"/api/ote/once", HTTP_POST, handle_ote_once},
@@ -2199,13 +2401,10 @@ namespace
             return;
         }
         // Always printed: compare it with the fingerprint shown by the browser before trusting the certificate
-        ESP_LOGI(TAG, "Web admin certificate SHA-256 fingerprint: %s", s_identity.fingerprint);
+        ESP_LOGI(TAG, "Web admin certificate SHA-256 fingerprint (%s): %s", s_identity.own ? "own" : "self-signed", s_identity.fingerprint);
 
         s_tls_config = esp_tls_cfg_server_t{};
-        s_tls_config.servercert_buf = s_identity.certificate_der;
-        s_tls_config.servercert_bytes = s_identity.certificate_length;
-        s_tls_config.serverkey_buf = s_identity.key_der;
-        s_tls_config.serverkey_bytes = s_identity.key_length;
+        use_identity(s_identity);
         s_tls_config.tls_handshake_timeout_ms = HANDSHAKE_TIMEOUT_MS;
         s_tls_config.tls_version = ESP_TLS_VER_TLS_1_3; // see s_ciphersuites
         // esp-tls logs "Setting server TLS version" at info level for every TLS 1.3 connection
@@ -2234,7 +2433,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 26; // 25 routes in use
+        config.max_uri_handlers = 28; // 27 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

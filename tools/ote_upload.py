@@ -10,8 +10,8 @@ The device is addressed by an IP address or by a fully qualified name that is lo
 would resolve them with multicast (mDNS, LLMNR) or NetBIOS. The addresses are tried in the order the
 resolver returns them; -4 / -6 limit the lookup to one address family.
 
-The certificate of the device is self-signed, so it is checked by its SHA-256 fingerprint (shown on the
-web admin page under Status and on the serial console at every start). Without --fingerprint the upload
+The certificate of the device is self-signed (or an own one, Security on the page), so it is checked by its
+SHA-256 fingerprint (shown on the web admin page under Status and on the serial console at every start). Without --fingerprint the upload
 stops and prints the fingerprint the device presented; --insecure skips the check (only on a trusted LAN).
 
 Example:

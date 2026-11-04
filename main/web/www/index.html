@@ -79,6 +79,7 @@
           <dt>Uptime</dt><dd id="st-uptime"></dd>
           <dt>Free heap</dt><dd id="st-heap"></dd>
           <dt>MQTT</dt><dd id="st-mqtt"></dd>
+          <dt>Certificate</dt><dd id="st-certificate"></dd>
           <dt>Certificate SHA-256</dt><dd id="st-fingerprint" class="mono small"></dd>
         </dl>
         <dl class="status-grid">
@@ -341,7 +342,7 @@
           <div class="grid">
             <div class="span2 switch-block">
               <label class="switch"><input type="checkbox" name="button_enabled"> Enable the button <span class="badge restart">restart</span></label>
-              <small class="note">Push button from the GPIO to GND (internal pull-up); it also works without the LCD. Held for 10 s it erases the stored GNSS data and restarts the device. Held while the device starts it resets the settings, the password and the allow-list to their defaults (forgotten password). With the LCD, a short press shows the uptime for 10 s.</small>
+              <small class="note">Push button from the GPIO to GND (internal pull-up); it also works without the LCD. Held for 10 s it erases the stored GNSS data and restarts the device. Held while the device starts it resets the settings, the password and the allow-list to their defaults and erases an own TLS certificate (forgotten password). With the LCD, a short press shows the uptime for 10 s.</small>
             </div>
             <label><span class="lt">Button pin (GPIO) <span class="badge restart">restart</span></span><input type="number" name="button_pin" min="0" max="54"><small class="def" data-for="button_pin"></small></label>
           </div>
@@ -489,13 +490,13 @@
           <button type="button" id="btn-reboot" title="Restart the device">Reboot</button>
           <button type="button" class="danger" id="btn-factory" title="Back to the default settings">Reset to defaults</button>
         </div>
-        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the default settings and the default password (the TLS certificate is kept).</p>
+        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the default settings and the default password (the self-signed TLS certificate is kept, an own one is erased).</p>
       </div>
     </form>
 
     <section class="card" id="factory-card" hidden>
       <h2>Reset to defaults</h2>
-      <p>This erases the saved settings, the web admin password and the allow-list, then restarts the device.</p>
+      <p>This erases the saved settings, the web admin password, the allow-list and an own TLS certificate, then restarts the device.</p>
       <form id="factory-form" class="stack">
         <label><span class="lt">Current password</span><input type="password" id="factory-password" autocomplete="current-password" maxlength="128" required></label>
         <div class="buttons left">
@@ -550,8 +551,8 @@
           </div>
         </form>
         <h3 class="sub-heading">Configuration</h3>
-        <p class="hint first"><em>Export configuration</em> saves all settings in use and the allow-list as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the TLS key of the device.</p>
-        <p class="callout">The file contains secrets in clear text (MQTT password, NTP keys): keep it as safe as a password.</p>
+        <p class="hint first"><em>Export configuration</em> saves all settings in use, the allow-list and an own TLS certificate with its key as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the key of the self-signed certificate.</p>
+        <p class="callout">The file contains secrets in clear text (MQTT password, NTP keys, the key of an own TLS certificate): keep it as safe as a password.</p>
         <div class="buttons left">
           <button type="button" id="config-export">Export configuration</button>
         </div>
@@ -559,7 +560,7 @@
           <label><span class="lt">Configuration file (.json)</span>
             <input type="file" id="config-file" accept=".json,application/json" required>
           </label>
-          <small class="note">The file is checked like <em>Apply</em> and saved; the device restarts if a setting needs it. Changed network settings have to be confirmed within 120 s and saved afterwards. A setting the file lacks gets its default; a file without an allow-list leaves the allow-list unchanged.</small>
+          <small class="note">The file is checked like <em>Apply</em> and saved; the device restarts if a setting needs it. Changed network settings have to be confirmed within 120 s and saved afterwards. A setting the file lacks gets its default; a file without an allow-list leaves the allow-list unchanged, a file without a TLS certificate the certificate.</small>
           <div class="buttons left">
             <button type="submit" id="config-import">Import configuration</button>
           </div>
@@ -592,6 +593,35 @@
             </div>
             <button type="submit">Store allow-list</button>
             <p class="hint">Takes effect and is stored at once. Connections from other addresses are closed before the TLS handshake. A list that does not contain your own address is refused.</p>
+          </form>
+          <form id="tls-form" class="span2 stack">
+            <h3>TLS certificate of the web admin</h3>
+            <div class="radio-row" role="radiogroup">
+              <label><input type="radio" name="tls_mode" value="self"> Self-signed (created on the device)</label>
+              <label><input type="radio" name="tls_mode" value="own"> Own certificate</label>
+            </div>
+            <small class="note" id="tls-self-note">The device's own key (ECDSA P-256) never leaves it; the certificate is issued for the host name or FQDN and issued again when it changes. Browsers warn until it is accepted once.</small>
+            <div class="tls-fields" id="tls-own-fields" hidden>
+              <label><span class="lt">Certificate chain (PEM): the server certificate first, then the intermediates</span>
+                <textarea id="tls-cert" class="mono small" rows="8" maxlength="8192" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+                <small class="note" id="tls-cert-state"></small>
+              </label>
+              <label><span class="lt">Private key (PEM, not encrypted)</span>
+                <textarea id="tls-key" class="mono small" rows="8" maxlength="4096" spellcheck="false" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+                <small class="note" id="tls-key-state"></small>
+              </label>
+            </div>
+            <dl class="status-grid tls-info" id="tls-info" hidden>
+              <dt>Subject</dt><dd id="tls-subject"></dd>
+              <dt>Names (SAN)</dt><dd id="tls-san"></dd>
+              <dt>Issuer</dt><dd id="tls-issuer"></dd>
+              <dt>Valid</dt><dd id="tls-valid"></dd>
+              <dt>Key</dt><dd id="tls-key-type"></dd>
+              <dt>SHA-256</dt><dd id="tls-fingerprint" class="mono small"></dd>
+            </dl>
+            <p class="callout" id="tls-warn" hidden></p>
+            <div><button type="submit" id="tls-store" class="primary">Store certificate</button></div>
+            <p class="hint">Checked and stored at once; the page then connects again with the certificate in use (reload it if it does not). Refused: a key that does not belong to the certificate, an encrypted key, other key types. <strong>Reset to defaults</strong> erases the own certificate and returns to the self-signed one. The configuration file (export) contains the own certificate and its key.</p>
           </form>
         </div>
       </details>

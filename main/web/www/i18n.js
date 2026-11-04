@@ -365,8 +365,8 @@
     'Status of IPv4 and IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)': 'Status von IPv4 und IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)',
     'Empty (privacy)': 'Leer (Privatsphäre)',
     'Uptime / restart button': 'Uptime-/Neustart-Taster',
-    'Push button from the GPIO to GND (internal pull-up); it also works without the LCD. Held for 10 s it erases the stored GNSS data and restarts the device. Held while the device starts it resets the settings, the password and the allow-list to their defaults (forgotten password). With the LCD, a short press shows the uptime for 10 s.':
-      'Taster vom GPIO nach GND (interner Pull-up); er funktioniert auch ohne LCD. 10 s gehalten löscht er die gespeicherten GNSS-Daten und startet das Gerät neu. Beim Start gehalten setzt er die Einstellungen, das Passwort und die Allow-List auf ihre Standardwerte zurück (vergessenes Passwort). Mit LCD zeigt ein kurzer Druck 10 s lang die Laufzeit.',
+    'Push button from the GPIO to GND (internal pull-up); it also works without the LCD. Held for 10 s it erases the stored GNSS data and restarts the device. Held while the device starts it resets the settings, the password and the allow-list to their defaults and erases an own TLS certificate (forgotten password). With the LCD, a short press shows the uptime for 10 s.':
+      'Taster vom GPIO nach GND (interner Pull-up); er funktioniert auch ohne LCD. 10 s gehalten löscht er die gespeicherten GNSS-Daten und startet das Gerät neu. Beim Start gehalten setzt er die Einstellungen, das Passwort und die Allow-List auf ihre Standardwerte zurück und löscht ein eigenes TLS-Zertifikat (vergessenes Passwort). Mit LCD zeigt ein kurzer Druck 10 s lang die Laufzeit.',
     'Button pin (GPIO) <span class="badge restart">restart</span>': 'Taster-Pin (GPIO) <span class="badge restart">Neustart</span>',
     'Button pin': 'Taster-Pin',
     'With IPv4 only or IPv6 only the address of that family is shown. An IPv4 or IPv6 address line shows the other family while the chosen one has no address; IPv6 shows the address of the widest scope (global, unique local, link-local), in two halves.':
@@ -536,10 +536,10 @@
     'Reboot': 'Neu starten',
     'Back to the default settings': 'Zurück zu den Standardeinstellungen',
     'Reset to defaults': 'Auf Standard zurücksetzen',
-    '<strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the default settings and the default password (the TLS certificate is kept).':
-      '<strong>Übernehmen:</strong> sofort wirksam, nicht gespeichert. <strong>Einstellungen speichern:</strong> Die Einstellungen werden in NVS (Flash) gespeichert und bei jedem Start geladen. <strong>Neu starten:</strong> startet mit den gespeicherten Einstellungen neu. <strong>Auf Standard zurücksetzen:</strong> zurück zu den Standardeinstellungen und dem Standardpasswort (das TLS-Zertifikat bleibt erhalten).',
-    'This erases the saved settings, the web admin password and the allow-list, then restarts the device.':
-      'Dies löscht die gespeicherten Einstellungen, das Web-Admin-Passwort und die Allow-List und startet das Gerät dann neu.',
+    '<strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the default settings and the default password (the self-signed TLS certificate is kept, an own one is erased).':
+      '<strong>Übernehmen:</strong> sofort wirksam, nicht gespeichert. <strong>Einstellungen speichern:</strong> Die Einstellungen werden in NVS (Flash) gespeichert und bei jedem Start geladen. <strong>Neu starten:</strong> startet mit den gespeicherten Einstellungen neu. <strong>Auf Standard zurücksetzen:</strong> zurück zu den Standardeinstellungen und dem Standardpasswort (das selbstsignierte TLS-Zertifikat bleibt erhalten, ein eigenes wird gelöscht).',
+    'This erases the saved settings, the web admin password, the allow-list and an own TLS certificate, then restarts the device.':
+      'Dies löscht die gespeicherten Einstellungen, das Web-Admin-Passwort, die Allow-List und ein eigenes TLS-Zertifikat und startet das Gerät dann neu.',
     'Current password': 'Aktuelles Passwort',
     'Erase and restart': 'Löschen und neu starten',
     'Cancel': 'Abbrechen',
@@ -547,14 +547,14 @@
     // ---- Firmware update ----
     'Firmware and Configuration': 'Firmware und Konfiguration',
     'Configuration': 'Konfiguration',
-    '<em>Export configuration</em> saves all settings in use and the allow-list as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the TLS key of the device.':
-      '<em>Konfiguration exportieren</em> speichert alle verwendeten Einstellungen und die Allow-List als JSON-Datei; <em>Konfiguration importieren</em> lädt eine solche Datei und ersetzt alle Einstellungen und die Allow-List auf einmal. Nicht in der Datei: das Passwort dieser Seite und der TLS-Schlüssel des Geräts.',
-    'The file contains secrets in clear text (MQTT password, NTP keys): keep it as safe as a password.':
-      'Die Datei enthält Geheimnisse im Klartext (MQTT-Passwort, NTP-Schlüssel): bewahren Sie sie so sicher auf wie ein Passwort.',
+    '<em>Export configuration</em> saves all settings in use, the allow-list and an own TLS certificate with its key as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the key of the self-signed certificate.':
+      '<em>Konfiguration exportieren</em> speichert alle verwendeten Einstellungen, die Allow-List und ein eigenes TLS-Zertifikat mit seinem Schlüssel als JSON-Datei; <em>Konfiguration importieren</em> lädt eine solche Datei und ersetzt alle Einstellungen und die Allow-List auf einmal. Nicht in der Datei: das Passwort dieser Seite und der Schlüssel des selbstsignierten Zertifikats.',
+    'The file contains secrets in clear text (MQTT password, NTP keys, the key of an own TLS certificate): keep it as safe as a password.':
+      'Die Datei enthält Geheimnisse im Klartext (MQTT-Passwort, NTP-Schlüssel, der Schlüssel eines eigenen TLS-Zertifikats): bewahren Sie sie so sicher auf wie ein Passwort.',
     'Export configuration': 'Konfiguration exportieren',
     'Configuration file (.json)': 'Konfigurationsdatei (.json)',
-    'The file is checked like <em>Apply</em> and saved; the device restarts if a setting needs it. Changed network settings have to be confirmed within 120 s and saved afterwards. A setting the file lacks gets its default; a file without an allow-list leaves the allow-list unchanged.':
-      'Die Datei wird wie bei <em>Übernehmen</em> geprüft und gespeichert; das Gerät startet neu, wenn eine Einstellung das braucht. Geänderte Netzwerkeinstellungen müssen innerhalb von 120 s bestätigt und danach gespeichert werden. Eine Einstellung, die in der Datei fehlt, erhält ihren Standardwert; eine Datei ohne Allow-List lässt die Allow-List unverändert.',
+    'The file is checked like <em>Apply</em> and saved; the device restarts if a setting needs it. Changed network settings have to be confirmed within 120 s and saved afterwards. A setting the file lacks gets its default; a file without an allow-list leaves the allow-list unchanged, a file without a TLS certificate the certificate.':
+      'Die Datei wird wie bei <em>Übernehmen</em> geprüft und gespeichert; das Gerät startet neu, wenn eine Einstellung das braucht. Geänderte Netzwerkeinstellungen müssen innerhalb von 120 s bestätigt und danach gespeichert werden. Eine Einstellung, die in der Datei fehlt, erhält ihren Standardwert; eine Datei ohne Allow-List lässt die Allow-List unverändert, eine Datei ohne TLS-Zertifikat das Zertifikat.',
     'Import configuration': 'Konfiguration importieren',
     'Configuration exported. The file contains secrets: keep it safe.': 'Konfiguration exportiert. Die Datei enthält Geheimnisse: sicher aufbewahren.',
     'The file is no JSON file.': 'Die Datei ist keine JSON-Datei.',
@@ -562,7 +562,7 @@
     'This is no configuration file of ESP32 Time Server': 'Dies ist keine Konfigurationsdatei von ESP32 Time Server',
     'Configuration file: the settings are missing': 'Konfigurationsdatei: die Einstellungen fehlen',
     'Request body nested too deeply or with too many values': 'Anfrage zu tief verschachtelt oder mit zu vielen Werten',
-    'The file is too large for a configuration file (at most 12 kB).': 'Die Datei ist zu groß für eine Konfigurationsdatei (höchstens 12 kB).',
+    'The file is too large for a configuration file (at most 25 kB).': 'Die Datei ist zu groß für eine Konfigurationsdatei (höchstens 25 kB).',
     'Configuration imported. The device restarts once with it: confirm the network settings within 120 s, then save them.':
       'Konfiguration importiert. Das Gerät startet einmal damit neu: die Netzwerkeinstellungen innerhalb von 120 s bestätigen und dann speichern.',
     'Configuration imported, not saved yet: confirm the network settings within 120 s, then save them.':
@@ -626,6 +626,37 @@
     'Store allow-list': 'Allow-List speichern',
     'Takes effect and is stored at once. Connections from other addresses are closed before the TLS handshake. A list that does not contain your own address is refused.':
       'Wirkt sofort und wird sofort gespeichert. Verbindungen von anderen Adressen werden vor dem TLS-Handshake geschlossen. Eine Liste ohne Ihre eigene Adresse wird abgelehnt.',
+    // TLS certificate of the web admin (Security)
+    'Certificate': 'Zertifikat',
+    'self-signed': 'selbstsigniert',
+    'own: {subject}, issued by {issuer}, valid until {date}': 'eigenes: {subject}, ausgestellt von {issuer}, gültig bis {date}',
+    '({days} days left)': '(noch {days} Tage)',
+    '(expired {days} days ago)': '(seit {days} Tagen abgelaufen)',
+    'TLS certificate of the web admin': 'TLS-Zertifikat des Web-Admins',
+    'Self-signed (created on the device)': 'Selbstsigniert (auf dem Gerät erzeugt)',
+    'Own certificate': 'Eigenes Zertifikat',
+    "The device's own key (ECDSA P-256) never leaves it; the certificate is issued for the host name or FQDN and issued again when it changes. Browsers warn until it is accepted once.":
+      'Der eigene Schlüssel des Geräts (ECDSA P-256) verlässt es nie; das Zertifikat wird für den Hostnamen bzw. FQDN ausgestellt und bei einer Änderung neu ausgestellt. Browser warnen, bis es einmal akzeptiert wurde.',
+    'Certificate chain (PEM): the server certificate first, then the intermediates': 'Zertifikatskette (PEM): zuerst das Server-Zertifikat, dann die Zwischenzertifikate',
+    'Private key (PEM, not encrypted)': 'Privater Schlüssel (PEM, unverschlüsselt)',
+    'Subject': 'Inhaber (Subject)',
+    'Names (SAN)': 'Namen (SAN)',
+    'Issuer': 'Aussteller',
+    'Valid': 'Gültig',
+    'SHA-256': 'SHA-256',
+    'Store certificate': 'Zertifikat speichern',
+    'Checked and stored at once; the page then connects again with the certificate in use (reload it if it does not). Refused: a key that does not belong to the certificate, an encrypted key, other key types. <strong>Reset to defaults</strong> erases the own certificate and returns to the self-signed one. The configuration file (export) contains the own certificate and its key.':
+      'Wird sofort geprüft und gespeichert; die Seite verbindet sich danach mit dem verwendeten Zertifikat neu (sonst neu laden). Abgelehnt: ein Schlüssel, der nicht zum Zertifikat gehört, ein verschlüsselter Schlüssel, andere Schlüsseltypen. <strong>Auf Standard zurücksetzen</strong> löscht das eigene Zertifikat und kehrt zum selbstsignierten zurück. Die Konfigurationsdatei (Export) enthält das eigene Zertifikat und seinen Schlüssel.',
+    'An own certificate is stored (see below). Leave empty to keep it.': 'Ein eigenes Zertifikat ist gespeichert (siehe unten). Leer lassen, um es zu behalten.',
+    'At most 8192 characters. ECDSA (P-256, P-384) or RSA (2048 to 4096 bit).': 'Höchstens 8192 Zeichen. ECDSA (P-256, P-384) oder RSA (2048 bis 4096 Bit).',
+    'A key is stored. Leave empty to keep it; it is never shown again.': 'Ein Schlüssel ist gespeichert. Leer lassen, um ihn zu behalten; er wird nie wieder angezeigt.',
+    'No key stored.': 'Kein Schlüssel gespeichert.',
+    '{from} to {to}': '{from} bis {to}',
+    '{type}, belongs to the certificate': '{type}, gehört zum Zertifikat',
+    '{n} certificates in the chain': '{n} Zertifikate in der Kette',
+    'The certificate has expired.': 'Das Zertifikat ist abgelaufen.',
+    'The certificate is not valid yet.': 'Das Zertifikat ist noch nicht gültig.',
+    'The certificate does not contain the name or address this page is opened with ({host}).': 'Das Zertifikat enthält den Namen bzw. die Adresse nicht, mit der diese Seite geöffnet ist ({host}).',
 
     // ---- Messages of the page ----
     'The device does not answer (restarting or a different address?)': 'Das Gerät antwortet nicht (Neustart oder andere Adresse?)',
@@ -675,6 +706,19 @@
     'Request rejected (origin or CSRF token)': 'Anfrage abgelehnt (Origin oder CSRF-Token)',
     'Not found': 'Nicht gefunden',
     'Out of memory': 'Zu wenig Speicher',
+    // TLS certificate of the web admin
+    'Own certificate stored and in use. The page connects again with it.': 'Eigenes Zertifikat gespeichert und in Verwendung. Die Seite verbindet sich damit neu.',
+    'The self-signed certificate is in use again. The page connects again with it.': 'Das selbstsignierte Zertifikat ist wieder in Verwendung. Die Seite verbindet sich damit neu.',
+    'Certificate: paste the certificate chain (PEM)': 'Zertifikat: die Zertifikatskette (PEM) einfügen',
+    'No private key stored: paste the private key (PEM)': 'Kein privater Schlüssel gespeichert: den privaten Schlüssel (PEM) einfügen',
+    'Private key: encrypted; export it without a password': 'Privater Schlüssel: verschlüsselt; ohne Passwort exportieren',
+    'Private key: only ECDSA P-256, P-384 or RSA with 2048 to 4096 bits': 'Privater Schlüssel: nur ECDSA P-256, P-384 oder RSA mit 2048 bis 4096 Bit',
+    'The private key does not belong to the first certificate of the chain': 'Der private Schlüssel gehört nicht zum ersten Zertifikat der Kette',
+    'The certificate could not be stored (NVS)': 'Das Zertifikat konnte nicht gespeichert werden (NVS)',
+    'mode: own or self': 'mode: own oder self',
+    'certificate and key: text (PEM) expected': 'certificate und key: Text (PEM) erwartet',
+    'Configuration file: tls.mode must be own or self': 'Konfigurationsdatei: tls.mode muss own oder self sein',
+    'Configuration file: tls needs the certificate and the key with mode own': 'Konfigurationsdatei: tls braucht bei mode own das Zertifikat und den Schlüssel',
     'Fields mode (text or ubx) and command expected': 'Felder mode (text oder ubx) und command erwartet',
     'The UART of the GNSS receiver is not running': 'Der UART des GNSS-Empfängers läuft nicht',
     'UBX commands need the protocol U-Blox UBX': 'UBX-Befehle brauchen das Protokoll U-Blox UBX',
@@ -780,6 +824,11 @@
     ['At most %u DNS servers', 'Höchstens {1} DNS-Server'],
     ['At most %u NTP keys', 'Höchstens {1} NTP-Schlüssel'],
     ['At most %u entries', 'Höchstens {1} Einträge'],
+    ['Certificate: PEM with one or more BEGIN CERTIFICATE / END CERTIFICATE blocks expected, at most %u characters', 'Zertifikat: PEM mit einem oder mehreren Blöcken BEGIN CERTIFICATE / END CERTIFICATE erwartet, höchstens {1} Zeichen'],
+    ['Private key: one PEM block BEGIN PRIVATE KEY, EC PRIVATE KEY or RSA PRIVATE KEY expected (not encrypted), at most %u characters', 'Privater Schlüssel: ein PEM-Block BEGIN PRIVATE KEY, EC PRIVATE KEY oder RSA PRIVATE KEY erwartet (unverschlüsselt), höchstens {1} Zeichen'],
+    ['Certificate: not a valid X.509 certificate chain (mbedTLS -0x%04x)', 'Zertifikat: keine gültige X.509-Zertifikatskette (mbedTLS -0x{1})'],
+    ['Private key: could not be read (mbedTLS -0x%04x)', 'Privater Schlüssel: nicht lesbar (mbedTLS -0x{1})'],
+    ['The certificate could not be stored (NVS: %s)', 'Das Zertifikat konnte nicht gespeichert werden (NVS: {1})'],
     ['DNS server %u is not valid', 'DNS-Server {1} ist ungültig'],
     ['DNS server %u is not an IPv4 or IPv6 address', 'DNS-Server {1} ist keine IPv4- oder IPv6-Adresse'],
     ['DNS server %u: not a unicast address', 'DNS-Server {1}: keine Unicast-Adresse'],
@@ -824,8 +873,8 @@
     'qErr', 'ADEV', 'TDEV',
     'Topic', 'CMD (GPIO)', 'CLK (GPIO)', 'D0 (GPIO)', 'D1 (GPIO)', 'D2 (GPIO)', 'D3 (GPIO)', 'KY-016', 'WS2812',
     'CET-1CEST,M3.5.0,M10.5.0/3', '192.168.1.0/24 fd00::/8', '$CFGMSG,0,4,1', '0A 04',
-    // MQTT placeholders
-    'mqtt.example.org', '-----BEGIN CERTIFICATE-----']) {
+    // MQTT and web admin certificate placeholders
+    'mqtt.example.org', '-----BEGIN CERTIFICATE-----', '-----BEGIN PRIVATE KEY-----']) {
     if (!Object.prototype.hasOwnProperty.call(de, text)) de[text] = text;
   }
 

@@ -942,6 +942,8 @@
     $('mac-hardware').textContent = st.mac_hardware;
     f.mac_address.placeholder = st.mac_hardware;
     $('st-fingerprint').textContent = state.fingerprint;
+    $('st-certificate').textContent = certificateText(state.tls);
+    renderTls(false);
     // Same form as the IPv6 lines: address in the first line, gateway and source in the second
     const mode = state.settings.ip_mode;
     fillList('st-ipv4', st.ipv4_address
@@ -1326,6 +1328,7 @@
     if (fill) {
       fillForm(state.settings);
       $('allow-list').value = (state.allow_list || []).join('\n');
+      renderTls(true);
     }
     return true;
   }
@@ -1451,9 +1454,9 @@
     e.preventDefault();
     const file = $('config-file').files[0];
     if (!file) return;
-    // The device takes at most 12288 bytes; a larger file is not even read
-    if (file.size > 12288) {
-      show(t('The file is too large for a configuration file (at most 12 kB).'), 'error');
+    // The device takes at most 25600 bytes (CONFIG_BODY_MAX); a larger file is not even read
+    if (file.size > 25600) {
+      show(t('The file is too large for a configuration file (at most 25 kB).'), 'error');
       return;
     }
     let body;
@@ -1579,6 +1582,95 @@
     setBusy(false);
     show(r.status === 200 ? ts(r.data.message) : (ts(r.data.error) || t('Allow-list could not be stored')), r.status === 200 ? 'ok' : 'error');
     if (r.status === 200) await loadState(false);
+  });
+
+  // ---- TLS certificate of the web admin ----
+  function tlsMode() {
+    const checked = document.querySelector('input[name="tls_mode"]:checked');
+    return checked ? checked.value : 'self';
+  }
+
+  function daysLeft(own) {
+    if (own.days_left === null) return '';
+    return ' ' + (own.days_left < 0 ? t('(expired {days} days ago)', { days: -own.days_left }) : t('({days} days left)', { days: own.days_left }));
+  }
+
+  function certificateText(tls) {
+    if (!tls) return '';
+    if (tls.mode !== 'own' || !tls.own) return t('self-signed');
+    const o = tls.own;
+    return t('own: {subject}, issued by {issuer}, valid until {date}', { subject: o.subject, issuer: o.issuer, date: o.not_after.slice(0, 10) }) + daysLeft(o);
+  }
+
+  // A name of the certificate (DNS name or IP address; "*." stands for one label) covers the host of this page
+  function sanMatches(names, host) {
+    host = host.replace(/^\[|\]$/g, '').toLowerCase();
+    return (names || []).some((name) => {
+      name = name.toLowerCase();
+      if (name === host) return true;
+      const dot = host.indexOf('.');
+      return name.startsWith('*.') && dot > 0 && host.slice(dot + 1) === name.slice(2);
+    });
+  }
+
+  // fill: the selection and the empty text boxes from the device (at the start and after storing); otherwise only
+  // what follows from the selection, so the 10-s refresh does not touch what is being typed
+  function renderTls(fill) {
+    const tls = (state && state.tls) || { mode: 'self', own: null };
+    if (fill) {
+      for (const r of document.querySelectorAll('input[name="tls_mode"]')) r.checked = r.value === tls.mode;
+      $('tls-cert').value = '';
+      $('tls-key').value = '';
+    }
+    const own = tlsMode() === 'own';
+    const o = tls.own;
+    $('tls-self-note').hidden = own;
+    $('tls-own-fields').hidden = !own;
+    $('tls-cert-state').textContent = o ? t('An own certificate is stored (see below). Leave empty to keep it.')
+      : t('At most 8192 characters. ECDSA (P-256, P-384) or RSA (2048 to 4096 bit).');
+    $('tls-key-state').textContent = o ? t('A key is stored. Leave empty to keep it; it is never shown again.') : t('No key stored.');
+    $('tls-info').hidden = !own || !o;
+    const warnings = [];
+    if (o) {
+      $('tls-subject').textContent = o.subject;
+      $('tls-san').textContent = o.san.length ? o.san.join(', ') : t('none');
+      $('tls-issuer').textContent = o.issuer;
+      $('tls-valid').textContent = t('{from} to {to}', { from: o.not_before.slice(0, 10), to: o.not_after.slice(0, 10) }) + daysLeft(o);
+      $('tls-key-type').textContent = t('{type}, belongs to the certificate', { type: o.key_type }) +
+        (o.chain_length > 1 ? ' · ' + t('{n} certificates in the chain', { n: o.chain_length }) : '');
+      $('tls-fingerprint').textContent = o.fingerprint;
+      if (!o.valid_now) warnings.push(o.days_left !== null && o.days_left < 0 ? t('The certificate has expired.') : t('The certificate is not valid yet.'));
+      if (!sanMatches(o.san, location.hostname)) {
+        warnings.push(t('The certificate does not contain the name or address this page is opened with ({host}).', { host: location.hostname }));
+      }
+    }
+    $('tls-warn').textContent = warnings.join(' ');
+    $('tls-warn').hidden = !own || warnings.length === 0;
+  }
+
+  for (const r of document.querySelectorAll('input[name="tls_mode"]')) r.addEventListener('change', () => renderTls(false));
+
+  $('tls-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = { mode: tlsMode() };
+    if (body.mode === 'own') {
+      const cert = $('tls-cert').value.trim();
+      const key = $('tls-key').value.trim();
+      if (cert) body.certificate = cert + '\n';
+      if (key) body.key = key + '\n';
+    }
+    setBusy(true);
+    const r = await api('/api/tls', body);
+    setBusy(false);
+    if (r.status !== 200) {
+      show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
+      return;
+    }
+    state.tls = r.data.tls;
+    renderTls(true);
+    show(ts(r.data.message), 'ok');
+    // The device closed its connections: load the page again over a new one, with the certificate in use now
+    setTimeout(() => location.reload(), 2500);
   });
 
   // ---- Firmware update (Over The Ethernet) ----

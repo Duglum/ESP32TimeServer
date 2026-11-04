@@ -5,7 +5,7 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
 ## Authentication
 
 1. **Allow-list.** Each new TCP connection is checked against the allow-list first. A source that is not allowed is closed before the TLS handshake. The allow-list applies to every path, the static files included.
-2. **TLS.** Everything runs over HTTPS with the device's own certificate, TLS 1.3 only: a client that only knows TLS 1.2 (e.g. `curl.exe` of Windows 10, which uses Schannel) is refused; use a browser, Python or a curl built with OpenSSL. It is self-signed and created at the first start. Compare its SHA-256 fingerprint with the one in the *Status* section or on the serial console.
+2. **TLS.** Everything runs over HTTPS with the device's own certificate, TLS 1.3 only: a client that only knows TLS 1.2 (e.g. `curl.exe` of Windows 10, which uses Schannel) is refused; use a browser, Python or a curl built with OpenSSL. By default it is self-signed and created at the first start; an own certificate (e.g. of a public or company CA) can be set with `/api/tls`. Compare the SHA-256 fingerprint of the certificate in use with the one in the *Status* section or on the serial console.
 3. **Login.** `POST /api/login` with `{"password": "..."}` returns:
    - a session cookie `__Host-sid` (a 256-bit token, `Secure; HttpOnly; SameSite=Strict`);
    - a CSRF token in the body: `{"csrf": "..."}`. `GET /api/state` returns it again (field `csrf`), so the page has it after a reload.
@@ -29,7 +29,7 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
    - the page shows a red warning;
    - scripted uploads are refused.
 
-Request bodies are limited to 4096 bytes; `/api/apply`, `/api/save` and `/api/config` (import) take up to 12288 bytes (the MQTT CA certificate may have 4096 characters), the firmware upload more. A JSON body may nest at most 8 levels deep and have at most 512 separators (`,` and `:` outside strings); otherwise, or when it is no JSON object, the answer is `400`. Errors come back as `{"error": "..."}` with a matching HTTP status.
+Request bodies are limited to 4096 bytes; `/api/apply` and `/api/save` take up to 12288 bytes (the MQTT CA certificate may have 4096 characters), `/api/tls` up to 13312 bytes, `/api/config` (import) up to 25600 bytes (a complete settings set with the own TLS certificate and its key), the firmware upload more. A JSON body may nest at most 8 levels deep and have at most 512 separators (`,` and `:` outside strings); otherwise, or when it is no JSON object, the answer is `400`. Errors come back as `{"error": "..."}` with a matching HTTP status.
 
 ## Endpoints
 
@@ -38,7 +38,7 @@ Request bodies are limited to 4096 bytes; `/api/apply`, `/api/save` and `/api/co
 | `/api/info` | GET | **none** | Host name and FQDN (for the login page) |
 | `/api/login` | POST | same origin, password in the body | Starts a session: cookie and CSRF token. `401` wrong password, `429` with `Retry-After` while locked out |
 | `/api/logout` | POST | cookie + CSRF (without them only the cookie is cleared) | Ends the session |
-| `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, allow-list, `status` (network: link state, speed, duplex and driver restarts in `link_up`, `link_speed_mbps`, `link_full_duplex`, `eth_recoveries`; MQTT: `mqtt_active`, `mqtt_connected`, `mqtt_broker`, `mqtt_port`, `mqtt_tls`, `mqtt_error` with `mqtt_error_age_s`, `mqtt_connected_s`, `mqtt_published`, `mqtt_publish_age_s`, `mqtt_tf_queue`; time, GNSS, PPS, ...), certificate fingerprint, CSRF token. Secrets (passwords, keys) are not sent back |
+| `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, allow-list, `status` (network: link state, speed, duplex and driver restarts in `link_up`, `link_speed_mbps`, `link_full_duplex`, `eth_recoveries`; MQTT: `mqtt_active`, `mqtt_connected`, `mqtt_broker`, `mqtt_port`, `mqtt_tls`, `mqtt_error` with `mqtt_error_age_s`, `mqtt_connected_s`, `mqtt_published`, `mqtt_publish_age_s`, `mqtt_tf_queue`; time, GNSS, PPS, ...), certificate fingerprint, `tls` (see *TLS certificate* below), CSRF token. Secrets (passwords, keys) are not sent back |
 | `/api/diag` | GET | cookie | Diagnostics: servo, ADEV/TDEV, ISR histogram, NTP paths, basic mode TX delay, load shedding, receive rests of the NTP tasks under a flood (`receive_rests`), RMC phase, UBX details |
 | `/api/coredump` | GET | cookie | Downloads the stored core dump (`404` if there is none) |
 | `/api/apply` | POST | cookie + CSRF | Applies settings now, without storing them. The body is a settings object with the field names of `settings` in `/api/state`; missing fields keep their current value. See the notes below the table. Errors: `400` invalid value, `409` while a network change waits for its confirmation |
@@ -49,7 +49,9 @@ Request bodies are limited to 4096 bytes; `/api/apply`, `/api/save` and `/api/co
 | `/api/reboot` | POST | cookie + CSRF | Restarts with the saved settings; applied but unsaved settings are discarded |
 | `/api/password` | POST | cookie + CSRF + current password | `{"current": "...", "new": "..."}`; the new password has 12 to 128 characters |
 | `/api/allow-list` | POST | cookie + CSRF | `{"entries": ["192.168.8.0/24", "2001:db8::/64", ...]}`: source addresses or networks (CIDR) allowed to connect. `409` if your own address would no longer be allowed |
-| `/api/factory-reset` | POST | cookie + CSRF + current password | *Reset to defaults* (`{"password": "..."}`): erases the saved settings, the password and the allow-list, then restarts. The TLS key and certificate are kept |
+| `/api/tls` | GET | cookie | The certificate in use and the stored own one: `{"tls": {...}}`, see *TLS certificate* below |
+| `/api/tls` | POST | cookie + CSRF | `{"mode": "own", "certificate": "<PEM chain>", "key": "<PEM>"}` or `{"mode": "self"}`: see *TLS certificate* below. `400` with the reason if the certificate or key is refused |
+| `/api/factory-reset` | POST | cookie + CSRF + current password | *Reset to defaults* (`{"password": "..."}`): erases the saved settings, the password, the allow-list and the own TLS certificate with its key, then restarts. The self-signed key and certificate are kept. The button held at the start does the same |
 | `/api/ote/once` | POST | cookie + CSRF | Restarts once with firmware updates (OTE) switched on, until the next restart |
 | `/api/ote` | POST | cookie + CSRF (page) **or** HTTP Basic (script) | Firmware upload. The body is the raw application image (`ESP32TimeServer.bin`, `application/octet-stream`). `403` while OTE updates are switched off. See below |
 | `/api/coredump/erase` | POST | cookie + CSRF | Erases the stored core dump |
@@ -72,7 +74,8 @@ Notes on `/api/apply`:
   "hostname": "ESP32TimeServer",
   "firmware": "3.0.5-WebIf",
   "exported": "2026-11-01T10:15:00Z",
-  "allow_list": ["192.168.8.0/24"]
+  "allow_list": ["192.168.8.0/24"],
+  "tls": { "mode": "own", "certificate": "-----BEGIN CERTIFICATE-----\n...", "key": "-----BEGIN PRIVATE KEY-----\n..." }
 }
 ```
 
@@ -80,13 +83,35 @@ Notes on `/api/apply`:
 - `settings`: the settings in use, with the field names of `settings` in `/api/state`, but with the MQTT password in clear text (`mqtt_password`) in place of `mqtt_password_set`; the NTP keys (`ntp_keys`) are there as on the page. On import a field the file lacks gets its default. A file of an earlier firmware with `mqtt_uri` instead of `mqtt_broker`, `mqtt_port` and `mqtt_tls` is read as with `/api/apply`; with `mqtts://` and MQTT on it needs `mqtt_ca_pem` as well.
 - `hostname`, `firmware`, `exported` (UTC, only when the clock is set): for information, ignored on import.
 - `allow_list`: at most 8 entries as for `/api/allow-list`. On import a file without it leaves the allow-list unchanged; `[]` clears it.
-- Not in the file: the password of the web page and the TLS key and certificate.
+- `tls`: `mode` (`own` or `self`) and, when an own certificate is stored, `certificate` (PEM chain) and `key` (PEM, in clear text). On import a file without it leaves the certificate unchanged; `{"mode": "self"}` switches to the self-signed one (a stored own one is kept); `own` needs `certificate` and `key` and is checked as for `/api/tls`.
+- Not in the file: the password of the web page and the self-signed key and certificate (they never leave the device).
 
-Import (`POST /api/config`): the settings are checked like `/api/apply` and `/api/save`, then the allow-list is stored (refused with `409` if it would not allow your own address). Then:
+Import (`POST /api/config`): the settings are checked like `/api/apply` and `/api/save`, and the own TLS certificate as for `/api/tls`; then the allow-list is stored (refused with `409` if it would not allow your own address), then the TLS certificate (when it changed and the device does not restart, it closes its connections after the answer, so that the browser connects again with it). Then:
 - without a change of the network settings the set is saved in NVS and takes effect; if a restart field changed, the device restarts with it (`"restart": true`);
 - with a change of the network settings the set is applied like `/api/apply` and not saved: confirm within 120 s (`network_pending`), then save it with `/api/save`; with a restart field it is written as a one-shot set and the device restarts once.
 
 Answer: `{"ok": true, "message": "...", "restart": ..., "network_changed": ..., "saved": ..., "network_pending": {...}}`.
+
+## TLS certificate (`/api/tls`, `tls` in `/api/state`)
+
+The web admin uses the self-signed certificate of the device (default) or an own one. The own certificate is checked before it is stored:
+- `certificate`: one or more PEM blocks `CERTIFICATE`, at most 8192 characters: the server certificate first, then its intermediates (the root may be left out);
+- `key`: one PEM block `PRIVATE KEY` (PKCS#8), `EC PRIVATE KEY` (optionally after `EC PARAMETERS`) or `RSA PRIVATE KEY`, at most 4096 characters, not encrypted; ECDSA P-256 or P-384, or RSA with 2048 to 4096 bits; it has to belong to the first certificate (proven by a signature made with the key and verified with the certificate).
+
+Not checked (the page shows warnings instead): the validity dates and whether the names fit the address the page is opened with. `certificate` or `key` missing or empty keeps the stored one, so `{"mode": "own"}` switches back to a stored own certificate. `{"mode": "self"}` uses the self-signed certificate; the own one stays stored. The certificate is stored in NVS at once and used for new connections; after the answer the device closes its connections, so that browsers connect again with it (and ask about it if it is not trusted). At every start the stored own certificate is checked again; one that does not pass is not used (a warning on the console) and the self-signed one serves. The key is never sent back. Answer: `{"ok": true, "message": "...", "tls": {...}}`.
+
+`tls` (in `/api/state`, `/api/tls` and the answer of `POST /api/tls`): `mode` (`own` or `self`, the one in use), `fingerprint` (SHA-256 of the certificate in use), `own` (`null` when none is stored): `subject`, `issuer`, `san` (DNS names and IP addresses, at most 8), `not_before`, `not_after` (UTC), `days_left` (`null` while the clock is not set; negative when expired), `valid_now`, `key_type` (`"ECDSA P-256"`, `"RSA 2048"`, ...), `chain_length`, `fingerprint`.
+
+Example of renewing it from a script (e.g. a certbot deploy hook), with the session of *Example with curl* below:
+
+```sh
+python3 -c 'import json,sys; print(json.dumps({"mode": "own", "certificate": open(sys.argv[1]).read(), "key": open(sys.argv[2]).read()}))' \
+    fullchain.pem privkey.pem > tls.json
+curl -k -b jar -H "Origin: https://HOST" -H "Content-Type: application/json" -H "X-CSRF-Token: <csrf>" \
+     --data-binary @tls.json https://HOST/api/tls
+```
+
+`tools/ote_upload.py --fingerprint` takes the fingerprint of the certificate in use, the own one included.
 
 ## GNSS console (`/api/gnss/command`, `/api/gnss/console`)
 
