@@ -7,3 +7,6 @@ CONFIG_ESP_WIFI_REMOTE_ENABLED=n
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
 CONFIG_LWIP_IPV6=y
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
+# No usable ECDSA peripheral before rev v3.0: mbedTLS verifies ECDSA signatures (the MQTT broker certificate) in
+# software, instead of logging "ECDSA peripheral not supported on this chip revision" at every check first
+# CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY is not set
