@@ -145,6 +145,7 @@ struct web_diag_t
     uint32_t sw_replies;
     uint32_t sw_interleaved;
     uint32_t shed;
+    uint32_t receive_rests;       // rests of one tick of the NTP receive tasks under a flood (NTP_RECEIVE_BUSY_LIMIT_US)
     uint32_t lookup_record_hits;
     uint32_t lookup_map_hits;
     uint32_t lookup_misses;

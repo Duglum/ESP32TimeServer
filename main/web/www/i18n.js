@@ -114,6 +114,9 @@
     'Interleaved lookup': 'Interleaved-Zuordnung',
     'Basic mode TX delay': 'TX-Verzögerung Basic Mode',
     'Load shedding': 'Lastabwurf',
+    'Receive rests': 'Empfangspausen',
+    '{n} rests of 1 ms since the start (an NTP receive task was busy for 20 ms without a pause)':
+      '{n} Pausen von 1 ms seit dem Start (ein NTP-Empfangs-Task war 20 ms ohne Pause beschäftigt)',
     'Data': 'Daten',
     'Stability of the GNSS PPS': 'Stabilität des GNSS-PPS',
     'not available (the PTP clock is set once per second)': 'nicht verfügbar (die PTP-Uhr wird einmal pro Sekunde gesetzt)',

@@ -685,6 +685,17 @@ static constexpr uint64_t NTP_EPOCH_OFFSET = 2208988800ULL;
 // NTP_PRECISION_EXPONENT is defined after the local timebase (it follows its resolution)
 static constexpr uint32_t NTP_ROOT_DISPERSION = 1; // NTP short format, 1/65536 s per unit: 1 = 15.3 us, the smallest non-zero value (served at stratum 1 with active PPS only)
 static constexpr size_t NTP_SOCKET_BATCH_LIMIT = 16;
+// Flood guard of the NTP receive tasks (hardware path, priority 17 on core 1; socket path, priority 20): a task that
+// received for this long without waiting once (its queue or socket never ran empty) rests for one tick. Under a flood
+// they would otherwise keep a core to themselves, and the PPS task (14), the GNSS synchronisation (15) and the idle
+// task (task watchdog) on it would get no time. Only reached when the input exceeds what the task serves: at most 1 ms
+// in 20 ms of receiving. The hardware path loses no accuracy (T2 is the hardware receive time stamp, T3 is taken at
+// the transmit); on the socket path T2 is read after recvfrom(), and a datagram that waits during the rest gets it
+// later, as it does in the socket queue that is full anyway at that point.
+static constexpr int64_t NTP_RECEIVE_BUSY_LIMIT_US = 20000;
+// A select() that took longer than this waited for a datagram (the core was free meanwhile)
+static constexpr int64_t NTP_SOCKET_WAITED_US = 100;
+static std::atomic<uint32_t> s_diag_ntp_receive_rests{0};
 static constexpr EventBits_t ETH_CONNECTED_BIT = BIT0;
 static constexpr EventBits_t ETH_GOT_IP_BIT = BIT1;
 static constexpr EventBits_t ETH_GOT_IP6_BIT = BIT2;
@@ -733,6 +744,14 @@ static BaseType_t s_pps_isr_core = tskNO_AFFINITY;
 static SemaphoreHandle_t s_ote_mutex = nullptr;
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
 static SemaphoreHandle_t s_lcd_mutex = nullptr;
+// Lines written by other tasks (network events, GNSS setup and recovery, ...) are handed to the LCD task, which writes
+// them: a slow or failing I2C transfer (i2cdev: up to 4 attempts of 1 s) then delays only the LCD task, not the event
+// loop that also starts DHCP or the task that called
+static TaskHandle_t s_lcd_task_handle = nullptr;
+static portMUX_TYPE s_lcd_pending_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_lcd_pending[lcdRows][lcdColumns + 1] = {};
+static bool s_lcd_pending_set[lcdRows] = {};
+static std::atomic<bool> s_lcd_write_failed{false};
 #endif
 static SemaphoreHandle_t s_sync_state_mutex = nullptr;
 
@@ -2271,6 +2290,8 @@ static void init_lcd_descriptor()
     s_lcd.backlight = true;
 }
 
+static void write_lcd_line(uint8_t row, const char *padded);
+
 static void display_line(uint8_t row, const char *text)
 {
 
@@ -2301,6 +2322,23 @@ static void display_line(uint8_t row, const char *text)
         return;
     }
 
+    // Other tasks hand the line over; the LCD task writes it (flush_lcd_lines)
+    if (s_lcd_task_handle != nullptr && xTaskGetCurrentTaskHandle() != s_lcd_task_handle)
+    {
+        if (row < lcdRows)
+        {
+            taskENTER_CRITICAL(&s_lcd_pending_lock);
+            memcpy(s_lcd_pending[row], padded, sizeof(s_lcd_pending[row]));
+            s_lcd_pending_set[row] = true;
+            taskEXIT_CRITICAL(&s_lcd_pending_lock);
+        }
+        return;
+    }
+    write_lcd_line(row, padded);
+}
+
+static void write_lcd_line(uint8_t row, const char *padded)
+{
     if (s_lcd_mutex != nullptr)
         xSemaphoreTake(s_lcd_mutex, portMAX_DELAY);
 
@@ -2317,6 +2355,7 @@ static void display_line(uint8_t row, const char *text)
 #if DEBUG_ENABLED
         ESP_LOGE(TAG, "hd44780_gotoxy failed: %s", esp_err_to_name(err));
 #endif
+        s_lcd_write_failed.store(true, std::memory_order_relaxed);
         if (s_lcd_mutex != nullptr)
             xSemaphoreGive(s_lcd_mutex);
         return;
@@ -2328,6 +2367,7 @@ static void display_line(uint8_t row, const char *text)
 #if DEBUG_ENABLED
         ESP_LOGE(TAG, "hd44780_puts failed: %s", esp_err_to_name(err));
 #endif
+        s_lcd_write_failed.store(true, std::memory_order_relaxed); // the nibble pairing may be lost
     }
     else if (row < lcdRows)
     {
@@ -2337,6 +2377,75 @@ static void display_line(uint8_t row, const char *text)
 
     if (s_lcd_mutex != nullptr)
         xSemaphoreGive(s_lcd_mutex);
+}
+
+// LCD task: writes the lines other tasks handed over (after its own lines, so they stay until it redraws that row)
+static void flush_lcd_lines()
+{
+    for (uint8_t row = 0; row < lcdRows; ++row)
+    {
+        char line[lcdColumns + 1];
+        bool pending = false;
+        taskENTER_CRITICAL(&s_lcd_pending_lock);
+        if (s_lcd_pending_set[row])
+        {
+            memcpy(line, s_lcd_pending[row], sizeof(line));
+            s_lcd_pending_set[row] = false;
+            pending = true;
+        }
+        taskEXIT_CRITICAL(&s_lcd_pending_lock);
+        if (pending)
+            write_lcd_line(row, line);
+    }
+}
+
+// LCD task: the display is set up again after a failed write and after a storm of received frames (each at most every
+// 5 s). Under interrupt load the I2C master driver of ESP-IDF 6.1 can take the late completion of one transfer as the
+// answer of the next (seen in ESP32-WebTherm under a UDP flood), so a write can get lost while it counts as done; the
+// HD44780 then pairs the 4-bit nibbles wrongly and shows garbage until it is initialised again (its init sequence finds
+// the pairing from any state). Returns true when it was set up again: every row has to be written again.
+static constexpr uint32_t LCD_STORM_FRAMES_PER_S = 2000; // received Ethernet frames per second that count as a storm
+static constexpr int64_t LCD_SETUP_AGAIN_INTERVAL_US = 5000000;
+
+static bool maintain_lcd()
+{
+    static int64_t last_check_us = 0;
+    static uint32_t last_frames = 0;
+    static int64_t last_storm_us = 0; // 0 = no storm since the last set-up
+    static int64_t last_setup_us = 0;
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us - last_check_us >= 1000000)
+    {
+        const uint32_t frames = s_ethernet_rx_frames.load(std::memory_order_relaxed);
+        if (last_check_us != 0 &&
+            static_cast<uint64_t>(frames - last_frames) * 1000000ULL >= static_cast<uint64_t>(LCD_STORM_FRAMES_PER_S) * static_cast<uint64_t>(now_us - last_check_us))
+            last_storm_us = now_us;
+        last_frames = frames;
+        last_check_us = now_us;
+    }
+    const bool storm_over = last_storm_us != 0 && now_us - last_storm_us >= LCD_SETUP_AGAIN_INTERVAL_US;
+    const bool failed = s_lcd_write_failed.load(std::memory_order_relaxed);
+    if (!s_lcd_ready || (!storm_over && !failed) || now_us - last_setup_us < LCD_SETUP_AGAIN_INTERVAL_US)
+        return false;
+    last_setup_us = now_us;
+    last_storm_us = 0;
+    s_lcd_write_failed.store(false, std::memory_order_relaxed);
+
+    xSemaphoreTake(s_lcd_mutex, portMAX_DELAY);
+    esp_err_t err = hd44780_init(&s_lcd);
+    if (err == ESP_OK)
+        err = hd44780_switch_backlight(&s_lcd, true);
+    if (err == ESP_OK)
+        err = hd44780_control(&s_lcd, true, false, false);
+    if (err == ESP_OK)
+        err = hd44780_clear(&s_lcd);
+    memset(s_lcd_line_cached, 0, sizeof(s_lcd_line_cached));
+    xSemaphoreGive(s_lcd_mutex);
+    if (err != ESP_OK)
+        s_lcd_write_failed.store(true, std::memory_order_relaxed); // again in 5 s
+    else
+        ESP_LOGI(TAG, "LCD set up again (%s)", failed ? "after a failed write" : "after a storm of received frames");
+    return true;
 }
 
 static esp_err_t lcd_try_device_address(uint8_t address)
@@ -4005,10 +4114,27 @@ static void hardware_ntp_server_task(void *parameter)
 {
     (void)parameter;
     hardware_ntp_request_t ntp_request{};
+    int64_t busy_since_us = 0; // 0: the last receive waited for a request
     for (;;)
     {
-        if (xQueueReceive(s_hardware_ntp_request_queue, &ntp_request, portMAX_DELAY) == pdTRUE)
+        bool received = xQueueReceive(s_hardware_ntp_request_queue, &ntp_request, 0) == pdTRUE;
+        if (!received)
         {
+            busy_since_us = 0;
+            received = xQueueReceive(s_hardware_ntp_request_queue, &ntp_request, portMAX_DELAY) == pdTRUE;
+        }
+        if (received)
+        {
+            // Flood guard (NTP_RECEIVE_BUSY_LIMIT_US): the queue did not run empty for that long
+            const int64_t now_us = esp_timer_get_time();
+            if (busy_since_us == 0)
+                busy_since_us = now_us;
+            else if (now_us - busy_since_us >= NTP_RECEIVE_BUSY_LIMIT_US)
+            {
+                s_diag_ntp_receive_rests.fetch_add(1, std::memory_order_relaxed);
+                vTaskDelay(1);
+                busy_since_us = esp_timer_get_time();
+            }
             const bool ipv6 = ntp_request.frame[12] == 0x86 && ntp_request.frame[13] == 0xDD;
             if (ipv6 ? s_ipv6_enabled : s_ipv4_enabled)
                 process_hardware_ntp_request(ntp_request.handle, ntp_request.frame, ntp_request.length,
@@ -10688,6 +10814,7 @@ static void ntp_server_task(void *parameter)
     if (startup_task != nullptr)
         xTaskNotifyGive(startup_task);
 
+    int64_t busy_since_us = esp_timer_get_time(); // the last select() that waited for a datagram
     for (;;)
     {
         fd_set read_fds;
@@ -10705,7 +10832,18 @@ static void ntp_server_task(void *parameter)
             max_socket = ipv6_socket;
         if (ipv6_link_local_socket >= 0 && ipv6_link_local_socket > max_socket)
             max_socket = ipv6_link_local_socket;
+        const int64_t select_start_us = esp_timer_get_time();
         int ready = select(max_socket + 1, &read_fds, nullptr, nullptr, &timeout);
+        const int64_t select_end_us = esp_timer_get_time();
+        // Flood guard (NTP_RECEIVE_BUSY_LIMIT_US): select() found a datagram at once every time for that long
+        if (ready <= 0 || select_end_us - select_start_us >= NTP_SOCKET_WAITED_US)
+            busy_since_us = select_end_us;
+        else if (select_end_us - busy_since_us >= NTP_RECEIVE_BUSY_LIMIT_US)
+        {
+            s_diag_ntp_receive_rests.fetch_add(1, std::memory_order_relaxed);
+            vTaskDelay(1);
+            busy_since_us = esp_timer_get_time();
+        }
         if (ready < 0)
         {
 #if DEBUG_ENABLED
@@ -11683,6 +11821,13 @@ static void update_LED_LCD_Button_task(void *parameter)
 
     for (;;)
     {
+#if LIQUID_CRYSTAL_DISPLAY_ENABLED
+        if (maintain_lcd())
+        {
+            previous_top_line_message = -1;
+            previous_second = -1;
+        }
+#endif
         // The title can be changed on the web admin page
         if (title[0] == '\0' || s_lcd_title_changed.exchange(false, std::memory_order_acq_rel))
         {
@@ -11833,6 +11978,9 @@ static void update_LED_LCD_Button_task(void *parameter)
             }
         }
 
+#if LIQUID_CRYSTAL_DISPLAY_ENABLED
+        flush_lcd_lines();
+#endif
         if (s_led_type != web_led_type_t::none)
             update_RGB_LED();
 
@@ -11848,7 +11996,8 @@ void start_RGB_LED_LCD_and_Button_refresh()
     if (!s_lcd_on && s_led_type == web_led_type_t::none && !s_button_on)
         return;
 
-    xTaskCreatePinnedToCore(update_LED_LCD_Button_task, "LED_LCD_Button_service", LED_LCD_Button_Task_Stack_Size, nullptr, 10, nullptr, tskNO_AFFINITY);
+    xTaskCreatePinnedToCore(update_LED_LCD_Button_task, "LED_LCD_Button_service", LED_LCD_Button_Task_Stack_Size, nullptr, 10,
+                            &s_lcd_task_handle, tskNO_AFFINITY);
 }
 
 void setup_symmetric_key_authentication()
@@ -12139,6 +12288,7 @@ void app_get_diag(web_diag_t &diag)
     diag.sw_replies = s_diag_ntp_sw_replies.load(std::memory_order_relaxed);
     diag.sw_interleaved = s_diag_ntp_sw_interleaved.load(std::memory_order_relaxed);
     diag.shed = s_diag_ntp_shed.load(std::memory_order_relaxed);
+    diag.receive_rests = s_diag_ntp_receive_rests.load(std::memory_order_relaxed);
     ntp_cache_stats_t cache{};
     ntp_cache_get_stats(&cache);
     diag.lookup_record_hits = cache.record_hits;

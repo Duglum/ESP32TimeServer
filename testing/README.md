@@ -29,6 +29,14 @@ A memory leak occurs when a program allocates memory but fails to release it whe
 ## Stress Testing
 Stress testing evaluates how a program performs under extreme workloads or resource constraints beyond normal operating conditions. It helps identify stability issues, bottlenecks, and failure points. For more information please see this open source stress testing tool: [Time Server Stress Test](https://github.com/roblatour/TimeServerStressTest)
 
+### Packet floods
+[/testing/flood/flood.py](/testing/flood/flood.py) sends UDP datagrams at a fixed rate (default 15000 per second) to one port, or opens and closes TCP connections to the web admin. To UDP port 123 it sends 64 zero bytes by default (no NTP request: lwIP hands them to the NTP socket task); with `--ntp` valid NTPv4 requests (the hardware NTP path). Keep the serial console open; afterwards *Diagnostics* shows the load shedding and the receive rests of the NTP tasks. Only use it against your own device in your own network:
+
+```
+python -I testing/flood/flood.py udp <address> --port 123 --seconds 300
+python -I testing/flood/flood.py udp <address> --port 123 --seconds 300 --ntp
+```
+
 ## Quality of Service
 
 ### Jitter
