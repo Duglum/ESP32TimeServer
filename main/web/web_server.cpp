@@ -159,20 +159,64 @@ namespace
         return ret < 0 ? 0 : static_cast<int>(ret);
     }
 
+    // Connections that end before a request: esp-tls and httpd logged three lines for each (a browser that does not
+    // trust the certificate ends some of its connections with an alert, also scans and floods), and the console output
+    // holds up the server task, which also serves the web admin. Their logs are off after the start; one line at most
+    // every minute instead. Only the server task uses this.
+    constexpr int64_t CONNECTION_REPORT_US = 60LL * 1000000LL;
+    struct connection_report_t
+    {
+        uint32_t handshakes_failed;
+        uint32_t refused;   // by the allow-list
+        int last_tls_error; // mbedTLS code of the last failed handshake, 0 for a timeout or a closed connection
+        int64_t reported_us;
+        bool reported;
+    };
+    connection_report_t s_connection_report{};
+
+    void report_connections()
+    {
+        connection_report_t &r = s_connection_report;
+        const int64_t now_us = esp_timer_get_time();
+        if (r.reported && now_us - r.reported_us < CONNECTION_REPORT_US)
+            return;
+        if (r.handshakes_failed > 0)
+            ESP_LOGW(TAG, "Web admin: TLS handshake failed on %u connections since the last report, the last with -0x%04X (0: timed out or "
+                          "closed; a browser that does not trust the certificate ends some connections like this)",
+                     static_cast<unsigned>(r.handshakes_failed), static_cast<unsigned>(r.last_tls_error));
+        if (r.refused > 0)
+            ESP_LOGW(TAG, "Web admin: %u connections refused by the allow-list since the last report", static_cast<unsigned>(r.refused));
+        r = connection_report_t{};
+        r.reported_us = now_us;
+        r.reported = true;
+    }
+
     // New TCP connection: allow-list first (no TLS work for rejected sources), then the TLS handshake
     esp_err_t transport_open(httpd_handle_t server, int sockfd)
     {
         struct sockaddr_storage peer{};
         socklen_t peer_length = sizeof(peer);
         if (getpeername(sockfd, reinterpret_cast<struct sockaddr *>(&peer), &peer_length) != 0 || !web_auth_source_allowed(peer))
+        {
+            ++s_connection_report.refused;
+            report_connections();
             return ESP_FAIL;
+        }
 
         esp_tls_t *tls = esp_tls_init();
         if (tls == nullptr)
             return ESP_ERR_NO_MEM;
         if (esp_tls_server_session_create(&s_tls_config, sockfd, tls) != 0)
         {
+            int tls_code = 0;
+            int tls_flags = 0;
+            esp_tls_error_handle_t error_handle = nullptr;
+            if (esp_tls_get_error_handle(tls, &error_handle) == ESP_OK && error_handle != nullptr)
+                esp_tls_get_and_clear_last_error(error_handle, &tls_code, &tls_flags);
             esp_tls_server_session_delete(tls);
+            ++s_connection_report.handshakes_failed;
+            s_connection_report.last_tls_error = tls_code;
+            report_connections();
             return ESP_FAIL;
         }
         transport_t *transport = static_cast<transport_t *>(calloc(1, sizeof(transport_t)));
@@ -2407,8 +2451,9 @@ namespace
         use_identity(s_identity);
         s_tls_config.tls_handshake_timeout_ms = HANDSHAKE_TIMEOUT_MS;
         s_tls_config.tls_version = ESP_TLS_VER_TLS_1_3; // see s_ciphersuites
-        // esp-tls logs "Setting server TLS version" at info level for every TLS 1.3 connection
-        esp_log_level_set("esp-tls-mbedtls", ESP_LOG_WARN);
+        // esp-tls logs "Setting server TLS version" at info level for every TLS 1.3 connection, and every failed
+        // handshake as an error: report_connections() instead
+        esp_log_level_set("esp-tls-mbedtls", ESP_LOG_NONE);
         s_tls_config.ciphersuites_list = s_ciphersuites;
 
         s_pending = new (std::nothrow) network_pending_t{};
@@ -2449,6 +2494,9 @@ namespace
             return;
         }
 
+        // httpd logs every connection that transport_open() refuses with two lines: report_connections() instead (the
+        // errors of the start above stay visible)
+        esp_log_level_set("httpd", ESP_LOG_NONE);
         ESP_LOGI(TAG, "Web admin: https://%s/ (TCP %u, IPv4 and IPv6)", boot.fqdn, static_cast<unsigned int>(HTTPS_PORT));
         s_running.store(true, std::memory_order_release);
 
