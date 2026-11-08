@@ -483,6 +483,95 @@
         </details>
       </section>
 
+      <section class="card">
+        <details class="panel" id="ptp-panel">
+          <summary><h2>PTP (Precision Time Protocol)</h2><span class="panel-changed" hidden></span></summary>
+          <p class="hint first">Grandmaster of the IEEE 1588-2019 default profile: end-to-end delay mechanism, two-step, multicast, with hardware time stamps. PTP is sent only while the server is at stratum 1 with GNSS and PPS; otherwise it is silent and the followers switch to another master (there is no PTP holdover). PTP stays within one network segment (routers do not pass it) and does not work through most virtual switches. All settings take effect at once with Apply.</p>
+          <div class="grid">
+            <label class="switch span2"><input type="checkbox" name="ptp_l2_enabled"> PTP over Ethernet (EtherType 0x88F7, 01:1B:19:00:00:00)</label>
+          </div>
+          <dl class="status-grid">
+            <dt>Clock identity</dt><dd id="ptp-identity"></dd>
+            <dt>TAI − UTC</dt><dd id="ptp-utc"></dd>
+            <dt>Ports</dt><dd><ul id="ptp-ports" class="plain"></ul></dd>
+            <dt>Followers</dt><dd><ul id="ptp-followers" class="plain"></ul></dd>
+          </dl>
+          <p class="hint">The state is updated every 10 s while this panel is open.</p>
+          <h3 class="sub-heading">Clock</h3>
+          <div class="grid">
+            <label><span class="lt">Domain</span>
+              <input type="number" name="ptp_domain" min="0" max="127">
+              <small class="note">0 to 127. The followers must use the same domain.</small>
+              <small class="def" data-for="ptp_domain"></small>
+            </label>
+            <label><span class="lt">Clock accuracy (Announce)</span>
+              <select name="ptp_clock_accuracy"><option value="32">25 ns (0x20)</option><option value="33">100 ns (0x21)</option><option value="34">250 ns (0x22)</option><option value="35">1 µs (0x23)</option><option value="36">2.5 µs (0x24)</option><option value="37">10 µs (0x25)</option><option value="38">25 µs (0x26)</option><option value="39">100 µs (0x27)</option><option value="254">unknown (0xFE)</option></select>
+              <small class="note">The accuracy this grandmaster announces while it serves (clockClass 6, locked to GNSS). It only informs the followers and the master selection; it does not change the time.</small>
+              <small class="def" data-for="ptp_clock_accuracy"></small>
+            </label>
+            <label><span class="lt">Priority 1</span>
+              <input type="number" name="ptp_priority1" min="0" max="255">
+              <small class="note">0 to 255, the lower value wins the master selection.</small>
+              <small class="def" data-for="ptp_priority1"></small>
+            </label>
+            <label><span class="lt">Priority 2</span>
+              <input type="number" name="ptp_priority2" min="0" max="255">
+              <small class="note">0 to 255, decides between masters of the same quality.</small>
+              <small class="def" data-for="ptp_priority2"></small>
+            </label>
+            <label class="switch span2"><input type="checkbox" name="ptp_master_selection"> Stand aside while a better master announces itself (master selection)</label>
+            <p class="hint span2">On: the server listens for the Announces of other masters in its domain for two announce intervals after each start or change, and does not send while a better one (priority, clock quality, identity) is present. Off: always master, other masters are ignored.</p>
+            <label><span class="lt">TAI − UTC (s)</span>
+              <input type="number" name="ptp_utc_offset" min="0" max="100">
+              <small class="note">0 to 100 s. PTP uses the TAI time scale; currentUtcOffset tells the followers the difference to UTC (37 s since 1 January 2017). Used with the NMEA protocol; a u-blox receiver tells the value itself (GPS − UTC + 19 s).</small>
+              <small class="def" data-for="ptp_utc_offset"></small>
+            </label>
+          </div>
+          <h3 class="sub-heading">Message intervals</h3>
+          <div class="grid three">
+            <label><span class="lt">Sync interval</span>
+              <select name="ptp_log_sync_interval"><option value="-3">125 ms</option><option value="-2">250 ms</option><option value="-1">500 ms</option><option value="0">1 s</option><option value="1">2 s</option><option value="2">4 s</option><option value="3">8 s</option><option value="4">16 s</option></select>
+              <small class="def" data-for="ptp_log_sync_interval"></small>
+            </label>
+            <label><span class="lt">Announce interval</span>
+              <select name="ptp_log_announce_interval"><option value="0">1 s</option><option value="1">2 s</option><option value="2">4 s</option><option value="3">8 s</option><option value="4">16 s</option></select>
+              <small class="def" data-for="ptp_log_announce_interval"></small>
+            </label>
+            <label><span class="lt">Minimum delay request interval</span>
+              <select name="ptp_log_min_delay_req_interval"><option value="-3">125 ms</option><option value="-2">250 ms</option><option value="-1">500 ms</option><option value="0">1 s</option><option value="1">2 s</option><option value="2">4 s</option><option value="3">8 s</option><option value="4">16 s</option><option value="5">32 s</option><option value="6">64 s</option></select>
+              <small class="def" data-for="ptp_log_min_delay_req_interval"></small>
+            </label>
+          </div>
+          <p class="hint">The minimum delay request interval is told to the followers in each Delay_Resp (logMessageInterval).</p>
+          <h3 class="sub-heading">Followers and limits</h3>
+          <div class="grid">
+            <label><span class="lt">Follower timeout (s)</span>
+              <input type="number" name="ptp_follower_timeout" min="5" max="3600">
+              <small class="note">5 to 3600 s. A follower counts as gone after this long without a delay request (list above, MQTT).</small>
+              <small class="def" data-for="ptp_follower_timeout"></small>
+            </label>
+            <label><span class="lt">Delay requests per follower (per second, 0 = no limit)</span>
+              <input type="number" name="ptp_delay_req_rate_limit" min="0" max="1000">
+              <small class="note">0 to 1000. Requests over the limit are not answered (with a burst of the same size). All PTP frames together are limited to 1000 per second.</small>
+              <small class="def" data-for="ptp_delay_req_rate_limit"></small>
+            </label>
+          </div>
+          <h3 class="sub-heading">Latency correction</h3>
+          <div class="grid">
+            <label><span class="lt">Ingress latency (ns)</span>
+              <input type="number" name="ptp_ingress_latency_ns" min="-100000" max="100000">
+              <small class="note">-100000 to 100000 ns. The time stamps are taken in the Ethernet MAC; this is subtracted from the receive time stamps (delay of the PHY on the way in).</small>
+              <small class="def" data-for="ptp_ingress_latency_ns"></small>
+            </label>
+            <label><span class="lt">Egress latency (ns)</span>
+              <input type="number" name="ptp_egress_latency_ns" min="-100000" max="100000">
+              <small class="note">-100000 to 100000 ns. Added to the transmit time stamps of the Sync (delay of the PHY on the way out). Only a difference between the two shifts the time of the followers, by half of it.</small>
+              <small class="def" data-for="ptp_egress_latency_ns"></small>
+            </label>
+          </div>
+        </details>
+      </section>
+
       <div class="action-bar">
         <div class="buttons">
           <button type="button" class="primary" id="btn-apply" title="In effect now, not stored">Apply</button>

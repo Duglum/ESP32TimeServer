@@ -578,6 +578,22 @@ namespace
         // The NTP keys are shown on the page (they have to be entered on the clients); the other secrets are not
         add_ntp_keys(cJSON_AddArrayToObject(object, "ntp_keys"), s.ntp_keys, s.ntp_key_count);
         cJSON_AddBoolToObject(object, "ote_enabled", s.ote_enabled);
+        cJSON_AddBoolToObject(object, "ptp_l2_enabled", s.ptp_l2_enabled);
+        cJSON_AddBoolToObject(object, "ptp_udp4_enabled", s.ptp_udp4_enabled);
+        cJSON_AddBoolToObject(object, "ptp_udp6_enabled", s.ptp_udp6_enabled);
+        cJSON_AddNumberToObject(object, "ptp_domain", s.ptp_domain);
+        cJSON_AddNumberToObject(object, "ptp_priority1", s.ptp_priority1);
+        cJSON_AddNumberToObject(object, "ptp_priority2", s.ptp_priority2);
+        cJSON_AddNumberToObject(object, "ptp_log_sync_interval", s.ptp_log_sync_interval);
+        cJSON_AddNumberToObject(object, "ptp_log_announce_interval", s.ptp_log_announce_interval);
+        cJSON_AddNumberToObject(object, "ptp_log_min_delay_req_interval", s.ptp_log_min_delay_req_interval);
+        cJSON_AddBoolToObject(object, "ptp_master_selection", s.ptp_master_selection);
+        cJSON_AddNumberToObject(object, "ptp_clock_accuracy", s.ptp_clock_accuracy);
+        cJSON_AddNumberToObject(object, "ptp_follower_timeout", s.ptp_follower_timeout_s);
+        cJSON_AddNumberToObject(object, "ptp_delay_req_rate_limit", s.ptp_delay_req_rate_limit);
+        cJSON_AddNumberToObject(object, "ptp_utc_offset", s.ptp_utc_offset_s);
+        cJSON_AddNumberToObject(object, "ptp_ingress_latency_ns", s.ptp_ingress_latency_ns);
+        cJSON_AddNumberToObject(object, "ptp_egress_latency_ns", s.ptp_egress_latency_ns);
     }
 
     bool json_string(cJSON *root, const char *name, char *out, size_t size, char *err, size_t err_size)
@@ -734,7 +750,24 @@ namespace
                   json_int(root, "tf_d2_pin", s.tf_d2_pin, 0, 54, err, err_size) &&
                   json_int(root, "tf_d3_pin", s.tf_d3_pin, 0, 54, err, err_size) &&
                   json_bool(root, "ntp_auth_enabled", s.ntp_auth_enabled, err, err_size) &&
-                  json_bool(root, "ote_enabled", s.ote_enabled, err, err_size);
+                  json_bool(root, "ote_enabled", s.ote_enabled, err, err_size) &&
+                  json_bool(root, "ptp_l2_enabled", s.ptp_l2_enabled, err, err_size) &&
+                  json_bool(root, "ptp_udp4_enabled", s.ptp_udp4_enabled, err, err_size) &&
+                  json_bool(root, "ptp_udp6_enabled", s.ptp_udp6_enabled, err, err_size) &&
+                  json_int(root, "ptp_domain", s.ptp_domain, 0, WEB_PTP_DOMAIN_MAX, err, err_size) &&
+                  json_int(root, "ptp_priority1", s.ptp_priority1, 0, 255, err, err_size) &&
+                  json_int(root, "ptp_priority2", s.ptp_priority2, 0, 255, err, err_size) &&
+                  json_int(root, "ptp_log_sync_interval", s.ptp_log_sync_interval, WEB_PTP_LOG_SYNC_MIN, WEB_PTP_LOG_SYNC_MAX, err, err_size) &&
+                  json_int(root, "ptp_log_announce_interval", s.ptp_log_announce_interval, WEB_PTP_LOG_ANNOUNCE_MIN, WEB_PTP_LOG_ANNOUNCE_MAX, err, err_size) &&
+                  json_int(root, "ptp_log_min_delay_req_interval", s.ptp_log_min_delay_req_interval, WEB_PTP_LOG_DELAY_REQ_MIN,
+                           WEB_PTP_LOG_DELAY_REQ_MAX, err, err_size) &&
+                  json_bool(root, "ptp_master_selection", s.ptp_master_selection, err, err_size) &&
+                  json_int(root, "ptp_clock_accuracy", s.ptp_clock_accuracy, 0x20, 0xFE, err, err_size) &&
+                  json_int(root, "ptp_follower_timeout", s.ptp_follower_timeout_s, WEB_PTP_FOLLOWER_TIMEOUT_MIN_S, WEB_PTP_FOLLOWER_TIMEOUT_MAX_S, err, err_size) &&
+                  json_int(root, "ptp_delay_req_rate_limit", s.ptp_delay_req_rate_limit, 0, WEB_PTP_DELAY_REQ_RATE_MAX, err, err_size) &&
+                  json_int(root, "ptp_utc_offset", s.ptp_utc_offset_s, 0, WEB_PTP_UTC_OFFSET_MAX_S, err, err_size) &&
+                  json_int(root, "ptp_ingress_latency_ns", s.ptp_ingress_latency_ns, -WEB_PTP_LATENCY_MAX_NS, WEB_PTP_LATENCY_MAX_NS, err, err_size) &&
+                  json_int(root, "ptp_egress_latency_ns", s.ptp_egress_latency_ns, -WEB_PTP_LATENCY_MAX_NS, WEB_PTP_LATENCY_MAX_NS, err, err_size);
         if (!ok)
             return false;
 
@@ -1646,6 +1679,71 @@ namespace
         return result.body_consumed ? ESP_OK : ESP_FAIL;
     }
 
+    // PTP panel: state of the master, counters and followers; only while the panel is open
+    esp_err_t handle_ptp(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, false, token) != gate_t::passed)
+            return ESP_OK;
+        web_ptp_status_t *p = new (std::nothrow) web_ptp_status_t{};
+        if (p == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        app_get_ptp_status(*p);
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "started", p->started);
+        char identity[24];
+        snprintf(identity, sizeof(identity), "%02x%02x%02x.%02x%02x.%02x%02x%02x", p->identity[0], p->identity[1], p->identity[2],
+                 p->identity[3], p->identity[4], p->identity[5], p->identity[6], p->identity[7]);
+        cJSON_AddStringToObject(root, "clock_identity", identity);
+        cJSON_AddNumberToObject(root, "utc_offset", p->utc_offset);
+        cJSON_AddStringToObject(root, "utc_offset_source", p->utc_offset_from_gnss ? "gnss" : "setting");
+        static const char *const transport_names[WEB_PTP_TRANSPORTS] = {"l2", "udp4", "udp6"};
+        cJSON *ports = cJSON_AddArrayToObject(root, "ports");
+        for (size_t t = 0; t < WEB_PTP_TRANSPORTS; ++t)
+        {
+            const web_ptp_port_t &port = p->ports[t];
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "transport", transport_names[t]);
+            cJSON_AddBoolToObject(item, "enabled", port.enabled);
+            cJSON_AddStringToObject(item, "state", port.state);
+            cJSON_AddNumberToObject(item, "followers", port.followers);
+            cJSON_AddNumberToObject(item, "sync", port.sync_sent);
+            cJSON_AddNumberToObject(item, "follow_up", port.follow_up_sent);
+            cJSON_AddNumberToObject(item, "announce", port.announce_sent);
+            cJSON_AddNumberToObject(item, "delay_req", port.delay_req_received);
+            cJSON_AddNumberToObject(item, "delay_resp", port.delay_resp_sent);
+            cJSON_AddNumberToObject(item, "rate_limited", port.rate_limited);
+            cJSON_AddNumberToObject(item, "drops", port.queue_drops);
+            cJSON_AddNumberToObject(item, "invalid", port.invalid);
+            cJSON_AddNumberToObject(item, "ignored", port.ignored);
+            cJSON_AddNumberToObject(item, "rx_timestamp_misses", port.rx_timestamp_misses);
+            cJSON_AddNumberToObject(item, "tx_timestamp_misses", port.tx_timestamp_misses);
+            cJSON_AddNumberToObject(item, "transmit_failures", port.transmit_failures);
+            cJSON_AddNumberToObject(item, "foreign_announces", port.foreign_announces);
+            cJSON_AddItemToArray(ports, item);
+        }
+        cJSON *followers = cJSON_AddArrayToObject(root, "followers");
+        for (size_t i = 0; i < p->follower_count; ++i)
+        {
+            const web_ptp_follower_t &follower = p->followers[i];
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "transport", transport_names[follower.transport < WEB_PTP_TRANSPORTS ? follower.transport : 0]);
+            char mac[WEB_MAC_TEXT_SIZE];
+            snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", follower.mac[0], follower.mac[1], follower.mac[2],
+                     follower.mac[3], follower.mac[4], follower.mac[5]);
+            cJSON_AddStringToObject(item, "mac", mac);
+            char port_identity[32];
+            const uint8_t *pi = follower.port_identity;
+            snprintf(port_identity, sizeof(port_identity), "%02x%02x%02x.%02x%02x.%02x%02x%02x-%u", pi[0], pi[1], pi[2], pi[3], pi[4],
+                     pi[5], pi[6], pi[7], static_cast<unsigned>((pi[8] << 8) | pi[9]));
+            cJSON_AddStringToObject(item, "port_identity", port_identity);
+            cJSON_AddNumberToObject(item, "last_seen_s", follower.last_seen_s);
+            cJSON_AddItemToArray(followers, item);
+        }
+        delete p;
+        return send_json(req, "200 OK", root);
+    }
+
     // Without login: only the names, for the header of the login page (the FQDN is also in the certificate, which
     // every client gets before the login)
     // Diagnostics panel (review 4.5): only while the panel is open; the stability takes some 10 ms
@@ -2415,6 +2513,7 @@ namespace
             {"/api/ote/once", HTTP_POST, handle_ote_once},
             {"/api/info", HTTP_GET, handle_info},
             {"/api/diag", HTTP_GET, handle_diag},
+            {"/api/ptp", HTTP_GET, handle_ptp},
             {"/api/coredump", HTTP_GET, handle_coredump},
             {"/api/coredump/erase", HTTP_POST, handle_coredump_erase},
             {"/api/gnss/command", HTTP_POST, handle_gnss_command},
@@ -2478,7 +2577,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 28; // 27 routes in use
+        config.max_uri_handlers = 29; // 28 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

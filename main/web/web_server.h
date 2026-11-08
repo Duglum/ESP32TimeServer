@@ -198,6 +198,50 @@ struct web_diag_t
     uint32_t heap_largest_block;
 };
 
+// PTP panel (GET /api/ptp): state of the PTP master per transport (Ethernet, UDP/IPv4, UDP/IPv6), counters since
+// the start and the current followers
+static constexpr size_t WEB_PTP_TRANSPORTS = 3;
+static constexpr size_t WEB_PTP_FOLLOWERS = 96;
+
+struct web_ptp_port_t
+{
+    bool enabled;
+    const char *state; // a string literal: "serving", "disabled", "no Ethernet link", ...
+    uint32_t followers;
+    uint32_t sync_sent;
+    uint32_t follow_up_sent;
+    uint32_t announce_sent;
+    uint32_t delay_req_received;
+    uint32_t delay_resp_sent;
+    uint32_t rate_limited;
+    uint32_t queue_drops;
+    uint32_t invalid;
+    uint32_t ignored;
+    uint32_t rx_timestamp_misses;
+    uint32_t tx_timestamp_misses;
+    uint32_t transmit_failures;
+    uint32_t foreign_announces;
+};
+
+struct web_ptp_follower_t
+{
+    uint8_t transport; // 0 Ethernet, 1 UDP/IPv4, 2 UDP/IPv6
+    uint8_t mac[6];
+    uint8_t port_identity[10];
+    uint32_t last_seen_s; // seconds since its last Delay_Req
+};
+
+struct web_ptp_status_t
+{
+    bool started;           // the PTP task runs (it needs the hardware time stamps)
+    uint8_t identity[8];    // clockIdentity
+    int16_t utc_offset;     // currentUtcOffset in use (TAI - UTC)
+    bool utc_offset_from_gnss;
+    web_ptp_port_t ports[WEB_PTP_TRANSPORTS];
+    size_t follower_count;
+    web_ptp_follower_t followers[WEB_PTP_FOLLOWERS];
+};
+
 // Starts the web admin in its own task (TLS identity, password hash, HTTPS server). Call once the Ethernet
 // interface exists. If the settings of this boot came from a one-shot set that changed the network, the 120 s
 // confirmation starts as well.
@@ -208,6 +252,7 @@ bool web_admin_running();
 // Implemented in main.cpp
 void app_get_status(web_app_status_t &status);
 void app_get_diag(web_diag_t &diag);
+void app_get_ptp_status(web_ptp_status_t &status);
 esp_netif_t *app_eth_netif();
 // The network configuration of the interface changed: refresh the address cache used by the NTP and LCD code
 void app_network_settings_changed();

@@ -38,6 +38,15 @@ static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MIN = 50;   // MQTT_CLIENT_LI
 static constexpr uint16_t WEB_MQTT_TF_CLIENT_LIMIT_MAX = 1000; // report buffer about 77 kB (no PSRAM)
 static constexpr uint32_t WEB_BUTTON_HOLD_S = 10;              // uptime / restart button: hold time for a restart or reset
 static constexpr size_t WEB_MAC_TEXT_SIZE = 18;     // "xx:xx:xx:xx:xx:xx" + NUL
+// PTP master (blob version 14): limits of the settings
+static constexpr uint8_t WEB_PTP_DOMAIN_MAX = 127;              // default profile: domains 0 to 127
+static constexpr int8_t WEB_PTP_LOG_SYNC_MIN = -3, WEB_PTP_LOG_SYNC_MAX = 4;
+static constexpr int8_t WEB_PTP_LOG_ANNOUNCE_MIN = 0, WEB_PTP_LOG_ANNOUNCE_MAX = 4;
+static constexpr int8_t WEB_PTP_LOG_DELAY_REQ_MIN = -3, WEB_PTP_LOG_DELAY_REQ_MAX = 6;
+static constexpr uint16_t WEB_PTP_FOLLOWER_TIMEOUT_MIN_S = 5, WEB_PTP_FOLLOWER_TIMEOUT_MAX_S = 3600;
+static constexpr uint16_t WEB_PTP_DELAY_REQ_RATE_MAX = 1000;   // per follower and second (0 = no limit)
+static constexpr int16_t WEB_PTP_UTC_OFFSET_MAX_S = 100;       // TAI - UTC
+static constexpr int32_t WEB_PTP_LATENCY_MAX_NS = 100000;      // ingress / egress latency: -100 to 100 us
 static constexpr size_t WEB_NTP_KEY_SIZE = 33;      // 32 characters + NUL
 static constexpr size_t WEB_NTP_MAX_KEYS = 8;       // NTP_AUTH_MAX_KEYS
 // Sizes of the former OTE device name and OTE password fields (unused, they keep the layout of the saved settings)
@@ -215,6 +224,25 @@ struct web_settings_t
     uint16_t mqtt_port;
     bool mqtt_tls;
     char mqtt_ca_pem[WEB_MQTT_CA_SIZE];
+
+    // PTP master (added in version 14; everything takes effect at once). Transports: Ethernet (EtherType 0x88F7),
+    // UDP/IPv4 and UDP/IPv6 multicast; one domain, clock and settings for all of them
+    bool ptp_l2_enabled;
+    bool ptp_udp4_enabled;
+    bool ptp_udp6_enabled;
+    uint8_t ptp_domain;                  // 0 to WEB_PTP_DOMAIN_MAX
+    uint8_t ptp_priority1;               // 0 to 255, lower wins
+    uint8_t ptp_priority2;
+    int8_t ptp_log_sync_interval;        // 2^n s
+    int8_t ptp_log_announce_interval;
+    int8_t ptp_log_min_delay_req_interval;
+    bool ptp_master_selection;           // stand aside for a better master; false = always master
+    uint8_t ptp_clock_accuracy;          // clockAccuracy of the Announce: 0x20 to 0x31 or 0xFE (unknown)
+    uint16_t ptp_follower_timeout_s;     // a follower without a Delay_Req for this long is gone
+    uint16_t ptp_delay_req_rate_limit;   // Delay_Req per follower and second, 0 = no limit
+    int16_t ptp_utc_offset_s;            // TAI - UTC while the GNSS receiver does not tell it (NMEA)
+    int32_t ptp_ingress_latency_ns;      // subtracted from the receive time stamps
+    int32_t ptp_egress_latency_ns;       // added to the transmit time stamps
 };
 
 // Defaults of all settings (the state after a reset to defaults)

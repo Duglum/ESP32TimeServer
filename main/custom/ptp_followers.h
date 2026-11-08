@@ -192,6 +192,16 @@ namespace ptp
             update_extrema();
         }
 
+        // Fork: read access to the current followers (status page): visit(transport, domain, identity[10], mac[6],
+        // last_seen_us) for every active entry
+        template <typename Visit>
+        void for_each_active(Visit &&visit) const
+        {
+            for (const auto &entry : entries_)
+                if (entry.active)
+                    visit(entry.transport, entry.domain, entry.identity, entry.mac, entry.last_seen_us);
+        }
+
         Snapshot snapshot_and_reset(int64_t now_us)
         {
             expire(now_us);

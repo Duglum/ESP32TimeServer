@@ -12,6 +12,7 @@
   let refreshTimer = 0;
   let countdownTimer = 0;
   let diagTimer = 0; // Diagnostics panel: refreshed while it is open
+  let ptpTimer = 0; // PTP panel: its state is refreshed while it is open
   let consoleTimer = 0; // GNSS console: new lines are fetched while it is open
   let formDirty = false; // the settings form was edited since it was filled
 
@@ -185,6 +186,7 @@
     clearInterval(refreshTimer);
     clearInterval(countdownTimer);
     clearInterval(diagTimer);
+    clearInterval(ptpTimer);
     clearInterval(consoleTimer);
     $('app').hidden = true;
     $('logout').hidden = true;
@@ -464,8 +466,32 @@
       tf_d2_pin: String(s.tf_d2_pin),
       tf_d3_pin: String(s.tf_d3_pin),
       ntp_auth_enabled: s.ntp_auth_enabled,
-      ote_enabled: s.ote_enabled
+      ote_enabled: s.ote_enabled,
+      ptp_l2_enabled: s.ptp_l2_enabled,
+      ptp_master_selection: s.ptp_master_selection,
+      ...Object.fromEntries(ptpNumbers.map(([name]) => [name, String(s[name])]))
     };
+  }
+
+  // PTP settings with a number (inputs and selects): name, lowest, highest, label of the error message
+  const ptpNumbers = [
+    ['ptp_domain', 0, 127, 'PTP domain: 0 to 127'],
+    ['ptp_priority1', 0, 255, 'PTP priority 1: 0 to 255'],
+    ['ptp_priority2', 0, 255, 'PTP priority 2: 0 to 255'],
+    ['ptp_clock_accuracy', 32, 254, 'PTP clock accuracy: choose a value'],
+    ['ptp_utc_offset', 0, 100, 'PTP TAI − UTC: 0 to 100 s'],
+    ['ptp_log_sync_interval', -3, 4, 'PTP sync interval: choose a value'],
+    ['ptp_log_announce_interval', 0, 4, 'PTP announce interval: choose a value'],
+    ['ptp_log_min_delay_req_interval', -3, 6, 'PTP minimum delay request interval: choose a value'],
+    ['ptp_follower_timeout', 5, 3600, 'PTP follower timeout: 5 to 3600 s'],
+    ['ptp_delay_req_rate_limit', 0, 1000, 'PTP delay requests per follower: 0 to 1000 per second'],
+    ['ptp_ingress_latency_ns', -100000, 100000, 'PTP ingress latency: -100000 to 100000 ns'],
+    ['ptp_egress_latency_ns', -100000, 100000, 'PTP egress latency: -100000 to 100000 ns']
+  ];
+  // Text of a selected option (the defaults of the selects)
+  function optionText(name, value) {
+    const option = Array.from(f[name].options).find((o) => o.value === String(value));
+    return option ? option.textContent : String(value);
   }
 
   const displayNames = {
@@ -519,6 +545,10 @@
       if (name === 'ntp_client_rate_limit') text = value === '0' ? t('off') : t('{n} per second', { n: value });
       if (name === 'pps_dispersion') text = (lang === 'de' ? text.replace('.', ',') : text) + ' ms/s';
       if (name === 'mac_address' && !state.defaults.mac_address) text = t('the hardware MAC');
+      if (f[name] && f[name].tagName === 'SELECT' && name.startsWith('ptp_')) text = optionText(name, value);
+      if (name === 'ptp_delay_req_rate_limit') text = value === '0' ? t('no limit') : t('{n} per second', { n: value });
+      if (name === 'ptp_follower_timeout' || name === 'ptp_utc_offset') text += ' s';
+      if (name === 'ptp_ingress_latency_ns' || name === 'ptp_egress_latency_ns') text += ' ns';
       if (displayNames[name] && displayNames[name][value]) text = t(displayNames[name][value]);
       small.textContent = t('Default: {value}', { value: text });
       // Decimal fields compare as numbers (0.10 = 0.1)
@@ -763,8 +793,16 @@
       tf_d2_pin: pin('tf_d2_pin', 'TF card D2 pin'),
       tf_d3_pin: pin('tf_d3_pin', 'TF card D3 pin'),
       ntp_auth_enabled: f.ntp_auth_enabled.checked,
-      ote_enabled: f.ote_enabled.checked
+      ote_enabled: f.ote_enabled.checked,
+      ptp_l2_enabled: f.ptp_l2_enabled.checked,
+      ptp_master_selection: f.ptp_master_selection.checked
     };
+    for (const [name, lowest, highest, message] of ptpNumbers) {
+      const text = f[name].value.trim();
+      const value = Number(text);
+      if (text === '' || !Number.isInteger(value) || value < lowest || value > highest) throw fieldError(name, t(message));
+      body[name] = value;
+    }
     // NTP keys: only sent when they were changed (an empty list removes all keys)
     if (ntpKeysChanged) {
       body.ntp_keys = [];
@@ -1164,6 +1202,66 @@
     loadDiag();
   });
 
+  // ---- PTP panel: state, counters and followers, loaded only while the panel is open ----
+  const ptpTransportNames = { l2: 'Ethernet', udp4: 'UDP/IPv4', udp6: 'UDP/IPv6' };
+  function renderPtp(p) {
+    $('ptp-identity').textContent = p.started ? p.clock_identity : t('PTP is not running (no hardware time stamps)');
+    $('ptp-utc').textContent = t('{n} s ({source})', { n: p.utc_offset,
+      source: p.utc_offset_source === 'gnss' ? t('from the GNSS receiver') : t('setting') });
+    const ports = $('ptp-ports');
+    ports.textContent = '';
+    for (const port of p.ports || []) {
+      if (!port.enabled) continue;
+      const li = document.createElement('li');
+      const head = document.createElement('strong');
+      head.textContent = ptpTransportNames[port.transport] + ': ' + ts(port.state);
+      head.className = port.state === 'serving' ? 'good' : '';
+      li.appendChild(head);
+      li.appendChild(document.createElement('br'));
+      li.appendChild(document.createTextNode(t('{f} followers; sent: Sync {s}, Follow_Up {u}, Announce {a}, Delay_Resp {r}; received: Delay_Req {q}, Announce of other masters {o}', {
+        f: port.followers, s: port.sync, u: port.follow_up, a: port.announce, r: port.delay_resp, q: port.delay_req, o: port.foreign_announces })));
+      const problems = port.rate_limited + port.drops + port.invalid + port.rx_timestamp_misses + port.tx_timestamp_misses + port.transmit_failures;
+      if (problems > 0 || port.ignored > 0) {
+        li.appendChild(document.createElement('br'));
+        li.appendChild(document.createTextNode(t('rate limited {l}, dropped {d}, invalid {i}, ignored {g}, receive stamp missing {rx}, transmit stamp missing {tx}, send failures {sf}', {
+          l: port.rate_limited, d: port.drops, i: port.invalid, g: port.ignored, rx: port.rx_timestamp_misses, tx: port.tx_timestamp_misses, sf: port.transmit_failures })));
+      }
+      ports.appendChild(li);
+    }
+    if (!ports.firstChild) {
+      const li = document.createElement('li');
+      li.textContent = t('off');
+      ports.appendChild(li);
+    }
+    const list = $('ptp-followers');
+    list.textContent = '';
+    const followers = (p.followers || []).slice().sort((x, y) => x.last_seen_s - y.last_seen_s);
+    for (const follower of followers) {
+      const li = document.createElement('li');
+      li.textContent = t('{mac} ({transport}, port {port}), last delay request {s} s ago', {
+        mac: follower.mac, transport: ptpTransportNames[follower.transport] || follower.transport, port: follower.port_identity, s: follower.last_seen_s });
+      list.appendChild(li);
+    }
+    if (!list.firstChild) {
+      const li = document.createElement('li');
+      li.textContent = t('none');
+      list.appendChild(li);
+    }
+  }
+
+  async function loadPtp() {
+    if (!state || !$('ptp-panel').open) return;
+    const r = await api('/api/ptp');
+    if (r.status === 200) renderPtp(r.data);
+  }
+
+  $('ptp-panel').addEventListener('toggle', () => {
+    clearInterval(ptpTimer);
+    if (!$('ptp-panel').open) return;
+    loadPtp();
+    ptpTimer = setInterval(loadPtp, 10000);
+  });
+
   async function loadDiag() {
     if (!state || !$('diag-panel').open) return;
     const r = await api('/api/diag');
@@ -1343,6 +1441,7 @@
     clearInterval(refreshTimer);
     clearInterval(countdownTimer);
     clearInterval(diagTimer);
+    clearInterval(ptpTimer);
     show(text, 'warn');
   }
 
@@ -1720,6 +1819,7 @@
     oteUploading = true;
     clearInterval(refreshTimer); // the server answers nothing else during the upload
     clearInterval(diagTimer);
+    clearInterval(ptpTimer);
     setBusy(true);
     $('ote-file').disabled = true;
     const progress = $('ote-progress');

@@ -816,7 +816,76 @@
     'MQTT user name: at most 64 printable ASCII characters': 'MQTT-Benutzername: höchstens 64 druckbare ASCII-Zeichen',
     'NTP authentication needs at least one key': 'NTP-Authentifizierung braucht mindestens einen Schlüssel',
     'TF card pins: one of the GPIOs cannot be used': 'TF-Karten-Pins: Einer der GPIOs kann nicht verwendet werden',
-    'Time zone is not a valid POSIX TZ string': 'Die Zeitzone ist kein gültiger POSIX-TZ-String'
+    'Time zone is not a valid POSIX TZ string': 'Die Zeitzone ist kein gültiger POSIX-TZ-String',
+
+    // ---- PTP panel ----
+    'PTP (Precision Time Protocol)': 'PTP (Precision Time Protocol)',
+    'Grandmaster of the IEEE 1588-2019 default profile: end-to-end delay mechanism, two-step, multicast, with hardware time stamps. PTP is sent only while the server is at stratum 1 with GNSS and PPS; otherwise it is silent and the followers switch to another master (there is no PTP holdover). PTP stays within one network segment (routers do not pass it) and does not work through most virtual switches. All settings take effect at once with Apply.': 'Grandmaster nach dem Default-Profil von IEEE 1588-2019: End-to-End-Delay-Verfahren, Two-Step, Multicast, mit Hardware-Zeitstempeln. PTP wird nur gesendet, solange der Server mit GNSS und PPS auf Stratum 1 ist; sonst schweigt er, und die Follower wechseln zu einem anderen Master (es gibt keinen PTP-Holdover). PTP bleibt in einem Netzsegment (Router leiten es nicht weiter) und funktioniert durch die meisten virtuellen Switches nicht. Alle Einstellungen wirken sofort mit Übernehmen.',
+    'PTP over Ethernet (EtherType 0x88F7, 01:1B:19:00:00:00)': 'PTP über Ethernet (EtherType 0x88F7, 01:1B:19:00:00:00)',
+    'Clock identity': 'Clock Identity',
+    'TAI − UTC': 'TAI − UTC',
+    'Ports': 'Ports',
+    'Followers': 'Follower',
+    'The state is updated every 10 s while this panel is open.': 'Der Zustand wird alle 10 s aktualisiert, solange dieser Bereich geöffnet ist.',
+    'Clock': 'Uhr',
+    'Domain': 'Domain',
+    '0 to 127. The followers must use the same domain.': '0 bis 127. Die Follower müssen dieselbe Domain verwenden.',
+    'Clock accuracy (Announce)': 'Uhrgenauigkeit (Announce)',
+    'The accuracy this grandmaster announces while it serves (clockClass 6, locked to GNSS). It only informs the followers and the master selection; it does not change the time.': 'Die Genauigkeit, die dieser Grandmaster ankündigt, solange er sendet (clockClass 6, an GNSS gebunden). Sie informiert nur die Follower und die Master-Auswahl; die Zeit ändert sie nicht.',
+    'Priority 1': 'Priorität 1',
+    'Priority 2': 'Priorität 2',
+    '0 to 255, the lower value wins the master selection.': '0 bis 255, der kleinere Wert gewinnt die Master-Auswahl.',
+    '0 to 255, decides between masters of the same quality.': '0 bis 255, entscheidet zwischen Mastern gleicher Qualität.',
+    'Stand aside while a better master announces itself (master selection)': 'Zurücktreten, solange sich ein besserer Master ankündigt (Master-Auswahl)',
+    'On: the server listens for the Announces of other masters in its domain for two announce intervals after each start or change, and does not send while a better one (priority, clock quality, identity) is present. Off: always master, other masters are ignored.': 'Ein: Der Server hört nach jedem Start und jeder Änderung zwei Announce-Intervalle lang auf die Announces anderer Master seiner Domain und sendet nicht, solange ein besserer (Priorität, Uhrqualität, Identität) da ist. Aus: immer Master, andere Master werden ignoriert.',
+    'TAI − UTC (s)': 'TAI − UTC (s)',
+    '0 to 100 s. PTP uses the TAI time scale; currentUtcOffset tells the followers the difference to UTC (37 s since 1 January 2017). Used with the NMEA protocol; a u-blox receiver tells the value itself (GPS − UTC + 19 s).': '0 bis 100 s. PTP verwendet die Zeitskala TAI; currentUtcOffset nennt den Followern den Abstand zu UTC (37 s seit dem 1. Januar 2017). Wird beim NMEA-Protokoll verwendet; ein u-blox-Empfänger liefert den Wert selbst (GPS − UTC + 19 s).',
+    'Message intervals': 'Nachrichtenintervalle',
+    'Sync interval': 'Sync-Intervall',
+    'Announce interval': 'Announce-Intervall',
+    'Minimum delay request interval': 'Minimales Delay-Request-Intervall',
+    'The minimum delay request interval is told to the followers in each Delay_Resp (logMessageInterval).': 'Das minimale Delay-Request-Intervall wird den Followern in jeder Delay_Resp mitgeteilt (logMessageInterval).',
+    'Followers and limits': 'Follower und Grenzen',
+    'Follower timeout (s)': 'Follower-Zeitlimit (s)',
+    '5 to 3600 s. A follower counts as gone after this long without a delay request (list above, MQTT).': '5 bis 3600 s. Ein Follower gilt nach so langer Zeit ohne Delay Request als weg (Liste oben, MQTT).',
+    'Delay requests per follower (per second, 0 = no limit)': 'Delay Requests pro Follower (pro Sekunde, 0 = unbegrenzt)',
+    '0 to 1000. Requests over the limit are not answered (with a burst of the same size). All PTP frames together are limited to 1000 per second.': '0 bis 1000. Anfragen über dem Limit werden nicht beantwortet (mit einem Burst gleicher Größe). Alle PTP-Frames zusammen sind auf 1000 pro Sekunde begrenzt.',
+    'Latency correction': 'Latenzkorrektur',
+    'Ingress latency (ns)': 'Ingress-Latenz (ns)',
+    '-100000 to 100000 ns. The time stamps are taken in the Ethernet MAC; this is subtracted from the receive time stamps (delay of the PHY on the way in).': '-100000 bis 100000 ns. Die Zeitstempel entstehen im Ethernet-MAC; dieser Wert wird von den Empfangszeitstempeln abgezogen (Verzögerung des PHY auf dem Hinweg).',
+    'Egress latency (ns)': 'Egress-Latenz (ns)',
+    '-100000 to 100000 ns. Added to the transmit time stamps of the Sync (delay of the PHY on the way out). Only a difference between the two shifts the time of the followers, by half of it.': '-100000 bis 100000 ns. Wird zu den Sendezeitstempeln der Sync addiert (Verzögerung des PHY auf dem Rückweg). Nur ein Unterschied zwischen beiden verschiebt die Zeit der Follower, um die Hälfte davon.',
+    'unknown (0xFE)': 'unbekannt (0xFE)',
+    'PTP domain: 0 to 127': 'PTP-Domain: 0 bis 127',
+    'PTP priority 1: 0 to 255': 'PTP-Priorität 1: 0 bis 255',
+    'PTP priority 2: 0 to 255': 'PTP-Priorität 2: 0 bis 255',
+    'PTP clock accuracy: choose a value': 'PTP-Uhrgenauigkeit: einen Wert wählen',
+    'PTP TAI − UTC: 0 to 100 s': 'PTP TAI − UTC: 0 bis 100 s',
+    'PTP sync interval: choose a value': 'PTP-Sync-Intervall: einen Wert wählen',
+    'PTP announce interval: choose a value': 'PTP-Announce-Intervall: einen Wert wählen',
+    'PTP minimum delay request interval: choose a value': 'PTP minimales Delay-Request-Intervall: einen Wert wählen',
+    'PTP follower timeout: 5 to 3600 s': 'PTP-Follower-Zeitlimit: 5 bis 3600 s',
+    'PTP delay requests per follower: 0 to 1000 per second': 'PTP Delay Requests pro Follower: 0 bis 1000 pro Sekunde',
+    'PTP ingress latency: -100000 to 100000 ns': 'PTP-Ingress-Latenz: -100000 bis 100000 ns',
+    'PTP egress latency: -100000 to 100000 ns': 'PTP-Egress-Latenz: -100000 bis 100000 ns',
+    'PTP is not running (no hardware time stamps)': 'PTP läuft nicht (keine Hardware-Zeitstempel)',
+    '{n} s ({source})': '{n} s ({source})',
+    'from the GNSS receiver': 'vom GNSS-Empfänger',
+    'setting': 'Einstellung',
+    '{f} followers; sent: Sync {s}, Follow_Up {u}, Announce {a}, Delay_Resp {r}; received: Delay_Req {q}, Announce of other masters {o}': '{f} Follower; gesendet: Sync {s}, Follow_Up {u}, Announce {a}, Delay_Resp {r}; empfangen: Delay_Req {q}, Announce anderer Master {o}',
+    'rate limited {l}, dropped {d}, invalid {i}, ignored {g}, receive stamp missing {rx}, transmit stamp missing {tx}, send failures {sf}': 'über dem Rate-Limit {l}, verworfen {d}, ungültig {i}, ignoriert {g}, Empfangszeitstempel fehlt {rx}, Sendezeitstempel fehlt {tx}, Sendefehler {sf}',
+    '{mac} ({transport}, port {port}), last delay request {s} s ago': '{mac} ({transport}, Port {port}), letzter Delay Request vor {s} s',
+    'serving': 'sendet',
+    'disabled': 'aus',
+    'no Ethernet link': 'kein Ethernet-Link',
+    'PTP clock not mapped to true time': 'PTP-Uhr nicht auf die wahre Zeit abgebildet',
+    'not synchronized (stratum 1 needs GNSS and PPS)': 'nicht synchronisiert (Stratum 1 braucht GNSS und PPS)',
+    'PPS holdover': 'PPS-Holdover',
+    'listening for other masters': 'hört auf andere Master',
+    'a better master is present': 'ein besserer Master ist da',
+    'PTP clock accuracy: 0x20 to 0x31 or 0xFE': 'PTP-Uhrgenauigkeit: 0x20 bis 0x31 oder 0xFE',
+    'PTP over UDP/IPv4 needs IPv4 (address families)': 'PTP über UDP/IPv4 braucht IPv4 (Adressfamilien)',
+    'PTP over UDP/IPv6 needs IPv6 (address families)': 'PTP über UDP/IPv6 braucht IPv6 (Adressfamilien)'
   };
 
   // Messages of the firmware with values (printf formats as in the C++ source; {1}, {2} = the values in order)
@@ -864,7 +933,15 @@
     ['Stratum after the holdover: 2 to 16', 'Stratum nach dem Holdover: 2 bis 16'],
     ['Root dispersion growth: 1 to %u ppm (0.001 to 10 ms per second)', 'Zunahme der Root Dispersion: 1 bis {1} ppm (0,001 bis 10 ms pro Sekunde)'],
     ['MQTT reporting period: 30 to 86400 s', 'MQTT-Berichtsintervall: 30 bis 86400 s'],
-    ['MQTT CA certificate: not a valid X.509 certificate in PEM (mbedTLS -0x%04x)', 'MQTT-CA-Zertifikat: kein gültiges X.509-Zertifikat in PEM (mbedTLS -0x{1})']
+    ['MQTT CA certificate: not a valid X.509 certificate in PEM (mbedTLS -0x%04x)', 'MQTT-CA-Zertifikat: kein gültiges X.509-Zertifikat in PEM (mbedTLS -0x{1})'],
+    ['PTP domain: 0 to %u', 'PTP-Domain: 0 bis {1}'],
+    ['PTP sync interval: 2^%d to 2^%d s', 'PTP-Sync-Intervall: 2^{1} bis 2^{2} s'],
+    ['PTP announce interval: 2^%d to 2^%d s', 'PTP-Announce-Intervall: 2^{1} bis 2^{2} s'],
+    ['PTP minimum delay request interval: 2^%d to 2^%d s', 'PTP minimales Delay-Request-Intervall: 2^{1} bis 2^{2} s'],
+    ['PTP follower timeout: %u to %u s', 'PTP-Follower-Zeitlimit: {1} bis {2} s'],
+    ['PTP delay requests per follower: 0 (no limit) to %u per second', 'PTP Delay Requests pro Follower: 0 (unbegrenzt) bis {1} pro Sekunde'],
+    ['PTP TAI - UTC: 0 to %d s', 'PTP TAI - UTC: 0 bis {1} s'],
+    ['PTP ingress / egress latency: -%ld to %ld ns', 'PTP-Ingress- / Egress-Latenz: -{1} bis {2} ns']
   ];
 
   // Texts that stay English on purpose (names, technical terms, examples): listed so that app.js does not report
@@ -874,7 +951,9 @@
     'Topic', 'CMD (GPIO)', 'CLK (GPIO)', 'D0 (GPIO)', 'D1 (GPIO)', 'D2 (GPIO)', 'D3 (GPIO)', 'KY-016', 'WS2812',
     'CET-1CEST,M3.5.0,M10.5.0/3', '192.168.1.0/24 fd00::/8', '$CFGMSG,0,4,1', '0A 04',
     // MQTT and web admin certificate placeholders
-    'mqtt.example.org', '-----BEGIN CERTIFICATE-----', '-----BEGIN PRIVATE KEY-----']) {
+    'mqtt.example.org', '-----BEGIN CERTIFICATE-----', '-----BEGIN PRIVATE KEY-----',
+    // PTP: values of the selects, and names
+    '25 ns (0x20)', '100 ns (0x21)', '250 ns (0x22)', '1 µs (0x23)', '2.5 µs (0x24)', '10 µs (0x25)', '25 µs (0x26)', '100 µs (0x27)', '125 ms', '250 ms', '500 ms', 'Ethernet', 'UDP/IPv4', 'UDP/IPv6']) {
     if (!Object.prototype.hasOwnProperty.call(de, text)) de[text] = text;
   }
 

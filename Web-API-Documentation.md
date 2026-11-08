@@ -40,6 +40,7 @@ Request bodies are limited to 4096 bytes; `/api/apply` and `/api/save` take up t
 | `/api/logout` | POST | cookie + CSRF (without them only the cookie is cleared) | Ends the session |
 | `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, allow-list, `status` (network: link state, speed, duplex and driver restarts in `link_up`, `link_speed_mbps`, `link_full_duplex`, `eth_recoveries`; MQTT: `mqtt_active`, `mqtt_connected`, `mqtt_broker`, `mqtt_port`, `mqtt_tls`, `mqtt_error` with `mqtt_error_age_s`, `mqtt_connected_s`, `mqtt_published`, `mqtt_publish_age_s`, `mqtt_tf_queue`; time, GNSS, PPS, ...), certificate fingerprint, `tls` (see *TLS certificate* below), CSRF token. Secrets (passwords, keys) are not sent back |
 | `/api/diag` | GET | cookie | Diagnostics: servo, ADEV/TDEV, ISR histogram, NTP paths, basic mode TX delay, load shedding, receive rests of the NTP tasks under a flood (`receive_rests`), RMC phase, UBX details |
+| `/api/ptp` | GET | cookie | PTP master: state per transport, counters since the start and the current followers. See *PTP* below |
 | `/api/coredump` | GET | cookie | Downloads the stored core dump (`404` if there is none) |
 | `/api/apply` | POST | cookie + CSRF | Applies settings now, without storing them. The body is a settings object with the field names of `settings` in `/api/state`; missing fields keep their current value. See the notes below the table. Errors: `400` invalid value, `409` while a network change waits for its confirmation |
 | `/api/network/confirm` | POST | cookie + CSRF | Confirms the pending network change (body `{}`). A new static address must be confirmed over that address (`409` otherwise) |
@@ -62,6 +63,8 @@ Notes on `/api/apply`:
 - A network change must be confirmed within 120 s, otherwise the previous network settings are restored.
 - A change of a restart field (FQDN, pins, LED module, OTE, ...) writes a one-shot set and restarts once with it. The MQTT settings (except the TF card pins) take effect at once: the client stops and connects again with the new settings.
 - MQTT broker: `mqtt_broker` (IPv4 or IPv6 address or DNS name, no `.local`), `mqtt_port` (0 = 8883 with TLS, 1883 without), `mqtt_tls`, `mqtt_ca_pem` (CA certificate of the broker in PEM, at most 4096 characters, required with TLS; parsed with mbedTLS, `400` if it cannot be read). With TLS the broker certificate is checked against this CA and the broker name or IP address (SAN). The former field `mqtt_uri` (`mqtt://host[:port]` or `mqtts://host[:port]`) is still accepted and sets broker, port and TLS; fields sent with it replace these values.
+
+- PTP master (all fields take effect at once): `ptp_l2_enabled`, `ptp_udp4_enabled`, `ptp_udp6_enabled` (UDP is accepted and stored, served from a later firmware step; IPv4 / IPv6 must be in use, see `ip_mode`), `ptp_domain` (0 to 127), `ptp_priority1`, `ptp_priority2` (0 to 255), `ptp_log_sync_interval` (-3 to 4, 2^n s), `ptp_log_announce_interval` (0 to 4), `ptp_log_min_delay_req_interval` (-3 to 6), `ptp_master_selection` (true: stand aside for a better master; false: always master), `ptp_clock_accuracy` (clockAccuracy of the Announce: 32 to 49 = 0x20 to 0x31, or 254 = unknown), `ptp_follower_timeout` (5 to 3600 s), `ptp_delay_req_rate_limit` (0 = no limit, up to 1000 per follower and second), `ptp_utc_offset` (TAI - UTC, 0 to 100 s; used while the GNSS receiver does not tell it), `ptp_ingress_latency_ns`, `ptp_egress_latency_ns` (-100000 to 100000).
 
 **Static files** need no login; only the allow-list applies: `/`, `/app.js`, `/app.css`, `/i18n.js`, `/favicon.ico`.
 
@@ -142,6 +145,25 @@ The *GNSS console* sub-panel of *GNSS and PPS* sends commands typed by the user 
 - `reset`: the number was from before a restart, so the list starts again.
 - `running`: the GNSS UART runs.
 - `ublox`: the protocol is U-Blox UBX.
+
+## PTP (`/api/ptp`)
+
+Read by the page every 10 s while the PTP panel is open. The PTP master serves only while the server is at stratum 1 with GNSS and PPS (no holdover).
+
+```json
+{"started": true, "clock_identity": "80f1b2.fffe.d6581d", "utc_offset": 37, "utc_offset_source": "setting",
+ "ports": [{"transport": "l2", "enabled": true, "state": "serving", "followers": 2, "sync": 3600, "follow_up": 3598,
+            "announce": 1800, "delay_req": 7200, "delay_resp": 7190, "rate_limited": 3, "drops": 0, "invalid": 1,
+            "ignored": 12, "rx_timestamp_misses": 0, "tx_timestamp_misses": 2, "transmit_failures": 0, "foreign_announces": 0},
+           {"transport": "udp4", "enabled": false, "state": "disabled", ...},
+           {"transport": "udp6", "enabled": false, "state": "disabled", ...}],
+ "followers": [{"transport": "l2", "mac": "00:11:22:33:44:55", "port_identity": "001122.fffe.334455-1", "last_seen_s": 1}]}
+```
+
+- `started`: the PTP task runs (it needs the hardware time stamps of the Ethernet MAC). `clock_identity`: EUI-64 of the Ethernet MAC address. `utc_offset`: currentUtcOffset in use, from the u-blox receiver (`gnss`) or the setting (`setting`).
+- `state`: `serving`, `disabled`, `no Ethernet link`, `PTP clock not mapped to true time`, `not synchronized (stratum 1 needs GNSS and PPS)`, `PPS holdover`, `listening for other masters`, `a better master is present`.
+- Counters since the start: Sync, Follow_Up, Announce and Delay_Resp sent; Delay_Req received; `rate_limited` (over the per-follower limit, not answered), `drops` (queue full or over the limit of 1000 PTP frames per second), `invalid`, `ignored` (other message types and domains), `rx_timestamp_misses` (Delay_Req without a usable receive time stamp), `tx_timestamp_misses` (Sync without a usable transmit time stamp: no Follow_Up), `transmit_failures`, `foreign_announces` (Announces of other masters in the domain).
+- `followers`: followers that sent a Delay_Req within the follower timeout (at most 96), with the seconds since their last one.
 
 ## Firmware upload from a script (`/api/ote`)
 

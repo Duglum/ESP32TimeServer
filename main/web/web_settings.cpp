@@ -49,10 +49,11 @@ namespace
     //     same way);
     // 12: uptime / restart button appended at the end (versions 5 to 11 are still read the same way);
     // 13: MQTT broker, port, TLS and CA certificate appended at the end in the place of the broker URI, whose bytes
-    //     stay in the layout (mqtt_uri_unused): the URI of versions 5 to 12 is read into the new fields.
+    //     stay in the layout (mqtt_uri_unused): the URI of versions 5 to 12 is read into the new fields;
+    // 14: PTP master appended at the end (versions 5 to 13 are still read, PTP gets its defaults: off).
     // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
     // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
-    constexpr uint32_t BLOB_VERSION = 13;
+    constexpr uint32_t BLOB_VERSION = 14;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
     constexpr uint32_t BLOB_VERSION_7 = 7;
@@ -61,6 +62,7 @@ namespace
     constexpr uint32_t BLOB_VERSION_10 = 10;
     constexpr uint32_t BLOB_VERSION_11 = 11;
     constexpr uint32_t BLOB_VERSION_12 = 12;
+    constexpr uint32_t BLOB_VERSION_13 = 13;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -75,13 +77,15 @@ namespace
     constexpr size_t SETTINGS_SIZE_10 = settings_size_before(offsetof(web_settings_t, ip_mode));
     constexpr size_t SETTINGS_SIZE_11 = settings_size_before(offsetof(web_settings_t, button_enabled));
     constexpr size_t SETTINGS_SIZE_12 = settings_size_before(offsetof(web_settings_t, mqtt_broker));
+    constexpr size_t SETTINGS_SIZE_13 = settings_size_before(offsetof(web_settings_t, ptp_l2_enabled));
     // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 12 may fit into that of the
     // version before: the version number tells them apart, and an older set always gets the defaults for the newer
     // fields instead of its padding bytes
     static_assert(SETTINGS_SIZE_5 <= SETTINGS_SIZE_6 && SETTINGS_SIZE_6 <= SETTINGS_SIZE_7 &&
                       SETTINGS_SIZE_7 <= SETTINGS_SIZE_8 && SETTINGS_SIZE_8 <= SETTINGS_SIZE_9 &&
                       SETTINGS_SIZE_9 <= SETTINGS_SIZE_10 && SETTINGS_SIZE_10 <= SETTINGS_SIZE_11 &&
-                      SETTINGS_SIZE_11 <= SETTINGS_SIZE_12 && SETTINGS_SIZE_12 <= sizeof(web_settings_t),
+                      SETTINGS_SIZE_11 <= SETTINGS_SIZE_12 && SETTINGS_SIZE_12 <= SETTINGS_SIZE_13 &&
+                      SETTINGS_SIZE_13 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
     // Defaults of the fields that later blob versions appended (web_settings_defaults() uses them as well)
@@ -96,6 +100,27 @@ namespace
     constexpr bool DEFAULT_BUTTON_ENABLED = false;
     constexpr int8_t DEFAULT_BUTTON_PIN = 3;
     constexpr char DEFAULT_MQTT_TOPIC[] = "ESP32TimeServer";
+
+    // PTP master (version 14): off; the values of the default profile of IEEE 1588-2019
+    void ptp_defaults(web_settings_t &out)
+    {
+        out.ptp_l2_enabled = false;
+        out.ptp_udp4_enabled = false;
+        out.ptp_udp6_enabled = false;
+        out.ptp_domain = 0;
+        out.ptp_priority1 = 128;
+        out.ptp_priority2 = 128;
+        out.ptp_log_sync_interval = 0;          // 1 s
+        out.ptp_log_announce_interval = 1;      // 2 s
+        out.ptp_log_min_delay_req_interval = 0; // 1 s
+        out.ptp_master_selection = true;
+        out.ptp_clock_accuracy = 0x22;          // within 250 ns
+        out.ptp_follower_timeout_s = 30;
+        out.ptp_delay_req_rate_limit = 16;
+        out.ptp_utc_offset_s = 37;              // TAI - UTC since 2017-01-01
+        out.ptp_ingress_latency_ns = 0;
+        out.ptp_egress_latency_ns = 0;
+    }
 
     struct settings_blob_t
     {
@@ -207,6 +232,7 @@ namespace
         const bool version_10 = header.version == BLOB_VERSION_10 && header.size == SETTINGS_SIZE_10;
         const bool version_11 = header.version == BLOB_VERSION_11 && header.size == SETTINGS_SIZE_11;
         const bool version_12 = header.version == BLOB_VERSION_12 && header.size == SETTINGS_SIZE_12;
+        const bool version_13 = header.version == BLOB_VERSION_13 && header.size == SETTINGS_SIZE_13;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
@@ -219,10 +245,11 @@ namespace
                                length != HEADER_SIZE + SETTINGS_SIZE_9 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_10 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_11 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_12 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_12 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_13 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
         else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9 && !version_10 &&
-                                                   !version_11 && !version_12) ||
+                                                   !version_11 && !version_12 && !version_13) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -284,7 +311,7 @@ namespace
                 if (version_11)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 11 read; the uptime / restart button has its default", key);
             }
-            if (!current)
+            if (!current && !version_13)
             {
                 // Version 13: the broker URI into broker, port and TLS; the topic rule is stricter now (no leading $,
                 // no trailing /)
@@ -294,6 +321,13 @@ namespace
                     ESP_LOGW(TAG, "Stored web settings '%s': the MQTT topic does not fit the topic rules, the default is used", key);
                     copy_text(blob.settings.mqtt_topic, DEFAULT_MQTT_TOPIC);
                 }
+            }
+            if (!current)
+            {
+                // Appended in version 14
+                ptp_defaults(blob.settings);
+                if (version_13)
+                    ESP_LOGI(TAG, "Stored web settings '%s' of version 13 read; the PTP master has its defaults (off)", key);
                 blob.version = BLOB_VERSION;
                 blob.size = sizeof(web_settings_t);
             }
@@ -872,6 +906,9 @@ void web_settings_defaults(web_settings_t &out)
     out.ntp_auth_enabled = false;
     out.ntp_key_override = true;
     out.ntp_key_count = 0;
+
+    // ---- PTP master: off ----
+    ptp_defaults(out);
 }
 
 void web_settings_load_boot()
@@ -1314,6 +1351,33 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
                 FAIL("NTP key %u: letters and digits only", static_cast<unsigned>(i + 1));
     }
 
+    // ---- PTP master ----
+    if (s.ptp_domain > WEB_PTP_DOMAIN_MAX)
+        FAIL("PTP domain: 0 to %u", static_cast<unsigned>(WEB_PTP_DOMAIN_MAX));
+    if (s.ptp_log_sync_interval < WEB_PTP_LOG_SYNC_MIN || s.ptp_log_sync_interval > WEB_PTP_LOG_SYNC_MAX)
+        FAIL("PTP sync interval: 2^%d to 2^%d s", WEB_PTP_LOG_SYNC_MIN, WEB_PTP_LOG_SYNC_MAX);
+    if (s.ptp_log_announce_interval < WEB_PTP_LOG_ANNOUNCE_MIN || s.ptp_log_announce_interval > WEB_PTP_LOG_ANNOUNCE_MAX)
+        FAIL("PTP announce interval: 2^%d to 2^%d s", WEB_PTP_LOG_ANNOUNCE_MIN, WEB_PTP_LOG_ANNOUNCE_MAX);
+    if (s.ptp_log_min_delay_req_interval < WEB_PTP_LOG_DELAY_REQ_MIN || s.ptp_log_min_delay_req_interval > WEB_PTP_LOG_DELAY_REQ_MAX)
+        FAIL("PTP minimum delay request interval: 2^%d to 2^%d s", WEB_PTP_LOG_DELAY_REQ_MIN, WEB_PTP_LOG_DELAY_REQ_MAX);
+    if ((s.ptp_clock_accuracy < 0x20 || s.ptp_clock_accuracy > 0x31) && s.ptp_clock_accuracy != 0xFE)
+        FAIL("PTP clock accuracy: 0x20 to 0x31 or 0xFE");
+    if (s.ptp_follower_timeout_s < WEB_PTP_FOLLOWER_TIMEOUT_MIN_S || s.ptp_follower_timeout_s > WEB_PTP_FOLLOWER_TIMEOUT_MAX_S)
+        FAIL("PTP follower timeout: %u to %u s", static_cast<unsigned>(WEB_PTP_FOLLOWER_TIMEOUT_MIN_S),
+             static_cast<unsigned>(WEB_PTP_FOLLOWER_TIMEOUT_MAX_S));
+    if (s.ptp_delay_req_rate_limit > WEB_PTP_DELAY_REQ_RATE_MAX)
+        FAIL("PTP delay requests per follower: 0 (no limit) to %u per second", static_cast<unsigned>(WEB_PTP_DELAY_REQ_RATE_MAX));
+    if (s.ptp_utc_offset_s < 0 || s.ptp_utc_offset_s > WEB_PTP_UTC_OFFSET_MAX_S)
+        FAIL("PTP TAI - UTC: 0 to %d s", WEB_PTP_UTC_OFFSET_MAX_S);
+    if (s.ptp_ingress_latency_ns < -WEB_PTP_LATENCY_MAX_NS || s.ptp_ingress_latency_ns > WEB_PTP_LATENCY_MAX_NS ||
+        s.ptp_egress_latency_ns < -WEB_PTP_LATENCY_MAX_NS || s.ptp_egress_latency_ns > WEB_PTP_LATENCY_MAX_NS)
+        FAIL("PTP ingress / egress latency: -%ld to %ld ns", static_cast<long>(WEB_PTP_LATENCY_MAX_NS),
+             static_cast<long>(WEB_PTP_LATENCY_MAX_NS));
+    if (s.ptp_udp4_enabled && s.ip_mode == web_ip_mode_t::ipv6)
+        FAIL("PTP over UDP/IPv4 needs IPv4 (address families)");
+    if (s.ptp_udp6_enabled && s.ip_mode == web_ip_mode_t::ipv4)
+        FAIL("PTP over UDP/IPv6 needs IPv6 (address families)");
+
 #undef FAIL
     return true;
 }
@@ -1370,5 +1434,15 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
            a.mqtt_memory_reporting == b.mqtt_memory_reporting && a.mqtt_historical_reporting == b.mqtt_historical_reporting &&
            a.mqtt_distinguish_auth == b.mqtt_distinguish_auth && a.mqtt_tf_client_limit == b.mqtt_tf_client_limit &&
            a.ntp_key_count == b.ntp_key_count &&
-           web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_keys), reinterpret_cast<const uint8_t *>(b.ntp_keys), sizeof(a.ntp_keys));
+           web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ntp_keys), reinterpret_cast<const uint8_t *>(b.ntp_keys), sizeof(a.ntp_keys)) &&
+           // PTP master: everything takes effect at once
+           a.ptp_l2_enabled == b.ptp_l2_enabled && a.ptp_udp4_enabled == b.ptp_udp4_enabled &&
+           a.ptp_udp6_enabled == b.ptp_udp6_enabled && a.ptp_domain == b.ptp_domain && a.ptp_priority1 == b.ptp_priority1 &&
+           a.ptp_priority2 == b.ptp_priority2 && a.ptp_log_sync_interval == b.ptp_log_sync_interval &&
+           a.ptp_log_announce_interval == b.ptp_log_announce_interval &&
+           a.ptp_log_min_delay_req_interval == b.ptp_log_min_delay_req_interval &&
+           a.ptp_master_selection == b.ptp_master_selection && a.ptp_clock_accuracy == b.ptp_clock_accuracy &&
+           a.ptp_follower_timeout_s == b.ptp_follower_timeout_s && a.ptp_delay_req_rate_limit == b.ptp_delay_req_rate_limit &&
+           a.ptp_utc_offset_s == b.ptp_utc_offset_s && a.ptp_ingress_latency_ns == b.ptp_ingress_latency_ns &&
+           a.ptp_egress_latency_ns == b.ptp_egress_latency_ns;
 }

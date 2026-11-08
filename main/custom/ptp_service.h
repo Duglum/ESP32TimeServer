@@ -159,7 +159,7 @@ static std::atomic<uint32_t> s_ptp_config_generation{0};
 static ptp::FollowerTable<PTP_FOLLOWER_CAPACITY, PTP_FOLLOWER_CAPACITY> s_ptp_followers(30LL * 1000000LL); // ptp_mutex()
 
 // Takes over new settings (any task)
-[[maybe_unused]] static void ptp_set_config(const ptp_config_t &config)
+static void ptp_set_config(const ptp_config_t &config)
 {
     if (xSemaphoreTake(ptp_mutex(), portMAX_DELAY) != pdTRUE)
         return;
@@ -705,4 +705,76 @@ static void start_ptp_service()
     ESP_LOGI(TAG, "PTP: clock identity %02x%02x%02x.%02x%02x.%02x%02x%02x, %s", s_ptp_identity[0], s_ptp_identity[1],
              s_ptp_identity[2], s_ptp_identity[3], s_ptp_identity[4], s_ptp_identity[5], s_ptp_identity[6], s_ptp_identity[7],
              s_ptp_transport_enabled[PTP_TRANSPORT_L2].load() ? "Ethernet on" : "off");
+}
+
+// ---- Web admin ----
+
+// Settings of the web page into the PTP master (app_apply_live_settings, at the start and with every Apply)
+static void ptp_apply_settings(const web_settings_t &settings)
+{
+    ptp_config_t config;
+    config.enabled[PTP_TRANSPORT_L2] = settings.ptp_l2_enabled || PTP_TEST_FORCE_L2 != 0;
+    // UDP: not served yet (next step of the PTP backport); the settings exist already
+    config.enabled[PTP_TRANSPORT_UDP4] = false;
+    config.enabled[PTP_TRANSPORT_UDP6] = false;
+    config.domain = settings.ptp_domain;
+    config.priority1 = settings.ptp_priority1;
+    config.priority2 = settings.ptp_priority2;
+    config.log_sync_interval = settings.ptp_log_sync_interval;
+    config.log_announce_interval = settings.ptp_log_announce_interval;
+    config.log_min_delay_req_interval = settings.ptp_log_min_delay_req_interval;
+    config.master_selection = settings.ptp_master_selection;
+    config.follower_timeout_s = settings.ptp_follower_timeout_s;
+    config.delay_req_rate_limit = settings.ptp_delay_req_rate_limit;
+    config.clock_accuracy = settings.ptp_clock_accuracy;
+    config.utc_offset_s = settings.ptp_utc_offset_s;
+    config.ingress_latency_ns = settings.ptp_ingress_latency_ns;
+    config.egress_latency_ns = settings.ptp_egress_latency_ns;
+    ptp_set_config(config);
+}
+
+void app_get_ptp_status(web_ptp_status_t &status)
+{
+    status.started = s_ptp_started.load(std::memory_order_acquire);
+    memcpy(status.identity, s_ptp_identity, sizeof(status.identity));
+    status.utc_offset = s_ptp_utc_offset_in_use.load(std::memory_order_relaxed);
+    status.utc_offset_from_gnss = s_ptp_utc_offset_from_gnss.load(std::memory_order_relaxed);
+    for (size_t t = 0; t < PTP_TRANSPORT_COUNT && t < WEB_PTP_TRANSPORTS; ++t)
+    {
+        const ptp_counters_t &c = s_ptp_counters[t];
+        web_ptp_port_t &port = status.ports[t];
+        port.enabled = s_ptp_transport_enabled[t].load(std::memory_order_acquire);
+        port.state = ptp_reason_name(port.enabled ? static_cast<ptp_reason_t>(s_ptp_reason[t].load(std::memory_order_relaxed))
+                                                  : ptp_reason_t::disabled);
+        port.followers = 0;
+        port.sync_sent = c.sync_sent.load(std::memory_order_relaxed);
+        port.follow_up_sent = c.follow_up_sent.load(std::memory_order_relaxed);
+        port.announce_sent = c.announce_sent.load(std::memory_order_relaxed);
+        port.delay_req_received = c.delay_req_received.load(std::memory_order_relaxed);
+        port.delay_resp_sent = c.delay_resp_sent.load(std::memory_order_relaxed);
+        port.rate_limited = c.rate_limited.load(std::memory_order_relaxed);
+        port.queue_drops = c.queue_drops.load(std::memory_order_relaxed);
+        port.invalid = c.invalid.load(std::memory_order_relaxed);
+        port.ignored = c.ignored.load(std::memory_order_relaxed);
+        port.rx_timestamp_misses = c.rx_timestamp_misses.load(std::memory_order_relaxed);
+        port.tx_timestamp_misses = c.tx_timestamp_misses.load(std::memory_order_relaxed);
+        port.transmit_failures = c.transmit_failures.load(std::memory_order_relaxed);
+        port.foreign_announces = c.foreign_announces.load(std::memory_order_relaxed);
+    }
+    status.follower_count = 0;
+    const int64_t now_us = esp_timer_get_time();
+    if (xSemaphoreTake(ptp_mutex(), pdMS_TO_TICKS(100)) != pdTRUE)
+        return;
+    s_ptp_followers.for_each_active([&](uint8_t transport, uint8_t, const uint8_t *identity, const uint8_t *mac, int64_t last_seen_us)
+                                    {
+        if (transport < WEB_PTP_TRANSPORTS)
+            ++status.ports[transport].followers;
+        if (status.follower_count >= WEB_PTP_FOLLOWERS)
+            return;
+        web_ptp_follower_t &follower = status.followers[status.follower_count++];
+        follower.transport = transport;
+        memcpy(follower.mac, mac, sizeof(follower.mac));
+        memcpy(follower.port_identity, identity, sizeof(follower.port_identity));
+        follower.last_seen_s = now_us > last_seen_us ? static_cast<uint32_t>((now_us - last_seen_us) / 1000000LL) : 0; });
+    xSemaphoreGive(ptp_mutex());
 }

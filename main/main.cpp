@@ -12065,6 +12065,7 @@ void app_apply_live_settings(const web_settings_t &settings)
     s_pps_lost_serve_us.store(static_cast<int64_t>(settings.pps_lost_serve_min) * 60LL * 1000000LL);
     s_pps_dispersion_ppm.store(settings.pps_dispersion_ppm, std::memory_order_relaxed);
     ntp_cache_set_rate_limit(settings.ntp_client_rate_limit);
+    ptp_apply_settings(settings);
     s_gnss_min_fix_age_us.store(static_cast<int64_t>(settings.gnss_min_fix_age_s) * 1000000LL, std::memory_order_relaxed);
     s_gnss_min_satellites.store(settings.gnss_min_satellites, std::memory_order_relaxed);
     gnss_nmea_set_min_satellites(settings.gnss_min_satellites);
