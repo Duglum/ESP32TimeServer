@@ -883,6 +883,10 @@
     'PPS holdover': 'PPS-Holdover',
     'listening for other masters': 'hört auf andere Master',
     'a better master is present': 'ein besserer Master ist da',
+    'PTP over UDP/IPv4 (224.0.1.129, ports 319 and 320)': 'PTP über UDP/IPv4 (224.0.1.129, Ports 319 und 320)',
+    'PTP over UDP/IPv6 (ff02::181, ports 319 and 320, from the link-local address)': 'PTP über UDP/IPv6 (ff02::181, Ports 319 und 320, von der Link-local-Adresse)',
+    'Any combination can be on; all of them share the domain, the clock and the settings below. Linux (linuxptp <code>ptp4l</code>) can follow every transport (Ethernet with <code>-2</code>, UDP/IPv4 by default, UDP/IPv6 with <code>-6</code>); Windows (w32time) follows UDP/IPv4 only. UDP needs the IP version in use (address families in <em>Network</em>).': 'Jede Kombination kann eingeschaltet sein; alle teilen sich die Domain, die Uhr und die Einstellungen unten. Linux (linuxptp <code>ptp4l</code>) kann jedem Transport folgen (Ethernet mit <code>-2</code>, UDP/IPv4 als Standard, UDP/IPv6 mit <code>-6</code>); Windows (w32time) folgt nur UDP/IPv4. UDP braucht die verwendete IP-Version (Adressfamilien unter <em>Netzwerk</em>).',
+    'no address for this IP version': 'keine Adresse dieser IP-Version',
     'PTP clock accuracy: 0x20 to 0x31 or 0xFE': 'PTP-Uhrgenauigkeit: 0x20 bis 0x31 oder 0xFE',
     'PTP over UDP/IPv4 needs IPv4 (address families)': 'PTP über UDP/IPv4 braucht IPv4 (Adressfamilien)',
     'PTP over UDP/IPv6 needs IPv6 (address families)': 'PTP über UDP/IPv6 braucht IPv6 (Adressfamilien)'

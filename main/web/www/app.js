@@ -468,6 +468,8 @@
       ntp_auth_enabled: s.ntp_auth_enabled,
       ote_enabled: s.ote_enabled,
       ptp_l2_enabled: s.ptp_l2_enabled,
+      ptp_udp4_enabled: s.ptp_udp4_enabled,
+      ptp_udp6_enabled: s.ptp_udp6_enabled,
       ptp_master_selection: s.ptp_master_selection,
       ...Object.fromEntries(ptpNumbers.map(([name]) => [name, String(s[name])]))
     };
@@ -795,8 +797,12 @@
       ntp_auth_enabled: f.ntp_auth_enabled.checked,
       ote_enabled: f.ote_enabled.checked,
       ptp_l2_enabled: f.ptp_l2_enabled.checked,
+      ptp_udp4_enabled: f.ptp_udp4_enabled.checked,
+      ptp_udp6_enabled: f.ptp_udp6_enabled.checked,
       ptp_master_selection: f.ptp_master_selection.checked
     };
+    if (body.ptp_udp4_enabled && body.ip_mode === 'ipv6') throw fieldError('ptp_udp4_enabled', t('PTP over UDP/IPv4 needs IPv4 (address families)'));
+    if (body.ptp_udp6_enabled && body.ip_mode === 'ipv4') throw fieldError('ptp_udp6_enabled', t('PTP over UDP/IPv6 needs IPv6 (address families)'));
     for (const [name, lowest, highest, message] of ptpNumbers) {
       const text = f[name].value.trim();
       const value = Number(text);

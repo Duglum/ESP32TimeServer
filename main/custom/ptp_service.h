@@ -14,12 +14,18 @@
 //   GNSS-locked grandmaster (clockClass 6, timeTraceable, frequencyTraceable);
 // - TAI only at the output: TAI = UTC + currentUtcOffset (GPS - UTC + 19 from the u-blox, else the setting);
 // - Delay_Req rate limit per follower and an admission limit for all PTP frames; ingress and egress latencies.
-// One task serves every transport (port 1 = Ethernet; ports 2 and 3 = UDP/IPv4 and UDP/IPv6 follow later).
+// One task serves every transport: port 1 = Ethernet, port 2 = UDP/IPv4 (224.0.1.129), port 3 = UDP/IPv6 (ff02::181).
+// UDP frames are taken before lwIP and sent raw (with hardware time stamps); the multicast groups are joined with
+// IGMP / MLD only (no sockets: the lwIP socket limit is nearly used up), so switches with snooping forward them.
 
 #pragma once
 
+#include "esp_netif_net_stack.h"
+#include "lwip/igmp.h"
+#include "lwip/tcpip.h"
 #include "ptp_followers.h"
 #include "ptp_l2_protocol.h"
+#include "ptp_l3_udp.h"
 #include "ptp_message.h"
 
 #if !PTP_FREE_RUNNING
@@ -34,8 +40,8 @@
 enum ptp_transport_t : uint8_t
 {
     PTP_TRANSPORT_L2 = 0,   // Ethernet, EtherType 0x88F7, 01:1B:19:00:00:00
-    PTP_TRANSPORT_UDP4 = 1, // UDP/IPv4 224.0.1.129 (later step)
-    PTP_TRANSPORT_UDP6 = 2, // UDP/IPv6 ff02::181 (later step)
+    PTP_TRANSPORT_UDP4 = 1, // UDP/IPv4 224.0.1.129, ports 319 / 320
+    PTP_TRANSPORT_UDP6 = 2, // UDP/IPv6 ff02::181, ports 319 / 320
     PTP_TRANSPORT_COUNT = 3,
 };
 
@@ -66,6 +72,7 @@ enum class ptp_reason_t : uint8_t
     serving = 0,
     disabled,
     no_link,           // Ethernet down or in recovery
+    no_address,        // UDP: no IPv4 address / no IPv6 link-local address (or the group could not be joined)
     clock_not_ready,   // PTP clock not running, or its mapping to true time not valid (after a set or step)
     not_synchronized,  // the NTP reply status is not stratum 1 (GNSS, PPS)
     holdover,          // PPS holdover: PTP does not coast, the followers switch to another master
@@ -83,6 +90,8 @@ static const char *ptp_reason_name(ptp_reason_t reason)
         return "disabled";
     case ptp_reason_t::no_link:
         return "no Ethernet link";
+    case ptp_reason_t::no_address:
+        return "no address for this IP version";
     case ptp_reason_t::clock_not_ready:
         return "PTP clock not mapped to true time";
     case ptp_reason_t::not_synchronized:
@@ -183,15 +192,55 @@ static void ptp_get_config(ptp_config_t &config, uint32_t &generation)
 
 // Called for every received frame by ntp_ethernet_input(). true: the frame is PTP of an enabled transport and was
 // taken (queued or dropped); the caller frees it. false: not for PTP, it goes on to NTP / lwIP as before.
+// Transport of a received frame and the offset of its PTP message: Ethernet (EtherType 0x88F7, no VLAN tag), or UDP
+// to the PTP group (224.0.1.129 / ff02::181, at their multicast MACs) and port 319 or 320; PTP_TRANSPORT_COUNT if
+// neither. Only the headers are looked at here; the task checks the rest (checksums, lengths) with the parsers.
+static uint8_t ptp_frame_transport(const uint8_t *frame, uint32_t length, size_t &message_offset)
+{
+    if (length < 14)
+        return PTP_TRANSPORT_COUNT;
+    if (frame[12] == 0x88 && frame[13] == 0xf7)
+    {
+        message_offset = 14;
+        return PTP_TRANSPORT_L2;
+    }
+    const uint8_t *ip = frame + 14;
+    size_t udp_offset = 0;
+    uint8_t transport = PTP_TRANSPORT_COUNT;
+    if (frame[12] == 0x08 && frame[13] == 0x00 && memcmp(frame, ptp_l3_udp::IPV4_MAC, 6) == 0 && length >= 14 + 20 + 8)
+    {
+        const size_t header = (ip[0] & 15U) * 4U;
+        if ((ip[0] >> 4) != 4 || header < 20 || length < 14 + header + 8 || ip[9] != 17 ||
+            memcmp(ip + 16, ptp_l3_udp::IPV4_GROUP, 4) != 0)
+            return PTP_TRANSPORT_COUNT;
+        udp_offset = 14 + header;
+        transport = PTP_TRANSPORT_UDP4;
+    }
+    else if (frame[12] == 0x86 && frame[13] == 0xdd && memcmp(frame, ptp_l3_udp::IPV6_MAC, 6) == 0 && length >= 14 + 40 + 8)
+    {
+        if ((ip[0] >> 4) != 6 || ip[6] != 17 || memcmp(ip + 24, ptp_l3_udp::IPV6_GROUP, 16) != 0)
+            return PTP_TRANSPORT_COUNT;
+        udp_offset = 14 + 40;
+        transport = PTP_TRANSPORT_UDP6;
+    }
+    else
+        return PTP_TRANSPORT_COUNT;
+    const uint16_t port = static_cast<uint16_t>((frame[udp_offset + 2] << 8) | frame[udp_offset + 3]);
+    if (port != ptp_l3_udp::EVENT_PORT && port != ptp_l3_udp::GENERAL_PORT)
+        return PTP_TRANSPORT_COUNT;
+    message_offset = udp_offset + 8;
+    return transport;
+}
+
 static bool ptp_receive_frame(const uint8_t *frame, uint32_t length, const eth_mac_time_t *timestamp)
 {
-    if (length < 14 + ptp::HEADER_SIZE || frame[12] != 0x88 || frame[13] != 0xf7)
-        return false;
-    const uint8_t transport = PTP_TRANSPORT_L2;
-    if (!s_ptp_transport_enabled[transport].load(std::memory_order_acquire) || s_ptp_rx_queue == nullptr)
+    size_t message_offset = 0;
+    const uint8_t transport = ptp_frame_transport(frame, length, message_offset);
+    if (transport >= PTP_TRANSPORT_COUNT || length < message_offset + ptp::HEADER_SIZE ||
+        !s_ptp_transport_enabled[transport].load(std::memory_order_acquire) || s_ptp_rx_queue == nullptr)
         return false;
     ptp_counters_t &counters = s_ptp_counters[transport];
-    const uint8_t *message = frame + 14;
+    const uint8_t *message = frame + message_offset;
 
     // Only Delay_Req and Announce are of interest to a master: Sync, Follow_Up, Delay_Resp (of other masters),
     // Pdelay, Signaling and Management are dropped here
@@ -285,6 +334,82 @@ static ptp_reason_t ptp_time_reason()
     return ptp_reason_t::serving;
 }
 
+// ---- UDP: source addresses and multicast groups (PTP task only) ----
+
+struct ptp_udp_family_t
+{
+    bool ready = false;  // source address known and group joined
+    bool joined = false;
+    bool join_failure_logged = false;
+    uint8_t source[16]{};
+};
+static ptp_udp_family_t s_ptp_udp[2]; // [0] IPv4, [1] IPv6
+
+// Runs in the lwIP thread (tcpip_callback): IGMP join / leave of 224.0.1.129 on the Ethernet interface
+static void ptp_igmp_in_tcpip(void *argument)
+{
+    const bool join = argument != nullptr;
+    struct netif *netif = s_eth_netif != nullptr ? static_cast<struct netif *>(esp_netif_get_netif_impl(s_eth_netif)) : nullptr;
+    if (netif == nullptr)
+        return;
+    ip4_addr_t group;
+    memcpy(&group.addr, ptp_l3_udp::IPV4_GROUP, 4);
+    if (join)
+        igmp_joingroup_netif(netif, &group);
+    else
+        igmp_leavegroup_netif(netif, &group);
+}
+
+static bool ptp_udp_group(size_t family, bool join)
+{
+    if (s_eth_netif == nullptr)
+        return false;
+    if (family == 0)
+        return tcpip_callback(ptp_igmp_in_tcpip, join ? reinterpret_cast<void *>(1) : nullptr) == ERR_OK;
+    esp_ip6_addr_t group{};
+    memcpy(group.addr, ptp_l3_udp::IPV6_GROUP, 16);
+    return (join ? esp_netif_join_ip6_multicast_group(s_eth_netif, &group) : esp_netif_leave_ip6_multicast_group(s_eth_netif, &group)) == ESP_OK;
+}
+
+// Source address of a family: the own IPv4 address, or the IPv6 link-local address (the scope of ff02::181)
+static bool ptp_udp_source(size_t family, uint8_t *source)
+{
+    if (family == 0)
+    {
+        const uint32_t address = s_own_ipv4_address_be.load(std::memory_order_acquire);
+        memcpy(source, &address, 4);
+        return s_ipv4_enabled && address != 0;
+    }
+    esp_ip6_addr_t address{};
+    if (!s_ipv6_enabled || s_eth_netif == nullptr || esp_netif_get_ip6_linklocal(s_eth_netif, &address) != ESP_OK)
+        return false;
+    memcpy(source, address.addr, 16);
+    return source[0] == 0xfe && (source[1] & 0xc0) == 0x80;
+}
+
+// Once a second and when a transport is switched: source address, group membership
+static void ptp_udp_maintain(uint8_t transport, bool enabled)
+{
+    const size_t index = transport - PTP_TRANSPORT_UDP4;
+    ptp_udp_family_t &family = s_ptp_udp[index];
+    uint8_t source[16] = {};
+    const bool have_source = enabled && s_ethernet_connected.load(std::memory_order_acquire) && ptp_udp_source(index, source);
+    if (!enabled && family.joined)
+    {
+        ptp_udp_group(index, false);
+        family.joined = false;
+    }
+    if (enabled && !family.joined && have_source)
+    {
+        family.joined = ptp_udp_group(index, true);
+        if (!family.joined && !family.join_failure_logged)
+            ESP_LOGW(TAG, "PTP %s: the multicast group could not be joined (tried again every second)", PTP_TRANSPORT_NAMES[transport]);
+        family.join_failure_logged = !family.joined;
+    }
+    memcpy(family.source, source, sizeof(family.source));
+    family.ready = have_source && family.joined;
+}
+
 // ---- Transmit ----
 
 // Sends a PTP message on a transport. timestamp != nullptr: with the hardware transmit time stamp (left zero if the
@@ -313,7 +438,16 @@ static bool ptp_send(uint8_t transport, const uint8_t *message, size_t message_l
         }
     }
     else
-        return false;
+    {
+        // UDP to the PTP group, TTL / hop limit 1, from the own IPv4 address / IPv6 link-local address
+        const ptp_udp_family_t &family = s_ptp_udp[transport - PTP_TRANSPORT_UDP4];
+        if (!family.ready)
+            return false;
+        frame_length = ptp_l3_udp::encapsulate(frame, sizeof(frame), s_ptp_source_mac, family.source,
+                                               transport == PTP_TRANSPORT_UDP6, message, message_length);
+        if (frame_length == 0)
+            return false;
+    }
 
     const esp_eth_handle_t handle = s_eth_handle;
     if (handle == nullptr || s_hardware_ntp_transmit_mutex == nullptr ||
@@ -509,7 +643,19 @@ static void ptp_handle_item(const ptp_rx_item_t &item, ptp_port_t &port, const p
     ptp_counters_t &counters = s_ptp_counters[item.transport];
     ptp::ParsedMessage parsed{};
     const uint8_t *source_mac = item.data + 6;
-    const ptp::MessageKind kind = ptp::parse_l2_frame(item.data, item.length, config.domain, s_ptp_identity, parsed);
+    ptp::MessageKind kind = ptp::MessageKind::Invalid;
+    if (item.transport == PTP_TRANSPORT_L2)
+        kind = ptp::parse_l2_frame(item.data, item.length, config.domain, s_ptp_identity, parsed);
+    else
+    {
+        // Checksums, lengths, group and ports; the IP version must match the transport. Delay_Req on 319, Announce on
+        // 320 (otherwise Invalid)
+        ptp_l3_udp::Datagram datagram{};
+        kind = ptp_l3_udp::decode(item.data, item.length, config.domain, s_ptp_identity, datagram, parsed);
+        if (kind != ptp::MessageKind::Ignored && kind != ptp::MessageKind::Invalid &&
+            datagram.ipv6 != (item.transport == PTP_TRANSPORT_UDP6))
+            kind = ptp::MessageKind::Invalid;
+    }
     if (kind == ptp::MessageKind::Invalid)
     {
         counters.invalid.fetch_add(1, std::memory_order_relaxed);
@@ -568,6 +714,8 @@ static void ptp_service_task(void *parameter)
     ptp_port_t *const ports = s_ptp_ports;
     ptp_rx_item_t &item = s_ptp_task_item;
     int64_t last_expire_us = 0;
+    int64_t last_udp_us = 0;
+    bool udp_was_enabled[2] = {false, false};
 #if DEBUG_ENABLED
     int64_t last_report_us = 0;
 #endif
@@ -581,6 +729,17 @@ static void ptp_service_task(void *parameter)
         const uint32_t epoch = s_ptp_epoch.load(std::memory_order_acquire);
         const ptp_reason_t time_reason = ptp_time_reason();
         const int16_t utc_offset = ptp_utc_offset(config);
+        // Once a second, and at once when a UDP transport is switched on or off (a failed join is tried again a
+        // second later, not in every loop)
+        if (now_us - last_udp_us >= 1000000LL || config.enabled[PTP_TRANSPORT_UDP4] != udp_was_enabled[0] ||
+            config.enabled[PTP_TRANSPORT_UDP6] != udp_was_enabled[1])
+        {
+            last_udp_us = now_us;
+            udp_was_enabled[0] = config.enabled[PTP_TRANSPORT_UDP4];
+            udp_was_enabled[1] = config.enabled[PTP_TRANSPORT_UDP6];
+            ptp_udp_maintain(PTP_TRANSPORT_UDP4, config.enabled[PTP_TRANSPORT_UDP4]);
+            ptp_udp_maintain(PTP_TRANSPORT_UDP6, config.enabled[PTP_TRANSPORT_UDP6]);
+        }
 
         for (uint8_t transport = 0; transport < PTP_TRANSPORT_COUNT; ++transport)
         {
@@ -603,6 +762,8 @@ static void ptp_service_task(void *parameter)
             port.enabled = enabled;
 
             ptp_reason_t reason = !enabled ? ptp_reason_t::disabled : time_reason;
+            if (reason == ptp_reason_t::serving && transport != PTP_TRANSPORT_L2 && !s_ptp_udp[transport - PTP_TRANSPORT_UDP4].ready)
+                reason = ptp_reason_t::no_address;
             if (reason == ptp_reason_t::serving && config.master_selection)
             {
                 const ptp::SelectionRole role = port.selection.role(now_us);
@@ -714,9 +875,9 @@ static void ptp_apply_settings(const web_settings_t &settings)
 {
     ptp_config_t config;
     config.enabled[PTP_TRANSPORT_L2] = settings.ptp_l2_enabled || PTP_TEST_FORCE_L2 != 0;
-    // UDP: not served yet (next step of the PTP backport); the settings exist already
-    config.enabled[PTP_TRANSPORT_UDP4] = false;
-    config.enabled[PTP_TRANSPORT_UDP6] = false;
+    // UDP only with its address family in use (the validation of the settings checks it too)
+    config.enabled[PTP_TRANSPORT_UDP4] = settings.ptp_udp4_enabled && s_ipv4_enabled;
+    config.enabled[PTP_TRANSPORT_UDP6] = settings.ptp_udp6_enabled && s_ipv6_enabled;
     config.domain = settings.ptp_domain;
     config.priority1 = settings.ptp_priority1;
     config.priority2 = settings.ptp_priority2;

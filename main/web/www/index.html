@@ -489,7 +489,10 @@
           <p class="hint first">Grandmaster of the IEEE 1588-2019 default profile: end-to-end delay mechanism, two-step, multicast, with hardware time stamps. PTP is sent only while the server is at stratum 1 with GNSS and PPS; otherwise it is silent and the followers switch to another master (there is no PTP holdover). PTP stays within one network segment (routers do not pass it) and does not work through most virtual switches. All settings take effect at once with Apply.</p>
           <div class="grid">
             <label class="switch span2"><input type="checkbox" name="ptp_l2_enabled"> PTP over Ethernet (EtherType 0x88F7, 01:1B:19:00:00:00)</label>
+            <label class="switch span2"><input type="checkbox" name="ptp_udp4_enabled"> PTP over UDP/IPv4 (224.0.1.129, ports 319 and 320)</label>
+            <label class="switch span2"><input type="checkbox" name="ptp_udp6_enabled"> PTP over UDP/IPv6 (ff02::181, ports 319 and 320, from the link-local address)</label>
           </div>
+          <p class="hint">Any combination can be on; all of them share the domain, the clock and the settings below. Linux (linuxptp <code>ptp4l</code>) can follow every transport (Ethernet with <code>-2</code>, UDP/IPv4 by default, UDP/IPv6 with <code>-6</code>); Windows (w32time) follows UDP/IPv4 only. UDP needs the IP version in use (address families in <em>Network</em>).</p>
           <dl class="status-grid">
             <dt>Clock identity</dt><dd id="ptp-identity"></dd>
             <dt>TAI − UTC</dt><dd id="ptp-utc"></dd>
