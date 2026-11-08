@@ -31,6 +31,7 @@ namespace
     static key_set_t s_active{};
     static std::atomic<uint32_t> s_sequence{0};
     static std::atomic<bool> s_available{false};
+    static std::atomic<bool> s_required{false}; // authenticated-only policy (web setting ntp_auth_required)
     static bool s_initialized = false;
     static bool s_crypto_ready = false;
     static std::mutex s_writer_mutex;
@@ -142,7 +143,7 @@ bool ntp_auth_initialize()
     return s_crypto_ready;
 }
 
-bool ntp_auth_configure(bool enabled, const ntp_auth_key_input_t *keys, size_t count)
+bool ntp_auth_configure(bool enabled, bool required, const ntp_auth_key_input_t *keys, size_t count)
 {
     key_set_t next{};
     for (size_t i = 0; keys != nullptr && i < count && next.count < NTP_AUTH_MAX_KEYS; ++i)
@@ -162,6 +163,11 @@ bool ntp_auth_configure(bool enabled, const ntp_auth_key_input_t *keys, size_t c
     }
 
     const bool available = enabled && s_crypto_ready && next.count != 0;
+    // The policy is set before the keys: switching to required never answers an unsigned request with the new keys
+    // half in place, and switching back to mixed only widens what is answered
+    s_required.store(enabled && required, std::memory_order_release);
+    if (enabled && required && !available)
+        ESP_LOGE(TAG, "NTP authentication is required but no key is usable: no NTP request is answered");
     {
         std::lock_guard<std::mutex> lock(s_writer_mutex);
         // Switch off first, so no request is answered with a key that is half replaced
@@ -180,6 +186,11 @@ bool ntp_auth_configure(bool enabled, const ntp_auth_key_input_t *keys, size_t c
 bool ntp_auth_available()
 {
     return s_available.load(std::memory_order_acquire);
+}
+
+bool ntp_auth_required()
+{
+    return s_required.load(std::memory_order_acquire);
 }
 
 size_t ntp_auth_key_count()
@@ -261,7 +272,8 @@ ntp_auth_result_t ntp_auth_verify_request(const uint8_t *packet, size_t packet_l
     if (packet == nullptr || packet_length < 48)
         return ntp_auth_result_t::malformed;
     if (packet_length == 48)
-        return ntp_auth_result_t::unauthenticated;
+        return s_required.load(std::memory_order_relaxed) ? ntp_auth_result_t::authentication_required
+                                                          : ntp_auth_result_t::unauthenticated;
     if (version != 4 || packet_length != 48 + NTP_AUTH_TRAILER_SIZE)
         return ntp_auth_result_t::malformed;
     if (!ntp_auth_available())

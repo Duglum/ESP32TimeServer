@@ -575,6 +575,7 @@ namespace
         cJSON_AddNumberToObject(object, "tf_d2_pin", s.tf_d2_pin);
         cJSON_AddNumberToObject(object, "tf_d3_pin", s.tf_d3_pin);
         cJSON_AddBoolToObject(object, "ntp_auth_enabled", s.ntp_auth_enabled);
+        cJSON_AddBoolToObject(object, "ntp_auth_required", s.ntp_auth_required);
         // The NTP keys are shown on the page (they have to be entered on the clients); the other secrets are not
         add_ntp_keys(cJSON_AddArrayToObject(object, "ntp_keys"), s.ntp_keys, s.ntp_key_count);
         cJSON_AddBoolToObject(object, "ote_enabled", s.ote_enabled);
@@ -750,6 +751,7 @@ namespace
                   json_int(root, "tf_d2_pin", s.tf_d2_pin, 0, 54, err, err_size) &&
                   json_int(root, "tf_d3_pin", s.tf_d3_pin, 0, 54, err, err_size) &&
                   json_bool(root, "ntp_auth_enabled", s.ntp_auth_enabled, err, err_size) &&
+                  json_bool(root, "ntp_auth_required", s.ntp_auth_required, err, err_size) &&
                   json_bool(root, "ote_enabled", s.ote_enabled, err, err_size) &&
                   json_bool(root, "ptp_l2_enabled", s.ptp_l2_enabled, err, err_size) &&
                   json_bool(root, "ptp_udp4_enabled", s.ptp_udp4_enabled, err, err_size) &&
@@ -1311,6 +1313,7 @@ namespace
         cJSON_AddBoolToObject(status, "ntp_auth_available", sets->app.ntp_auth_available);
         cJSON_AddNumberToObject(status, "ntp_auth_keys_in_use", sets->app.ntp_auth_keys_in_use);
         cJSON_AddNumberToObject(status, "ntp_rate_limited", sets->app.ntp_rate_limited_requests);
+        cJSON_AddNumberToObject(status, "ntp_unsigned_refused", sets->app.ntp_unsigned_refused);
         cJSON_AddNumberToObject(status, "free_heap", sets->app.free_heap);
         delete sets;
         return send_json(req, "200 OK", root);

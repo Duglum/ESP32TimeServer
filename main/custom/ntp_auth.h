@@ -23,6 +23,7 @@ enum class ntp_auth_result_t : uint8_t
     unavailable,
     unknown_key,
     invalid_mac,
+    authentication_required, // unsigned request (NTPv3 or NTPv4 without MAC) while authentication is required
 };
 
 struct ntp_auth_key_t
@@ -44,10 +45,13 @@ struct ntp_auth_key_input_t
     const char *key;
 };
 
-// Run-time switch and the keys of the web settings (count of them in keys). Lock-free for the NTP path. Returns true
+// Run-time switch, policy and the keys of the web settings (count of them in keys). Lock-free for the NTP path.
+// required (only with enabled): unsigned requests give ntp_auth_result_t::authentication_required and are not
+// answered. It stays in force when no key is usable (fail closed: then no request is answered at all). Returns true
 // if authentication is available afterwards.
-bool ntp_auth_configure(bool enabled, const ntp_auth_key_input_t *keys, size_t count);
+bool ntp_auth_configure(bool enabled, bool required, const ntp_auth_key_input_t *keys, size_t count);
 bool ntp_auth_available();
+bool ntp_auth_required();
 size_t ntp_auth_key_count();
 bool ntp_auth_key_hex(size_t index, uint32_t *key_id, char *output, size_t output_size);
 uint32_t ntp_auth_default_key_id();

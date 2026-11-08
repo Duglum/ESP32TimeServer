@@ -64,6 +64,7 @@ struct web_app_status_t
     bool ntp_auth_available;
     size_t ntp_auth_keys_in_use;
     uint32_t ntp_rate_limited_requests; // NTP requests dropped by the per-client rate limit since the start
+    uint32_t ntp_unsigned_refused;      // unsigned NTP requests dropped while authentication is required, since the start
     uint32_t free_heap;
 };
 

@@ -470,7 +470,9 @@
           <summary><h2>NTP authentication (symmetric key, SHA-256)</h2><span class="panel-changed" hidden></span></summary>
           <div class="grid">
             <label class="switch span2"><input type="checkbox" name="ntp_auth_enabled"> Answer authenticated NTPv4 requests</label>
+            <label class="switch span2"><input type="checkbox" name="ntp_auth_required"> Authentication required (no answer to unsigned requests)</label>
           </div>
+          <p class="hint">Off (mixed): unsigned NTPv3 and NTPv4 requests are answered, signed ones only with a valid MAC. On: only requests with a valid MAC are answered; unsigned requests get no answer, and that includes every NTPv3 request. Requests with an unknown key ID or a wrong MAC never get an answer (no crypto-NAK). Needs authentication on and at least one key; takes effect at once with Apply.</p>
           <h3 class="sub-heading">Keys</h3>
           <p class="hint first" id="ntp-key-state"></p>
           <div class="key-table" id="ntp-keys">

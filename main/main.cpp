@@ -1616,6 +1616,7 @@ static shared64_t<uint64_t> s_ntp_admission_window; // 100 ms window (high half)
 static std::atomic<uint32_t> s_ntp_input_count{0};
 static std::atomic<bool> s_ntp_shed_during_period{false};
 static std::atomic<uint32_t> s_ntp_rate_limited_requests{0}; // dropped by the per-client rate limit since the start
+static std::atomic<uint32_t> s_ntp_unsigned_refused{0}; // unsigned, dropped while authentication is required (since the start)
 // Diagnostics of the NTP paths since the start (status page, review 4.5)
 static std::atomic<uint32_t> s_diag_ntp_shed{0};            // requests dropped by the load shedding
 static std::atomic<uint32_t> s_diag_ntp_hw_replies{0};      // replies of the hardware path
@@ -3789,11 +3790,16 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
     const ntp_auth_result_t authentication_result = ntp_auth_verify_request(request, request_length, version, &authentication_key_id);
     if (authentication_result != ntp_auth_result_t::unauthenticated && authentication_result != ntp_auth_result_t::valid)
     {
+        // Unknown key, bad MAC, malformed trailer: dropped (no crypto-NAK). Unsigned while required: dropped as well
+        // (NTPv3 is always unsigned), counted for the status
+        const bool unsigned_refused = authentication_result == ntp_auth_result_t::authentication_required;
+        if (unsigned_refused)
+            s_ntp_unsigned_refused.fetch_add(1, std::memory_order_relaxed);
 #if MQTT_ENABLED
         if (mqtt_on())
         {
             s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-            if (version == 4)
+            if (version == 4 && !unsigned_refused)
                 s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
             else
                 s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
@@ -11036,11 +11042,15 @@ static void ntp_server_task(void *parameter)
                 const ntp_auth_result_t authentication_result = ntp_auth_verify_request(request, static_cast<size_t>(len), ntp_version, &authentication_key_id);
                 if (authentication_result != ntp_auth_result_t::unauthenticated && authentication_result != ntp_auth_result_t::valid)
                 {
+                    // Same as the hardware path: dropped without an answer (no crypto-NAK)
+                    const bool unsigned_refused = authentication_result == ntp_auth_result_t::authentication_required;
+                    if (unsigned_refused)
+                        s_ntp_unsigned_refused.fetch_add(1, std::memory_order_relaxed);
 #if MQTT_ENABLED
                     if (mqtt_on())
                     {
                         s_ntp_invalid_requests.fetch_add(1, std::memory_order_relaxed);
-                        if (ntp_version == 4)
+                        if (ntp_version == 4 && !unsigned_refused)
                             s_ntp_authenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
                         else
                             s_ntp_unauthenticated_invalid_requests.fetch_add(1, std::memory_order_relaxed);
@@ -11299,8 +11309,27 @@ static bool receive_startup_health_response(int socket_fd, uint8_t *reply, size_
     return true;
 }
 
+// Waits for an answer that must not come: true if none arrives within the response timeout
+static bool startup_health_no_reply(int socket_fd)
+{
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(socket_fd, &read_fds);
+    struct timeval timeout{};
+    timeout.tv_sec = Startup_Health_Test_Response_Timeout_Ms / 1000;
+    timeout.tv_usec = static_cast<suseconds_t>(Startup_Health_Test_Response_Timeout_Ms % 1000) * 1000;
+    const int ready = select(socket_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+    if (ready > 0)
+    {
+        uint8_t reply[4]; // a short buffer still takes the whole datagram off the socket (the rest is discarded)
+        recvfrom(socket_fd, reply, sizeof(reply), 0, nullptr, nullptr); // so the next test does not read it
+    }
+    return ready == 0;
+}
+
+// unsigned_dropped (authentication required): true if the unsigned request is not answered
 static bool run_standard_startup_health_test(int socket_fd, const struct sockaddr *destination, socklen_t destination_length,
-                                             uint8_t version, startup_health_exchange_t *exchange)
+                                             uint8_t version, startup_health_exchange_t *exchange, bool unsigned_dropped)
 {
     uint8_t request[NTP_PACKET_SIZE] = {};
     uint8_t reply[NTP_PACKET_SIZE] = {};
@@ -11312,6 +11341,8 @@ static bool run_standard_startup_health_test(int socket_fd, const struct sockadd
     {
         if (sendto(socket_fd, request, sizeof(request), 0, destination, destination_length) != static_cast<int>(sizeof(request)))
             continue;
+        if (unsigned_dropped)
+            return startup_health_no_reply(socket_fd);
 
         size_t reply_length = 0;
         if (!receive_startup_health_response(socket_fd, reply, sizeof(reply), &reply_length, &exchange->t4) || reply_length != sizeof(reply))
@@ -11416,14 +11447,7 @@ static bool run_invalid_authenticated_startup_health_test(int socket_fd, const s
     }
     if (sendto(socket_fd, request, request_length, 0, destination, destination_length) != static_cast<int>(request_length))
         return false;
-
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
-    FD_SET(socket_fd, &read_fds);
-    struct timeval timeout{};
-    timeout.tv_sec = Startup_Health_Test_Response_Timeout_Ms / 1000;
-    timeout.tv_usec = static_cast<suseconds_t>(Startup_Health_Test_Response_Timeout_Ms % 1000) * 1000;
-    return select(socket_fd + 1, &read_fds, nullptr, nullptr, &timeout) == 0;
+    return startup_health_no_reply(socket_fd);
 }
 
 static bool run_authenticated_interleaved_startup_health_test(int socket_fd, const struct sockaddr *destination, socklen_t destination_length,
@@ -11466,12 +11490,13 @@ static startup_health_mqtt_metrics_result_t check_startup_health_mqtt_metrics(co
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
     const bool authentication_available = ntp_auth_available();
 #endif
+    const bool unsigned_dropped = ntp_auth_required(); // the unsigned tests then passed when they got no answer
     const auto count_endpoint = [&](const startup_health_endpoint_results_t &endpoint)
     {
         const bool unauthenticated_valid = endpoint.ntpv3_standard && endpoint.ntpv4_standard && endpoint.ntpv4_interleaved;
-        if (unauthenticated_valid)
+        if (unauthenticated_valid && !unsigned_dropped)
             expected_unauthenticated_valid += 3;
-        else
+        else if (!unauthenticated_valid)
             indeterminate = true;
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
         if (authentication_available)
@@ -11530,11 +11555,13 @@ static startup_health_mqtt_metrics_result_t check_startup_health_mqtt_metrics(co
 
     const auto endpoint_expected_valid_requests = [
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
-                                                      authentication_available
+                                                      authentication_available,
 #endif
-    ](const startup_health_endpoint_results_t &endpoint)
+                                                      unsigned_dropped](const startup_health_endpoint_results_t &endpoint)
     {
-        uint32_t expected_requests = endpoint.ntpv3_standard && endpoint.ntpv4_standard && endpoint.ntpv4_interleaved ? 3U : 0U;
+        uint32_t expected_requests = !unsigned_dropped && endpoint.ntpv3_standard && endpoint.ntpv4_standard && endpoint.ntpv4_interleaved
+                                         ? 3U
+                                         : 0U;
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
         if (authentication_available && endpoint.ntpv4_authenticated_standard && endpoint.ntpv4_authenticated_interleaved)
             expected_requests += 2;
@@ -11599,11 +11626,16 @@ static startup_health_endpoint_results_t run_startup_health_endpoint_test(const 
         return results;
     }
 
+    // Authentication required: the unsigned NTPv3 and NTPv4 requests must get no answer (interleaved needs an
+    // answer, so it is not tested and counts as the NTPv4 result)
+    const bool unsigned_dropped = ntp_auth_required();
     startup_health_exchange_t ntpv3_exchange{};
     startup_health_exchange_t ntpv4_exchange{};
-    results.ntpv3_standard = run_standard_startup_health_test(socket_fd, destination, destination_length, 3, &ntpv3_exchange);
-    results.ntpv4_standard = run_standard_startup_health_test(socket_fd, destination, destination_length, 4, &ntpv4_exchange);
-    if (results.ntpv4_standard)
+    results.ntpv3_standard = run_standard_startup_health_test(socket_fd, destination, destination_length, 3, &ntpv3_exchange, unsigned_dropped);
+    results.ntpv4_standard = run_standard_startup_health_test(socket_fd, destination, destination_length, 4, &ntpv4_exchange, unsigned_dropped);
+    if (unsigned_dropped)
+        results.ntpv4_interleaved = results.ntpv4_standard;
+    else if (results.ntpv4_standard)
         results.ntpv4_interleaved = run_interleaved_startup_health_test(socket_fd, destination, destination_length, 4, ntpv4_exchange);
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
     if (ntp_auth_available())
@@ -11623,9 +11655,10 @@ static startup_health_endpoint_results_t run_startup_health_endpoint_test(const 
 #endif
 
     closesocket(socket_fd);
-    queue_startup_health_test_result(name, "NTPv3 standard     ", results.ntpv3_standard);
-    queue_startup_health_test_result(name, "NTPv4 standard     ", results.ntpv4_standard);
-    queue_startup_health_test_result(name, "NTPv4 interleaved  ", results.ntpv4_interleaved);
+    queue_startup_health_test_result(name, unsigned_dropped ? "NTPv3 unsigned drop" : "NTPv3 standard     ", results.ntpv3_standard);
+    queue_startup_health_test_result(name, unsigned_dropped ? "NTPv4 unsigned drop" : "NTPv4 standard     ", results.ntpv4_standard);
+    if (!unsigned_dropped)
+        queue_startup_health_test_result(name, "NTPv4 interleaved  ", results.ntpv4_interleaved);
 #if SYMMETRIC_KEY_AUTHENTICATION_ENABLED
     if (ntp_auth_available())
     {
@@ -12104,6 +12137,9 @@ void setup_symmetric_key_authentication()
         ESP_LOGI(TAG, "NTP symmetric-key authentication is available (%u key(s))", static_cast<unsigned int>(ntp_auth_key_count()));
     else if (s_cfg->ntp_auth_enabled)
         ESP_LOGW(TAG, "NTP symmetric-key authentication is enabled but unavailable (no valid key)");
+    if (s_cfg->ntp_auth_enabled)
+        ESP_LOGI(TAG, "NTP authentication policy: %s",
+                 ntp_auth_required() ? "authenticated only (unsigned NTPv3 and NTPv4 requests are dropped)" : "mixed");
 }
 
 // ---- Interface to the web admin (web/web_settings.h, web/web_server.h) ----
@@ -12146,7 +12182,7 @@ void app_apply_live_settings(const web_settings_t &settings)
     const size_t key_count = std::min<size_t>(settings.ntp_key_count, WEB_NTP_MAX_KEYS);
     for (size_t i = 0; i < key_count; ++i)
         keys[i] = {settings.ntp_keys[i].id, settings.ntp_keys[i].key};
-    ntp_auth_configure(settings.ntp_auth_enabled, keys, key_count);
+    ntp_auth_configure(settings.ntp_auth_enabled, settings.ntp_auth_required, keys, key_count);
 #if MQTT_ENABLED
     mqtt_hand_over_settings(settings);
 #endif
@@ -12308,6 +12344,7 @@ void app_get_status(web_app_status_t &status)
     status.ntp_auth_available = ntp_auth_available();
     status.ntp_auth_keys_in_use = ntp_auth_key_count();
     status.ntp_rate_limited_requests = s_ntp_rate_limited_requests.load(std::memory_order_relaxed);
+    status.ntp_unsigned_refused = s_ntp_unsigned_refused.load(std::memory_order_relaxed);
     status.free_heap = esp_get_free_heap_size();
 }
 

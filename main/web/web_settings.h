@@ -243,6 +243,11 @@ struct web_settings_t
     int16_t ptp_utc_offset_s;            // TAI - UTC while the GNSS receiver does not tell it (NMEA)
     int32_t ptp_ingress_latency_ns;      // subtracted from the receive time stamps
     int32_t ptp_egress_latency_ns;       // added to the transmit time stamps
+
+    // NTP authentication required (added in version 15; takes effect at once): only requests with a valid MAC are
+    // answered, unsigned NTPv3 and NTPv4 requests are dropped. false = mixed (signed and unsigned are answered).
+    // Needs ntp_auth_enabled and at least one key.
+    bool ntp_auth_required;
 };
 
 // Defaults of all settings (the state after a reset to defaults)

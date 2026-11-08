@@ -50,10 +50,12 @@ namespace
     // 12: uptime / restart button appended at the end (versions 5 to 11 are still read the same way);
     // 13: MQTT broker, port, TLS and CA certificate appended at the end in the place of the broker URI, whose bytes
     //     stay in the layout (mqtt_uri_unused): the URI of versions 5 to 12 is read into the new fields;
-    // 14: PTP master appended at the end (versions 5 to 13 are still read, PTP gets its defaults: off).
+    // 14: PTP master appended at the end (versions 5 to 13 are still read, PTP gets its defaults: off);
+    // 15: NTP authentication required appended at the end (versions 5 to 14 are still read, it gets its default: off
+    //     = mixed).
     // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
     // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
-    constexpr uint32_t BLOB_VERSION = 14;
+    constexpr uint32_t BLOB_VERSION = 15;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
     constexpr uint32_t BLOB_VERSION_7 = 7;
@@ -63,6 +65,7 @@ namespace
     constexpr uint32_t BLOB_VERSION_11 = 11;
     constexpr uint32_t BLOB_VERSION_12 = 12;
     constexpr uint32_t BLOB_VERSION_13 = 13;
+    constexpr uint32_t BLOB_VERSION_14 = 14;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -78,6 +81,7 @@ namespace
     constexpr size_t SETTINGS_SIZE_11 = settings_size_before(offsetof(web_settings_t, button_enabled));
     constexpr size_t SETTINGS_SIZE_12 = settings_size_before(offsetof(web_settings_t, mqtt_broker));
     constexpr size_t SETTINGS_SIZE_13 = settings_size_before(offsetof(web_settings_t, ptp_l2_enabled));
+    constexpr size_t SETTINGS_SIZE_14 = settings_size_before(offsetof(web_settings_t, ntp_auth_required));
     // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 12 may fit into that of the
     // version before: the version number tells them apart, and an older set always gets the defaults for the newer
     // fields instead of its padding bytes
@@ -85,7 +89,7 @@ namespace
                       SETTINGS_SIZE_7 <= SETTINGS_SIZE_8 && SETTINGS_SIZE_8 <= SETTINGS_SIZE_9 &&
                       SETTINGS_SIZE_9 <= SETTINGS_SIZE_10 && SETTINGS_SIZE_10 <= SETTINGS_SIZE_11 &&
                       SETTINGS_SIZE_11 <= SETTINGS_SIZE_12 && SETTINGS_SIZE_12 <= SETTINGS_SIZE_13 &&
-                      SETTINGS_SIZE_13 <= sizeof(web_settings_t),
+                      SETTINGS_SIZE_13 <= SETTINGS_SIZE_14 && SETTINGS_SIZE_14 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
     // Defaults of the fields that later blob versions appended (web_settings_defaults() uses them as well)
@@ -233,6 +237,7 @@ namespace
         const bool version_11 = header.version == BLOB_VERSION_11 && header.size == SETTINGS_SIZE_11;
         const bool version_12 = header.version == BLOB_VERSION_12 && header.size == SETTINGS_SIZE_12;
         const bool version_13 = header.version == BLOB_VERSION_13 && header.size == SETTINGS_SIZE_13;
+        const bool version_14 = header.version == BLOB_VERSION_14 && header.size == SETTINGS_SIZE_14;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
@@ -246,10 +251,11 @@ namespace
                                length != HEADER_SIZE + SETTINGS_SIZE_10 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_11 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_12 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_13 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_13 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_14 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
         else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9 && !version_10 &&
-                                                   !version_11 && !version_12 && !version_13) ||
+                                                   !version_11 && !version_12 && !version_13 && !version_14) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -322,12 +328,19 @@ namespace
                     copy_text(blob.settings.mqtt_topic, DEFAULT_MQTT_TOPIC);
                 }
             }
-            if (!current)
+            if (!current && !version_14)
             {
                 // Appended in version 14
                 ptp_defaults(blob.settings);
                 if (version_13)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 13 read; the PTP master has its defaults (off)", key);
+            }
+            if (!current)
+            {
+                // Appended in version 15
+                blob.settings.ntp_auth_required = false;
+                if (version_14)
+                    ESP_LOGI(TAG, "Stored web settings '%s' of version 14 read; NTP authentication required has its default (off)", key);
                 blob.version = BLOB_VERSION;
                 blob.size = sizeof(web_settings_t);
             }
@@ -343,6 +356,7 @@ namespace
                     ESP_LOGW(TAG, "Stored web settings '%s' used the keys of the former settings file: NTP authentication is off "
                                   "until keys are set on the web page", key);
                 blob.settings.ntp_auth_enabled = false;
+                blob.settings.ntp_auth_required = false;
             }
             // Former OTE device name and OTE password: no longer used
             const bool had_ote = any_byte_set(blob.settings.ote_name_unused, sizeof(blob.settings.ote_name_unused)) ||
@@ -904,6 +918,7 @@ void web_settings_defaults(web_settings_t &out)
     // ---- Over The Ethernet updates and NTP authentication: off, no keys ----
     out.ote_enabled = false;
     out.ntp_auth_enabled = false;
+    out.ntp_auth_required = false; // mixed
     out.ntp_key_override = true;
     out.ntp_key_count = 0;
 
@@ -1336,6 +1351,8 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         FAIL("NTP keys: at most %u", static_cast<unsigned>(WEB_NTP_MAX_KEYS));
     if (s.ntp_auth_enabled && s.ntp_key_count == 0)
         FAIL("NTP authentication needs at least one key");
+    if (s.ntp_auth_required && (!s.ntp_auth_enabled || s.ntp_key_count == 0))
+        FAIL("NTP authentication required needs NTP authentication on and at least one key");
     for (size_t i = 0; i < s.ntp_key_count; ++i)
     {
         const web_ntp_key_t &key = s.ntp_keys[i];
@@ -1423,7 +1440,7 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
            a.pps_lost_serve == b.pps_lost_serve && a.pps_lost_serve_min == b.pps_lost_serve_min &&
            a.pps_dispersion_ppm == b.pps_dispersion_ppm && a.ntp_client_rate_limit == b.ntp_client_rate_limit &&
            a.gnss_min_fix_age_s == b.gnss_min_fix_age_s && a.gnss_min_satellites == b.gnss_min_satellites &&
-           a.ntp_auth_enabled == b.ntp_auth_enabled &&
+           a.ntp_auth_enabled == b.ntp_auth_enabled && a.ntp_auth_required == b.ntp_auth_required &&
            // MQTT takes effect at once (the service task reconnects)
            a.mqtt_enabled == b.mqtt_enabled && strcmp(a.mqtt_broker, b.mqtt_broker) == 0 && a.mqtt_port == b.mqtt_port &&
            a.mqtt_tls == b.mqtt_tls && strcmp(a.mqtt_ca_pem, b.mqtt_ca_pem) == 0 && strcmp(a.mqtt_username, b.mqtt_username) == 0 &&

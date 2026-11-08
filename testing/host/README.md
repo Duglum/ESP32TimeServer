@@ -11,6 +11,7 @@ the few ESP-IDF and FreeRTOS functions they call (single-threaded, with a simula
 | `ntp_cache_test` | `main/custom/ntp_cache.c` | interleaved T3 from the client record and the exchange map, spoofed and stale records, slot reuse, per-client rate limit (burst, sustained rate, own bucket for requests with the T2 cookie), IPv6 limit per /64 and per address, expiry |
 | `ptp_test` | `main/custom/ptp_l2_protocol.h`, `ptp_followers.h`, `ptp_message.h`, `ptp_l3_udp.h` | upstream's PTP parser and follower tests (release 4.0, adapted: the correctionField and flagField of a Delay_Req are accepted), the message builder (byte layout of Sync, Follow_Up, Delay_Resp and Announce, flags, timestamps, limits), Delay_Resp from a parsed Delay_Req, UDP/IPv4 and UDP/IPv6 encapsulation and decoding (checksums, group, ports, TTL, fragments, MACs), a deterministic fuzz of both decoders |
 | `mqtt_queue_test` | `main/custom/mqtt_report_queue.h` | upstream's test of the byte ring of the MQTT RAM queue (order, wrap marker, drop oldest, oversize, random against a model) plus the fork's `push_text()` (NUL-terminated records, mixed with drops); no fuzz target |
+| `ntp_auth_test` | `main/custom/ntp_auth.cpp` | NTP symmetric-key authentication: the MAC (SHA-256 of key and packet, 160 bit) against a value of Python `hashlib`, the results of `ntp_auth_verify_request()` in the mixed and the authenticated-only policy (NTPv3 and NTPv4 without MAC, unknown key ID, changed bytes, malformed lengths), the policy without authentication and without a key (fail closed), invalid keys of the settings, a failing hash. `stubs/psa/crypto.h` gives the PSA hash calls with a plain SHA-256 (checked against FIPS 180-4 examples); no fuzz target |
 | `ptp_selection_test` | `main/custom/ptp_l2_master_selection.h` | upstream's master selection test (ranking, start-up wait, qualification by two Announces, sequence wrap and replay, expiry, capacity, legacy mode); no fuzz target |
 
 Fuzz targets (`-DHOST_FUZZ`, libFuzzer):
@@ -34,6 +35,10 @@ Needs clang with the sanitizer and libFuzzer runtimes for Windows: [LLVM-MinGW](
 `gnss_test.exe --seeds <folder>` writes seed inputs (valid sentences and frames) for the GNSS fuzzer; the script
 does this before fuzzing. A crash is saved as `build\crash-*` and can be replayed with
 `build\gnss_fuzz.exe build\crash-...`.
+
+## Results (2026-11-08, NTP authentication required)
+
+With CHANGELOG 4.106: all checks pass (gnss_test 108, gnss_console_test 363, ntp_cache_test 734, ptp_test, ptp_selection_test and mqtt_queue_test pass, ntp_auth_test 91).
 
 ## Results (2026-11-08)
 

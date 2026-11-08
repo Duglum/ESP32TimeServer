@@ -466,6 +466,7 @@
       tf_d2_pin: String(s.tf_d2_pin),
       tf_d3_pin: String(s.tf_d3_pin),
       ntp_auth_enabled: s.ntp_auth_enabled,
+      ntp_auth_required: s.ntp_auth_required,
       ote_enabled: s.ote_enabled,
       ptp_l2_enabled: s.ptp_l2_enabled,
       ptp_udp4_enabled: s.ptp_udp4_enabled,
@@ -795,6 +796,7 @@
       tf_d2_pin: pin('tf_d2_pin', 'TF card D2 pin'),
       tf_d3_pin: pin('tf_d3_pin', 'TF card D3 pin'),
       ntp_auth_enabled: f.ntp_auth_enabled.checked,
+      ntp_auth_required: f.ntp_auth_required.checked,
       ote_enabled: f.ote_enabled.checked,
       ptp_l2_enabled: f.ptp_l2_enabled.checked,
       ptp_udp4_enabled: f.ptp_udp4_enabled.checked,
@@ -960,9 +962,16 @@
     if (st.gnss_pvt_satellites >= 0) gnss.push(t('{n} satellites in use (NAV-PVT)', { n: st.gnss_pvt_satellites }));
     fillList('st-gnss', gnss, '', false);
     const keys = st.ntp_auth_keys_in_use;
-    $('st-auth').textContent = st.ntp_auth_available
+    let auth = st.ntp_auth_available
       ? t(keys === 1 ? 'on, {n} key of the web settings' : 'on, {n} keys of the web settings', { n: keys })
       : (state.settings.ntp_auth_enabled ? t('on, but no usable key') : t('off'));
+    // Policy: unsigned requests refused since the start (also those refused before it was switched back to mixed)
+    if (state.settings.ntp_auth_enabled) {
+      auth += '; ' + (state.settings.ntp_auth_required
+        ? t('required: {n} unsigned requests refused since the start', { n: st.ntp_unsigned_refused })
+        : t('mixed: unsigned requests are answered'));
+    }
+    $('st-auth').textContent = auth;
     // Requests dropped by the per-client rate limit since the start (also those dropped before it was switched off)
     const limit = state.settings.ntp_client_rate_limit;
     $('st-rate-limit').textContent = limit

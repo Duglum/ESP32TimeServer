@@ -192,6 +192,8 @@
     'on, {n} key of the web settings': 'an, {n} Schlüssel aus den Web-Einstellungen',
     'on, {n} keys of the web settings': 'an, {n} Schlüssel aus den Web-Einstellungen',
     'on, but no usable key': 'an, aber kein nutzbarer Schlüssel',
+    'required: {n} unsigned requests refused since the start': 'erforderlich: {n} unsignierte Anfragen seit dem Start abgewiesen',
+    'mixed: unsigned requests are answered': 'gemischt: unsignierte Anfragen werden beantwortet',
     'connected': 'verbunden',
     'not connected': 'nicht verbunden',
     '{state}, reports queued on the TF card': '{state}, Berichte in der Warteschlange auf der TF-Karte',
@@ -512,6 +514,9 @@
     // ---- NTP authentication ----
     'NTP authentication (symmetric key, SHA-256)': 'NTP-Authentifizierung (symmetrischer Schlüssel, SHA-256)',
     'Answer authenticated NTPv4 requests': 'Authentifizierte NTPv4-Anfragen beantworten',
+    'Authentication required (no answer to unsigned requests)': 'Authentifizierung erforderlich (keine Antwort auf unsignierte Anfragen)',
+    'Off (mixed): unsigned NTPv3 and NTPv4 requests are answered, signed ones only with a valid MAC. On: only requests with a valid MAC are answered; unsigned requests get no answer, and that includes every NTPv3 request. Requests with an unknown key ID or a wrong MAC never get an answer (no crypto-NAK). Needs authentication on and at least one key; takes effect at once with Apply.':
+      'Aus (gemischt): Unsignierte NTPv3- und NTPv4-Anfragen werden beantwortet, signierte nur mit gültigem MAC. An: Nur Anfragen mit gültigem MAC werden beantwortet; unsignierte Anfragen bekommen keine Antwort, auch jede NTPv3-Anfrage. Anfragen mit unbekannter Key-ID oder falschem MAC bekommen nie eine Antwort (kein Crypto-NAK). Braucht eingeschaltete Authentifizierung und mindestens einen Schlüssel; wirkt sofort mit Übernehmen.',
     'Keys': 'Schlüssel',
     'Key ID': 'Key-ID',
     'Key': 'Schlüssel',
@@ -815,6 +820,8 @@
     'MQTT password: at most 64 printable ASCII characters': 'MQTT-Passwort: höchstens 64 druckbare ASCII-Zeichen',
     'MQTT user name: at most 64 printable ASCII characters': 'MQTT-Benutzername: höchstens 64 druckbare ASCII-Zeichen',
     'NTP authentication needs at least one key': 'NTP-Authentifizierung braucht mindestens einen Schlüssel',
+    'NTP authentication required needs NTP authentication on and at least one key':
+      'NTP-Authentifizierung erforderlich braucht eingeschaltete NTP-Authentifizierung und mindestens einen Schlüssel',
     'TF card pins: one of the GPIOs cannot be used': 'TF-Karten-Pins: Einer der GPIOs kann nicht verwendet werden',
     'Time zone is not a valid POSIX TZ string': 'Die Zeitzone ist kein gültiger POSIX-TZ-String',
 
