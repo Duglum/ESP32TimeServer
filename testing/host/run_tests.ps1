@@ -33,7 +33,11 @@ $targets = [ordered]@{
     gnss_console_test = @("$here\stubs\host_stubs.c", "$here\gnss_uart_hooks.cpp", "$here\gnss_console_test.cpp",
         "$main\custom\gnss_nmea.cpp", "$main\custom\gnss_ubx.cpp", "$main\custom\gnss_console.cpp")
     ntp_cache_test = @("$here\stubs\host_stubs.c", "$main\custom\ntp_cache.c", "$here\ntp_cache_test.cpp")
+    ptp_test       = @("$here\ptp_test.cpp")
+    ptp_selection_test = @("$here\ptp_selection_test.cpp")
 }
+# Test programs without a fuzz target
+$no_fuzz = @('ptp_selection_test')
 
 function Build-Target([string]$name, [string[]]$sources, [string]$folder, [string[]]$flags, [string[]]$extra) {
     New-Item -ItemType Directory -Force $folder | Out-Null
@@ -61,6 +65,7 @@ foreach ($name in $targets.Keys) {
 if ($FuzzSeconds -gt 0) {
     $runtime = Join-Path (& clang++ -print-resource-dir) 'lib\windows\libclang_rt.fuzzer-x86_64.a'
     foreach ($name in $targets.Keys) {
+        if ($no_fuzz -contains $name) { continue }
         $fuzzer = $name -replace '_test$', '_fuzz'
         $exe = Build-Target $fuzzer $targets[$name] (Join-Path $build $fuzzer) ($common + $fuzz + @('-w')) @($runtime)
         $corpus = Join-Path $build "corpus_$fuzzer"
