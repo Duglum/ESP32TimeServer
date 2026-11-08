@@ -635,9 +635,9 @@
     // The client limit only matters with the client list; the report buffer is sized from it (RAM, no PSRAM)
     f.mqtt_tf_client_limit.disabled = !f.mqtt_client_reporting.checked;
     const limit = Number(f.mqtt_tf_client_limit.value);
-    const kilobytes = ((1426 + 76 * limit) / 1024).toFixed(1);
+    const kilobytes = ((3874 + 76 * limit) / 1024).toFixed(1); // web_mqtt_report_size() of the firmware
     $('mqtt-buffer-note').textContent = f.mqtt_client_reporting.checked && Number.isInteger(limit) && limit >= 50 && limit <= 1000
-      ? t('Report buffer: {kb} kB of RAM (1426 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.', { kb: lang === 'de' ? kilobytes.replace('.', ',') : kilobytes })
+      ? t('Report buffer: {kb} kB of RAM (3874 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.', { kb: lang === 'de' ? kilobytes.replace('.', ',') : kilobytes })
       : (f.mqtt_client_reporting.checked ? t('50 to 1000.') : t('Only used with client activity reporting.'));
     $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
     f.button_pin.disabled = !f.button_enabled.checked;

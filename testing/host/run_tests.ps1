@@ -35,9 +35,10 @@ $targets = [ordered]@{
     ntp_cache_test = @("$here\stubs\host_stubs.c", "$main\custom\ntp_cache.c", "$here\ntp_cache_test.cpp")
     ptp_test       = @("$here\ptp_test.cpp")
     ptp_selection_test = @("$here\ptp_selection_test.cpp")
+    mqtt_queue_test = @("$here\mqtt_queue_test.cpp")
 }
 # Test programs without a fuzz target
-$no_fuzz = @('ptp_selection_test')
+$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test')
 
 function Build-Target([string]$name, [string[]]$sources, [string]$folder, [string[]]$flags, [string[]]$extra) {
     New-Item -ItemType Directory -Force $folder | Out-Null

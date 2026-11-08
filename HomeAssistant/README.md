@@ -224,6 +224,29 @@ Use this option if you do **not** already have an `mqtt.yaml` file.
       value_template: "{{ value_json.this_period.ntp.responses.pps_undisciplined }}"
 
     # ============================
+    # PTP (only while PTP is on)
+    # ============================
+    - name: "PTP Serving"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.serving if value_json.this_period.ptp is defined else 'off' }}"
+
+    - name: "PTP Followers"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.followers.current if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Followers Max"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.followers.max if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Delay Responses"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.delay_resp if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Rate Limited"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.rate_limited if value_json.this_period.ptp is defined else 0 }}"
+
+    # ============================
     # CLIENTS
     # ============================
     - name: "Clients Overflown"
@@ -439,6 +462,29 @@ Use this option if you already have an `mqtt.yaml` file that contains a
     - name: "NTP Responses PPS Undisciplined"
       state_topic: "ESP32TimeServer/report"
       value_template: "{{ value_json.this_period.ntp.responses.pps_undisciplined }}"
+
+    # ============================
+    # PTP (only while PTP is on)
+    # ============================
+    - name: "PTP Serving"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.serving if value_json.this_period.ptp is defined else 'off' }}"
+
+    - name: "PTP Followers"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.followers.current if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Followers Max"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.followers.max if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Delay Responses"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.delay_resp if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Rate Limited"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.rate_limited if value_json.this_period.ptp is defined else 0 }}"
 
     # ============================
     # CLIENTS
@@ -659,6 +705,29 @@ lists (no top-level `sensor:` key).
     - name: "NTP Responses PPS Undisciplined"
       state_topic: "ESP32TimeServer/report"
       value_template: "{{ value_json.this_period.ntp.responses.pps_undisciplined }}"
+
+    # ============================
+    # PTP (only while PTP is on)
+    # ============================
+    - name: "PTP Serving"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.serving if value_json.this_period.ptp is defined else 'off' }}"
+
+    - name: "PTP Followers"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.followers.current if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Followers Max"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.followers.max if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Delay Responses"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.delay_resp if value_json.this_period.ptp is defined else 0 }}"
+
+    - name: "PTP Rate Limited"
+      state_topic: "ESP32TimeServer/report"
+      value_template: "{{ value_json.this_period.ptp.rate_limited if value_json.this_period.ptp is defined else 0 }}"
 
     # ============================
     # CLIENTS
@@ -916,6 +985,12 @@ entities:
   - entity: sensor.satellites_current
     name: Satellites
     icon: mdi:satellite-uplink
+  - entity: sensor.ptp_serving
+    name: PTP serving
+    icon: mdi:timer-sync-outline
+  - entity: sensor.ptp_followers
+    name: PTP followers
+    icon: mdi:lan-connect
   - entity: sensor.ntp_uptime_formatted
     name: Uptime
     icon: mdi:clock-check-outline

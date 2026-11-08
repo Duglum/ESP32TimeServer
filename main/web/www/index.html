@@ -441,7 +441,7 @@
             <label class="switch span2"><input type="checkbox" name="mqtt_distinguish_auth"> Separate counts for authenticated and unauthenticated NTP requests</label>
           </div>
           <h3 class="sub-heading">Report queue on a TF card (QoS 1 and 2)</h3>
-          <p class="hint first">Without a usable TF card (FAT32) only the last 4 reports are queued, in RAM, with at most 50 clients each: they are lost at a power failure or crash, and the oldest report is dropped first. Flash is not used, so it does not wear out. With a TF card the reports are queued on the card (an empty 16 GB card can hold more than 36,000 reports) with up to the client limit below; when the card is full, the oldest reports are dropped first.</p>
+          <p class="hint first">Without a usable TF card (FAT32) the latest reports are queued in about 20 kB of RAM, with at most 50 clients each (at least 2 such reports, usually more than 10 without client lists): they are lost at a power failure or crash, and the oldest reports are dropped first. Flash is not used, so it does not wear out. With a TF card the reports are queued on the card (an empty 16 GB card can hold more than 36,000 reports) with up to the client limit below; when the card is full, the oldest reports are dropped first.</p>
           <div class="grid">
             <label><span class="lt">Client limit per report with the TF card</span>
               <input type="number" name="mqtt_tf_client_limit" min="50" max="1000">

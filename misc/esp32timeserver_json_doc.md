@@ -80,7 +80,22 @@ controlled restart events and an example of a MQTT message for one.
                 "requests": 1
             }
         ],
-        "clients_overflown": false
+        "clients_overflown": false,
+        "ptp": {
+            "serving": true,
+            "followers": { "current": 2, "min": 1, "max": 2 },
+            "follower_overflow_drops": 0,
+            "sync": 900,
+            "delay_req": 1800,
+            "delay_resp": 1800,
+            "rate_limited": 0,
+            "drops": 0,
+            "clients": [
+                { "mac": "00:11:22:33:44:55", "active_entire_period": true },
+                { "mac": "02:10:20:30:40:50", "active_entire_period": false }
+            ],
+            "clients_overflown": false
+        }
     },
     "historical": {
         "gnss_receiver_last": {
@@ -218,6 +233,21 @@ Included when `MQTT_CLIENT_REPORTING_ENABLED` is `1` (Enabled).
   With a TF card installed the limit to how many client entries can be held for
   reporting is set on the web admin page (*Client limit with TF card*, default
   500).
+
+### `this_period.ptp`
+
+Included while PTP is switched on for at least one transport (panel *PTP* of the web admin page).
+
+- **`serving`**: a PTP port sends Sync and Announce right now (stratum 1 with GNSS and PPS, master selection won).
+- **`followers`**: followers (clients that sent delay requests within the follower timeout) at the time of the report
+  (`current`), and the least and most during the period.
+- **`follower_overflow_drops`**: followers that did not fit the table (32 per transport) during the period.
+- **`sync`**, **`delay_req`**, **`delay_resp`**: Sync messages sent, delay requests received and delay responses sent
+  during the period, over all transports; **`rate_limited`**: delay requests over the per-follower limit (not
+  answered); **`drops`**: PTP frames dropped (queue full or over 1000 per second).
+- **`clients`** and **`clients_overflown`**: only with client reporting: the MAC addresses of the followers seen during
+  the period (at most 32), `active_entire_period` when the follower was there from the start to the end of the
+  period; `clients_overflown` when more were seen.
 
 ### `historical`
 

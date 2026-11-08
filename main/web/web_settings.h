@@ -313,7 +313,11 @@ bool web_hardware_mac(char (&out)[WEB_MAC_TEXT_SIZE]);
 // Size of the MQTT report buffer for a client limit (tools/json_message_calculator.xlsx: 1166 bytes plus 76 bytes per
 // client, plus 260 bytes for the time quality of the servo since 2026-10-26; 50 clients = 5226 = MQTT_REPORT_SIZE,
 // 500 clients = 39426)
-constexpr size_t web_mqtt_report_size(size_t client_limit) { return 1426 + 76 * client_limit; }
+// PTP part of a report (4.105): counts and counters, and with client reporting at most WEB_MQTT_PTP_CLIENTS follower
+// MACs of 64 bytes each
+static constexpr size_t WEB_MQTT_PTP_CLIENTS = 32;
+static constexpr size_t WEB_MQTT_PTP_REPORT_BYTES = 400 + 64 * WEB_MQTT_PTP_CLIENTS;
+constexpr size_t web_mqtt_report_size(size_t client_limit) { return 1426 + WEB_MQTT_PTP_REPORT_BYTES + 76 * client_limit; }
 
 // Constant time comparison of two byte ranges of the same length
 bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length);

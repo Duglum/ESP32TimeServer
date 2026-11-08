@@ -84,6 +84,7 @@
 #include "custom/gnss_nmea.h"
 #include "custom/gnss_uart.h"
 #include "custom/gnss_ubx.h"
+#include "custom/mqtt_report_queue.h"
 #include "custom/ntp_auth.h"
 #include "custom/ntp_cache.h"
 #include "custom/time_diag.h"
@@ -1715,10 +1716,15 @@ static constexpr size_t MQTT_MAX_REPORT_SIZE = web_mqtt_report_size(WEB_MQTT_TF_
 // please see the spreadsheet at tools/json_message_calculator.xlsx for calculation details
 // Note: increasing this limit will increase memory usage for MQTT report buffering and may impact system performance.
 static constexpr size_t MQTT_CLIENT_LIMIT = 50;
-static constexpr size_t MQTT_REPORT_SIZE = 5226;
+static constexpr size_t MQTT_REPORT_SIZE = web_mqtt_report_size(MQTT_CLIENT_LIMIT); // 7674 with the PTP part (was 5226)
 
 static constexpr size_t MQTT_NTP_EVENT_QUEUE_DEPTH = 1024;
-static constexpr size_t MQTT_REPORT_QUEUE_DEPTH = 4;
+// RAM queue of the reports without a TF card (QoS 1 and 2): a byte ring of variable length reports (upstream 4.0,
+// custom/mqtt_report_queue.h) of the size of the former 4 fixed slots of 5226 bytes: 2 reports with 50 clients fit,
+// and many more of the usual size (about 1.5 kB without a client list)
+static constexpr size_t MQTT_RAM_QUEUE_BYTES = 20904;
+using mqtt_ram_queue_t = mqtt_queue::ReportQueue<MQTT_RAM_QUEUE_BYTES>;
+static_assert(mqtt_ram_queue_t::max_payload_bytes() >= MQTT_REPORT_SIZE + 1, "a full report fits the RAM queue");
 static constexpr size_t MQTT_NTP_EVENT_BATCH_LIMIT = 128;
 
 static constexpr uint32_t MQTT_RESTART_PUBLISH_TIMEOUT_MS = 1000;
@@ -1731,11 +1737,6 @@ struct mqtt_client_request_t
     sa_family_t address_family = AF_UNSPEC;
     uint8_t address[sizeof(struct in6_addr)] = {};
     uint32_t requests = 0;
-};
-
-struct mqtt_report_t
-{
-    char payload[MQTT_REPORT_SIZE] = "";
 };
 
 static SemaphoreHandle_t s_mqtt_stats_mutex = nullptr;
@@ -1798,11 +1799,10 @@ static size_t s_mqtt_client_count = 0;
 
 static int64_t s_mqtt_last_link_up_us = 0;
 // The report buffers (up to about 76 kB) are allocated by the MQTT service task while MQTT is on
-static mqtt_report_t *s_mqtt_reports = nullptr;        // [MQTT_REPORT_QUEUE_DEPTH]
+static mqtt_ram_queue_t *s_mqtt_ram_queue = nullptr;   // reports queued in RAM (no TF card)
 static char *s_mqtt_payload = nullptr;                 // [s_mqtt_payload_size]
 static size_t s_mqtt_payload_size = 0;
 static char *s_mqtt_final_payload = nullptr;           // [MQTT_REPORT_SIZE]
-static size_t s_mqtt_report_head = 0;
 static std::atomic<size_t> s_mqtt_queued_messages_count{0};
 static uint32_t s_mqtt_queued_messages_discarded = 0;
 static mqtt_client_request_t *s_mqtt_clients = nullptr; // [s_mqtt_clients_size], only with client reporting
@@ -8222,7 +8222,7 @@ static bool mqtt_tf_write_report(const char *payload)
 
 static bool mqtt_enqueue_report(const char *payload)
 {
-    if (s_mqtt_qos == 0 || s_mqtt_reports == nullptr)
+    if (s_mqtt_qos == 0 || s_mqtt_ram_queue == nullptr)
         return false;
 
     if (s_tf_queue_available.load())
@@ -8243,17 +8243,12 @@ static bool mqtt_enqueue_report(const char *payload)
         return true;
     }
 
-    if (s_mqtt_queued_messages_count.load() == MQTT_REPORT_QUEUE_DEPTH)
-    {
-        s_mqtt_report_head = (s_mqtt_report_head + 1) % MQTT_REPORT_QUEUE_DEPTH;
-        s_mqtt_queued_messages_count--;
-        s_mqtt_queued_messages_discarded++;
-    }
-
-    size_t index = (s_mqtt_report_head + s_mqtt_queued_messages_count.load()) % MQTT_REPORT_QUEUE_DEPTH;
-    snprintf(s_mqtt_reports[index].payload, sizeof(s_mqtt_reports[index].payload), "%s", payload);
-    s_mqtt_queued_messages_count++;
-    return true;
+    // The oldest reports make room (counted as discarded); a report is cut at MQTT_REPORT_SIZE like before
+    uint32_t discarded = 0;
+    const bool queued = s_mqtt_ram_queue->push_text(payload, strnlen(payload, MQTT_REPORT_SIZE - 1), discarded);
+    s_mqtt_queued_messages_discarded += discarded;
+    s_mqtt_queued_messages_count.store(s_mqtt_ram_queue->count());
+    return queued;
 }
 
 static bool mqtt_publish_queued_report(const char *payload)
@@ -8279,19 +8274,21 @@ static bool mqtt_publish_queued_report(const char *payload)
 
 static void mqtt_send_queued_messages()
 {
-    if (s_mqtt_qos == 0 || !s_mqtt_connected.load() || s_mqtt_queued_messages_count.load() == 0 || s_mqtt_reports == nullptr)
+    if (s_mqtt_qos == 0 || !s_mqtt_connected.load() || s_mqtt_queued_messages_count.load() == 0 || s_mqtt_ram_queue == nullptr)
         return;
 
     if (!s_tf_queue_available.load())
     {
-        if (mqtt_publish_queued_report(s_mqtt_reports[s_mqtt_report_head].payload))
+        const char *queued = nullptr;
+        size_t queued_length = 0;
+        if (s_mqtt_ram_queue->front(queued, queued_length) && mqtt_publish_queued_report(queued))
         {
 #if DEBUG_ENABLED
-            ESP_LOGI(TAG, "Published queued message (RAM): %.200s", s_mqtt_reports[s_mqtt_report_head].payload);
+            ESP_LOGI(TAG, "Published queued message (RAM): %.200s", queued);
 #endif
-            s_mqtt_report_head = (s_mqtt_report_head + 1) % MQTT_REPORT_QUEUE_DEPTH;
-            s_mqtt_queued_messages_count--;
+            s_mqtt_ram_queue->pop();
         }
+        s_mqtt_queued_messages_count.store(s_mqtt_ram_queue->count());
         return;
     }
 
@@ -8412,6 +8409,68 @@ static int64_t mqtt_link_up_total_us()
     if (connected_since_us > 0)
         link_up_total_us += esp_timer_get_time() - connected_since_us;
     return link_up_total_us;
+}
+
+// PTP part of the report (4.105), inside "this_period" while a PTP transport is on: followers now and their least and
+// most during the period (upstream's follower table), counters of the period over all transports, whether a port
+// serves, and with client reporting the MACs of the followers (at most WEB_MQTT_PTP_CLIENTS). Field names of the
+// follower part as in upstream 4.0.
+__attribute__((noinline)) static size_t mqtt_append_ptp(char *payload, size_t payload_size, size_t len)
+{
+    bool enabled = false;
+    bool serving = false;
+    for (size_t t = 0; t < PTP_TRANSPORT_COUNT; ++t)
+    {
+        enabled = enabled || s_ptp_transport_enabled[t].load(std::memory_order_acquire);
+        serving = serving || static_cast<ptp_reason_t>(s_ptp_reason[t].load(std::memory_order_relaxed)) == ptp_reason_t::serving;
+    }
+    if (!enabled)
+        return len;
+    // Period counters: differences to the totals at the last report (this task only)
+    static uint32_t last_sync = 0, last_delay_req = 0, last_delay_resp = 0, last_rate_limited = 0, last_drops = 0;
+    uint32_t sync = 0, delay_req = 0, delay_resp = 0, rate_limited = 0, drops = 0;
+    for (const auto &c : s_ptp_counters)
+    {
+        sync += c.sync_sent.load(std::memory_order_relaxed);
+        delay_req += c.delay_req_received.load(std::memory_order_relaxed);
+        delay_resp += c.delay_resp_sent.load(std::memory_order_relaxed);
+        rate_limited += c.rate_limited.load(std::memory_order_relaxed);
+        drops += c.queue_drops.load(std::memory_order_relaxed);
+    }
+    // Static: about 700 bytes, only this task builds reports
+    static decltype(s_ptp_followers)::Snapshot snapshot;
+    if (xSemaphoreTake(ptp_mutex(), pdMS_TO_TICKS(100)) != pdTRUE)
+        return len;
+    snapshot = s_ptp_followers.snapshot_and_reset(esp_timer_get_time());
+    xSemaphoreGive(ptp_mutex());
+    len = json_append(payload, payload_size, len, ",\"ptp\":{\"serving\":%s,", serving ? "true" : "false");
+    len = json_append(payload, payload_size, len, "\"followers\":{\"current\":%lu,\"min\":%lu,\"max\":%lu},",
+                      static_cast<unsigned long>(snapshot.current), static_cast<unsigned long>(snapshot.min),
+                      static_cast<unsigned long>(snapshot.max));
+    len = json_append(payload, payload_size, len, "\"follower_overflow_drops\":%lu,", static_cast<unsigned long>(snapshot.overflow_drops));
+    len = json_append(payload, payload_size, len, "\"sync\":%lu,\"delay_req\":%lu,\"delay_resp\":%lu,\"rate_limited\":%lu,\"drops\":%lu",
+                      static_cast<unsigned long>(sync - last_sync), static_cast<unsigned long>(delay_req - last_delay_req),
+                      static_cast<unsigned long>(delay_resp - last_delay_resp), static_cast<unsigned long>(rate_limited - last_rate_limited),
+                      static_cast<unsigned long>(drops - last_drops));
+    last_sync = sync;
+    last_delay_req = delay_req;
+    last_delay_resp = delay_resp;
+    last_rate_limited = rate_limited;
+    last_drops = drops;
+    if (s_mqtt_client_reporting)
+    {
+        len = json_append(payload, payload_size, len, ",\"clients\":[");
+        const size_t count = std::min(snapshot.client_count, WEB_MQTT_PTP_CLIENTS);
+        for (size_t i = 0; i < count; ++i)
+        {
+            const uint8_t *mac = snapshot.clients[i].mac;
+            len = json_append(payload, payload_size, len, "%s{\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"active_entire_period\":%s}",
+                              i == 0 ? "" : ",", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                              snapshot.clients[i].active_entire_period ? "true" : "false");
+        }
+        len = json_append(payload, payload_size, len, "],\"clients_overflown\":%s", snapshot.client_count > count ? "true" : "false");
+    }
+    return json_append(payload, payload_size, len, "}");
 }
 
 static void mqtt_build_report(char *payload, size_t payload_size)
@@ -8616,6 +8675,7 @@ static void mqtt_build_report(char *payload, size_t payload_size)
     }
     else
         len = json_append(payload, payload_size, len, "}");
+    len = mqtt_append_ptp(payload, payload_size, len);
 
     if (s_mqtt_historical_reporting)
     {
@@ -9160,8 +9220,8 @@ static bool mqtt_allocate_buffers()
     const mqtt_config_t &a = *s_mqtt_active;
     const size_t payload_size = a.client_reporting ? web_mqtt_report_size(a.tf_client_limit) : MQTT_REPORT_SIZE;
     const size_t clients_size = a.client_reporting ? a.tf_client_limit : 0;
-    if (s_mqtt_reports == nullptr)
-        s_mqtt_reports = new (std::nothrow) mqtt_report_t[MQTT_REPORT_QUEUE_DEPTH]();
+    if (s_mqtt_ram_queue == nullptr)
+        s_mqtt_ram_queue = new (std::nothrow) mqtt_ram_queue_t();
     if (s_mqtt_final_payload == nullptr)
         s_mqtt_final_payload = static_cast<char *>(calloc(MQTT_REPORT_SIZE, 1));
     if (payload_size != s_mqtt_payload_size || s_mqtt_payload == nullptr)
@@ -9180,7 +9240,7 @@ static bool mqtt_allocate_buffers()
         s_mqtt_client_count = 0;
         xSemaphoreGive(s_mqtt_stats_mutex);
     }
-    return s_mqtt_reports != nullptr && s_mqtt_final_payload != nullptr && s_mqtt_payload != nullptr &&
+    return s_mqtt_ram_queue != nullptr && s_mqtt_final_payload != nullptr && s_mqtt_payload != nullptr &&
            (clients_size == 0 || s_mqtt_clients != nullptr);
 }
 
