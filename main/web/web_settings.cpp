@@ -317,7 +317,10 @@ namespace
                 if (version_11)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 11 read; the uptime / restart button has its default", key);
             }
-            if (!current && !version_13)
+            // From here on by the version number (the checks above made sure it is one of the known versions with its
+            // size): "!current && !version_13" also matched every version after 13 once 13 was no longer the newest
+            // (4.106 cleared the MQTT broker of version 14 sets that way)
+            if (header.version < BLOB_VERSION_13)
             {
                 // Version 13: the broker URI into broker, port and TLS; the topic rule is stricter now (no leading $,
                 // no trailing /)
@@ -328,14 +331,14 @@ namespace
                     copy_text(blob.settings.mqtt_topic, DEFAULT_MQTT_TOPIC);
                 }
             }
-            if (!current && !version_14)
+            if (header.version < BLOB_VERSION_14)
             {
                 // Appended in version 14
                 ptp_defaults(blob.settings);
                 if (version_13)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 13 read; the PTP master has its defaults (off)", key);
             }
-            if (!current)
+            if (header.version < BLOB_VERSION)
             {
                 // Appended in version 15
                 blob.settings.ntp_auth_required = false;
