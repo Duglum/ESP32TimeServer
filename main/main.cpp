@@ -300,6 +300,7 @@ static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
 static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
 static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = 2464; // GNSS UART reader (custom/gnss_uart, NMEA and UBX): measure
 static constexpr size_t PPS_Discipline_Task_Stack_Size = 3620; // was 3135: the PTP servo runs in this task (measure again)
+static constexpr size_t PTP_Service_Task_Stack_Size = 3584; // PTP master (custom/ptp_service.h): first estimate, measure
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
 
@@ -318,6 +319,7 @@ typedef enum
     NTP_Server,
     OTE_Service,
     PPS_Discipline,
+    PTP_Service,
     Watched_Task_Count
 } TaskToPinToCore_t;
 
@@ -338,6 +340,7 @@ static constexpr watched_task_t Watched_Tasks[Watched_Task_Count] = {
     {"ntp_server", NTP_Server_Task_Stack_Size},
     {"ote_service", OTE_Service_Task_Stack_Size},
     {"pps_discipline", PPS_Discipline_Task_Stack_Size},
+    {"ptp_service", PTP_Service_Task_Stack_Size},
 };
 static constexpr uint32_t Task_Stack_Note_Interval = 9766; // 10 s in units of 1.024 ms (uptime in us >> 10)
 static std::atomic<uint32_t> s_task_stack_least_free[Watched_Task_Count]; // bytes never used so far + 1; 0 = not noted yet
@@ -387,6 +390,7 @@ static size_t Highest_NTP_Cache_Purge_Task_Stack_Size = 0;
 static size_t Highest_NTP_Server_Task_Stack_Size = 0;
 static size_t Highest_OTE_Service_Task_Stack_Size = 0;
 static size_t Highest_PPS_Discipline_Task_Stack_Size = 0;
+static size_t Highest_PTP_Service_Task_Stack_Size = 0;
 
 static SemaphoreHandle_t s_task_stack_usage_mutex = nullptr;
 
@@ -447,6 +451,10 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
     case PPS_Discipline:
         task_name = "pps_discipline_task";
         allocated_bytes = PPS_Discipline_Task_Stack_Size;
+        break;
+    case PTP_Service:
+        task_name = "ptp_service_task";
+        allocated_bytes = PTP_Service_Task_Stack_Size;
         break;
     default:
         task_name = "unknown_task";
@@ -552,6 +560,13 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
             highest_value_changed = true;
         }
         break;
+    case PTP_Service:
+        if (curent_suggestion > Highest_PTP_Service_Task_Stack_Size)
+        {
+            Highest_PTP_Service_Task_Stack_Size = curent_suggestion;
+            highest_value_changed = true;
+        }
+        break;
     default:
 
         break;
@@ -618,6 +633,11 @@ static void report_current_task_stack_usage(TaskToPinToCore_t task_id)
             ESP_LOGW(TAG, "static constexpr size_t PPS_Discipline_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_PPS_Discipline_Task_Stack_Size), static_cast<unsigned int>(PPS_Discipline_Task_Stack_Size));
         else
             ESP_LOGI(TAG, "static constexpr size_t PPS_Discipline_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_PPS_Discipline_Task_Stack_Size), static_cast<unsigned int>(PPS_Discipline_Task_Stack_Size));
+
+        if (Highest_PTP_Service_Task_Stack_Size > PTP_Service_Task_Stack_Size)
+            ESP_LOGW(TAG, "static constexpr size_t PTP_Service_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_PTP_Service_Task_Stack_Size), static_cast<unsigned int>(PTP_Service_Task_Stack_Size));
+        else
+            ESP_LOGI(TAG, "static constexpr size_t PTP_Service_Task_Stack_Size = %u; // %u;", static_cast<unsigned int>(Highest_PTP_Service_Task_Stack_Size), static_cast<unsigned int>(PTP_Service_Task_Stack_Size));
 
         ESP_LOGI(TAG, " ");
     };
@@ -4017,11 +4037,21 @@ static uint64_t read_ntp_timestamp(const uint8_t *packet, size_t offset)
            static_cast<uint64_t>(packet[offset + 7]);
 }
 
+// PTP master (Ethernet now, UDP later): settings, receive hook, service task
+#include "custom/ptp_service.h"
+
 static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uint32_t length, void *netif, void *info)
 {
     s_ethernet_rx_frames.fetch_add(1, std::memory_order_relaxed);
     if (s_ethernet_recovery_rx_probe_active.load(std::memory_order_relaxed))
         s_ethernet_recovery_rx_probe_frames.fetch_add(1, std::memory_order_relaxed);
+    // PTP frames of an enabled transport go to the PTP task (with their hardware receive time stamp), everything
+    // else as before
+    if (ptp_receive_frame(frame, length, static_cast<const eth_mac_time_t *>(info)))
+    {
+        free(frame);
+        return ESP_OK;
+    }
     size_t ip_offset = 0;
     size_t udp_offset = 0;
     const eth_mac_time_t *rx_timestamp = static_cast<const eth_mac_time_t *>(info);
@@ -9582,6 +9612,10 @@ static void setup_ethernet()
     else if (!configure_hardware_timestamps())
     {
         ESP_LOGE(TAG, "Unable to configure Ethernet hardware timestamping");
+    }
+    else
+    {
+        start_ptp_service(); // needs the hardware time stamps
     }
 
     // Network settings of this boot (web settings): IPv4 DHCP or static,

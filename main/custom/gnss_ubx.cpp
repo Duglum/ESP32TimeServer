@@ -717,6 +717,11 @@ bool gnss_ubx_qerr_for_edge(int64_t edge_unix_sec, int32_t *qerr_ps)
     return true;
 }
 
+int16_t gnss_ubx_leap_seconds(void)
+{
+    return s_leap_seconds.load(std::memory_order_relaxed);
+}
+
 void gnss_ubx_get_status(gnss_ubx_status_t *status)
 {
     if (status == nullptr)

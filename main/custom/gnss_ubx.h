@@ -188,5 +188,9 @@ struct gnss_ubx_status_t
 
 void gnss_ubx_get_status(gnss_ubx_status_t *status);
 
+// GPS - UTC in s from NAV-PVT (INT16_MIN while not known); lock-free, for the PTP currentUtcOffset (TAI - UTC =
+// GPS - UTC + 19)
+int16_t gnss_ubx_leap_seconds(void);
+
 // Debug log (reader task, once a minute); nothing before the first frame
 void gnss_ubx_log_status(void);
