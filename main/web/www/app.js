@@ -155,7 +155,8 @@
     m.textContent = text;
     m.className = 'banner ' + (kind || 'ok');
     m.hidden = !text;
-    if (text) m.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    // To the very top: the header is sticky, so scrolling the banner into view would leave it under the header
+    if (text) window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   // ---- API ----
