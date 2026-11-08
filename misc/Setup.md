@@ -194,6 +194,13 @@ source. The `stratum` column should read `1`.
 You can also use the **NTP Time Server Monitor** (installed alongside the
 daemon) to view synchronisation status graphically.
 
+### Windows — built-in Windows Time (NTP or PTP)
+
+`tools/configTimeSettings.ps1` sets up the time service built into Windows as an NTP or PTP (UDP/IPv4) client of
+the time server, with a backup and a restore of everything it changes. See
+[Windows_time_client_setup.md](Windows_time_client_setup.md) for the requirements, the settings needed on the time
+server's web page and what the script changes.
+
 ---
 
 ### Linux
