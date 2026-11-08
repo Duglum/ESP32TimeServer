@@ -222,6 +222,8 @@ struct web_ptp_port_t
     uint32_t tx_timestamp_misses;
     uint32_t transmit_failures;
     uint32_t foreign_announces;
+    uint32_t auth_rejected;    // Delay_Req / Announce with an AUTHENTICATION TLV that did not verify
+    uint32_t unsigned_refused; // unsigned Delay_Req / Announce while PTP authentication is required
 };
 
 struct web_ptp_follower_t
@@ -238,6 +240,8 @@ struct web_ptp_status_t
     uint8_t identity[8];    // clockIdentity
     int16_t utc_offset;     // currentUtcOffset in use (TAI - UTC)
     bool utc_offset_from_gnss;
+    bool auth_signing;      // sent messages carry the AUTHENTICATION TLV
+    bool auth_required;     // unsigned Delay_Req / Announce are dropped
     web_ptp_port_t ports[WEB_PTP_TRANSPORTS];
     size_t follower_count;
     web_ptp_follower_t followers[WEB_PTP_FOLLOWERS];

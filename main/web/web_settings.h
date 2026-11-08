@@ -49,6 +49,7 @@ static constexpr int16_t WEB_PTP_UTC_OFFSET_MAX_S = 100;       // TAI - UTC
 static constexpr int32_t WEB_PTP_LATENCY_MAX_NS = 100000;      // ingress / egress latency: -100 to 100 us
 static constexpr size_t WEB_NTP_KEY_SIZE = 33;      // 32 characters + NUL
 static constexpr size_t WEB_NTP_MAX_KEYS = 8;       // NTP_AUTH_MAX_KEYS
+static constexpr size_t WEB_PTP_MAX_KEYS = 4;       // PTP_AUTH_MAX_KEYS
 // Sizes of the former OTE device name and OTE password fields (unused, they keep the layout of the saved settings)
 static constexpr size_t WEB_OTE_NAME_SIZE = 33;
 static constexpr size_t WEB_OTE_PASSWORD_SIZE = 65;
@@ -248,6 +249,19 @@ struct web_settings_t
     // answered, unsigned NTPv3 and NTPv4 requests are dropped. false = mixed (signed and unsigned are answered).
     // Needs ntp_auth_enabled and at least one key.
     bool ntp_auth_required;
+
+    // PTP authentication (added in version 16; takes effect at once): AUTHENTICATION TLV with HMAC-SHA256-128 on every
+    // transport (custom/ptp_auth.h, linuxptp sa_file type SHA256-128). On: all sent messages are signed with the active
+    // key, signed Delay_Req / Announce must verify; required: unsigned ones are dropped as well. mutable: the
+    // correctionField is not covered by the ICV (linuxptp allow_mutable 1). Keys like the NTP keys: ID 1 to 65535 and
+    // 32 letters or digits (secret, shown on the page: the followers need them).
+    bool ptp_auth_enabled;
+    bool ptp_auth_required;
+    bool ptp_auth_mutable;
+    uint8_t ptp_auth_spp;              // securityParameterPointer 0 to 255
+    uint16_t ptp_auth_active_key_id;   // signs the sent messages, one of ptp_keys
+    uint8_t ptp_key_count;
+    web_ntp_key_t ptp_keys[WEB_PTP_MAX_KEYS];
 };
 
 // Defaults of all settings (the state after a reset to defaults)

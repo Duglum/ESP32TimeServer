@@ -482,6 +482,47 @@ namespace
     static_assert(sizeof(s_lcd_address_names) / sizeof(s_lcd_address_names[0]) == static_cast<size_t>(web_lcd_address_t::none) + 1,
                   "one name per LCD address line");
 
+    // A key list of the settings ("ntp_keys" / "ptp_keys": list of {id, key}, may be empty) replaces the keys; not sent:
+    // unchanged (*present false). label names them in the errors ("NTP" / "PTP")
+    bool json_keys(cJSON *root, const char *name, const char *label, web_ntp_key_t *out, size_t max, uint8_t &count,
+                   bool &present, char *err, size_t err_size)
+    {
+        present = false;
+        cJSON *keys = cJSON_GetObjectItemCaseSensitive(root, name);
+        if (keys == nullptr)
+            return true;
+        if (!cJSON_IsArray(keys) || cJSON_GetArraySize(keys) > static_cast<int>(max))
+        {
+            snprintf(err, err_size, "At most %u %s keys", static_cast<unsigned>(max), label);
+            return false;
+        }
+        web_ntp_key_t list[WEB_NTP_MAX_KEYS] = {};
+        size_t n = 0;
+        cJSON *item = nullptr;
+        cJSON_ArrayForEach(item, keys)
+        {
+            cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
+            cJSON *value = cJSON_GetObjectItemCaseSensitive(item, "key");
+            if (n >= max || !cJSON_IsObject(item) || !cJSON_IsNumber(id) || !cJSON_IsString(value) || id->valuedouble < 1 ||
+                id->valuedouble > 65535 || id->valuedouble != static_cast<double>(static_cast<long>(id->valuedouble)) ||
+                strlen(value->valuestring) >= WEB_NTP_KEY_SIZE)
+            {
+                memset(list, 0, sizeof(list));
+                snprintf(err, err_size, "%s key %u: key ID 1 to 65535 and 32 letters or digits expected", label, static_cast<unsigned>(n + 1));
+                return false;
+            }
+            list[n].id = static_cast<uint32_t>(id->valuedouble);
+            snprintf(list[n].key, sizeof(list[n].key), "%s", value->valuestring);
+            ++n;
+        }
+        count = static_cast<uint8_t>(n);
+        memcpy(out, list, max * sizeof(web_ntp_key_t));
+        memset(list, 0, sizeof(list));
+        present = true;
+        return true;
+    }
+    static_assert(WEB_PTP_MAX_KEYS <= WEB_NTP_MAX_KEYS, "json_keys() uses a list of WEB_NTP_MAX_KEYS");
+
     void add_ntp_keys(cJSON *array, const web_ntp_key_t *keys, size_t count)
     {
         for (size_t i = 0; i < count; ++i)
@@ -595,6 +636,13 @@ namespace
         cJSON_AddNumberToObject(object, "ptp_utc_offset", s.ptp_utc_offset_s);
         cJSON_AddNumberToObject(object, "ptp_ingress_latency_ns", s.ptp_ingress_latency_ns);
         cJSON_AddNumberToObject(object, "ptp_egress_latency_ns", s.ptp_egress_latency_ns);
+        cJSON_AddBoolToObject(object, "ptp_auth_enabled", s.ptp_auth_enabled);
+        cJSON_AddBoolToObject(object, "ptp_auth_required", s.ptp_auth_required);
+        cJSON_AddBoolToObject(object, "ptp_auth_mutable", s.ptp_auth_mutable);
+        cJSON_AddNumberToObject(object, "ptp_auth_spp", s.ptp_auth_spp);
+        cJSON_AddNumberToObject(object, "ptp_auth_active_key_id", s.ptp_auth_active_key_id);
+        // Shown on the page like the NTP keys: the followers need them
+        add_ntp_keys(cJSON_AddArrayToObject(object, "ptp_keys"), s.ptp_keys, s.ptp_key_count);
     }
 
     bool json_string(cJSON *root, const char *name, char *out, size_t size, char *err, size_t err_size)
@@ -769,7 +817,12 @@ namespace
                   json_int(root, "ptp_delay_req_rate_limit", s.ptp_delay_req_rate_limit, 0, WEB_PTP_DELAY_REQ_RATE_MAX, err, err_size) &&
                   json_int(root, "ptp_utc_offset", s.ptp_utc_offset_s, 0, WEB_PTP_UTC_OFFSET_MAX_S, err, err_size) &&
                   json_int(root, "ptp_ingress_latency_ns", s.ptp_ingress_latency_ns, -WEB_PTP_LATENCY_MAX_NS, WEB_PTP_LATENCY_MAX_NS, err, err_size) &&
-                  json_int(root, "ptp_egress_latency_ns", s.ptp_egress_latency_ns, -WEB_PTP_LATENCY_MAX_NS, WEB_PTP_LATENCY_MAX_NS, err, err_size);
+                  json_int(root, "ptp_egress_latency_ns", s.ptp_egress_latency_ns, -WEB_PTP_LATENCY_MAX_NS, WEB_PTP_LATENCY_MAX_NS, err, err_size) &&
+                  json_bool(root, "ptp_auth_enabled", s.ptp_auth_enabled, err, err_size) &&
+                  json_bool(root, "ptp_auth_required", s.ptp_auth_required, err, err_size) &&
+                  json_bool(root, "ptp_auth_mutable", s.ptp_auth_mutable, err, err_size) &&
+                  json_int(root, "ptp_auth_spp", s.ptp_auth_spp, 0, 255, err, err_size) &&
+                  json_int(root, "ptp_auth_active_key_id", s.ptp_auth_active_key_id, 1, 65535, err, err_size);
         if (!ok)
             return false;
 
@@ -917,41 +970,14 @@ namespace
         else if (secret[0] != '\0')
             snprintf(s.mqtt_password, sizeof(s.mqtt_password), "%s", secret);
 
-        // NTP keys: "ntp_keys" (list of {id, key}, may be empty) replaces the keys; not sent: unchanged
-        cJSON *keys = cJSON_GetObjectItemCaseSensitive(root, "ntp_keys");
-        if (keys != nullptr)
-        {
-            if (!cJSON_IsArray(keys) || cJSON_GetArraySize(keys) > static_cast<int>(WEB_NTP_MAX_KEYS))
-            {
-                snprintf(err, err_size, "At most %u NTP keys", static_cast<unsigned>(WEB_NTP_MAX_KEYS));
-                return false;
-            }
-            web_ntp_key_t list[WEB_NTP_MAX_KEYS] = {};
-            size_t count = 0;
-            cJSON *item = nullptr;
-            cJSON_ArrayForEach(item, keys)
-            {
-                cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
-                cJSON *value = cJSON_GetObjectItemCaseSensitive(item, "key");
-                if (!cJSON_IsObject(item) || !cJSON_IsNumber(id) || !cJSON_IsString(value) || id->valuedouble < 1 ||
-                    id->valuedouble > 65535 || id->valuedouble != static_cast<double>(static_cast<long>(id->valuedouble)) ||
-                    strlen(value->valuestring) >= WEB_NTP_KEY_SIZE)
-                {
-                    memset(list, 0, sizeof(list));
-                    snprintf(err, err_size, "NTP key %u: key ID 1 to 65535 and 32 letters or digits expected", static_cast<unsigned>(count + 1));
-                    return false;
-                }
-                list[count].id = static_cast<uint32_t>(id->valuedouble);
-                snprintf(list[count].key, sizeof(list[count].key), "%s", value->valuestring);
-                ++count;
-            }
-            s.ntp_key_override = true;
-            s.ntp_key_count = static_cast<uint8_t>(count);
-            memcpy(s.ntp_keys, list, sizeof(list));
-            memset(list, 0, sizeof(list));
-        }
         memset(secret, 0, sizeof(secret));
-        return true;
+        // NTP and PTP keys
+        bool present = false;
+        if (!json_keys(root, "ntp_keys", "NTP", s.ntp_keys, WEB_NTP_MAX_KEYS, s.ntp_key_count, present, err, err_size))
+            return false;
+        if (present)
+            s.ntp_key_override = true;
+        return json_keys(root, "ptp_keys", "PTP", s.ptp_keys, WEB_PTP_MAX_KEYS, s.ptp_key_count, present, err, err_size);
     }
 
     // ---- Restart and network confirmation ----
@@ -1700,6 +1726,9 @@ namespace
         cJSON_AddStringToObject(root, "clock_identity", identity);
         cJSON_AddNumberToObject(root, "utc_offset", p->utc_offset);
         cJSON_AddStringToObject(root, "utc_offset_source", p->utc_offset_from_gnss ? "gnss" : "setting");
+        cJSON *authentication = cJSON_AddObjectToObject(root, "authentication");
+        cJSON_AddBoolToObject(authentication, "signing", p->auth_signing);
+        cJSON_AddBoolToObject(authentication, "required", p->auth_required);
         static const char *const transport_names[WEB_PTP_TRANSPORTS] = {"l2", "udp4", "udp6"};
         cJSON *ports = cJSON_AddArrayToObject(root, "ports");
         for (size_t t = 0; t < WEB_PTP_TRANSPORTS; ++t)
@@ -1723,6 +1752,8 @@ namespace
             cJSON_AddNumberToObject(item, "tx_timestamp_misses", port.tx_timestamp_misses);
             cJSON_AddNumberToObject(item, "transmit_failures", port.transmit_failures);
             cJSON_AddNumberToObject(item, "foreign_announces", port.foreign_announces);
+            cJSON_AddNumberToObject(item, "auth_rejected", port.auth_rejected);
+            cJSON_AddNumberToObject(item, "unsigned_refused", port.unsigned_refused);
             cJSON_AddItemToArray(ports, item);
         }
         cJSON *followers = cJSON_AddArrayToObject(root, "followers");

@@ -36,8 +36,11 @@ struct Datagram
 };
 
 // Only this multicast profile is intercepted. Other UDP traffic remains owned by lwIP.
+// allow_authentication (fork addition): a message with an AUTHENTICATION TLV passes the length check of the parser
+// (the caller verifies the TLV, custom/ptp_auth.h)
 inline ptp::MessageKind decode(const uint8_t *frame, size_t length, uint8_t domain,
-                              const uint8_t *identity, Datagram &datagram, ptp::ParsedMessage &parsed)
+                              const uint8_t *identity, Datagram &datagram, ptp::ParsedMessage &parsed,
+                              bool allow_authentication = false)
 {
     if (frame == nullptr || length < 14)
         return ptp::MessageKind::Ignored;
@@ -70,7 +73,7 @@ inline ptp::MessageKind decode(const uint8_t *frame, size_t length, uint8_t doma
                                              ipv6 ? 16 : 4, udp, udp_length)) != 0xffff))
         return ptp::MessageKind::Invalid;
     datagram = {udp + 8, udp_length - 8, ipv6, port};
-    const auto kind = ptp::parse_message(datagram.message, datagram.length, domain, identity, parsed);
+    const auto kind = ptp::parse_message(datagram.message, datagram.length, domain, identity, parsed, allow_authentication);
     if ((kind == ptp::MessageKind::DelayRequest && port != EVENT_PORT) ||
         (kind == ptp::MessageKind::Announce && port != GENERAL_PORT))
         return ptp::MessageKind::Invalid;

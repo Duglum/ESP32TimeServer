@@ -315,9 +315,7 @@
     syncPasswordEye(entry);
   });
 
-  // ---- NTP keys ----
-  let ntpKeyRows = [];
-  let ntpKeysChanged = false;
+  // ---- Key tables: NTP keys and PTP keys (ID 1 to 65535, 32 letters or digits) ----
 
   // 32 characters [0-9A-Za-z] from the cryptographic random generator of the browser (rejection sampling: no bias)
   function randomKey() {
@@ -333,71 +331,84 @@
     return out.join('');
   }
 
-  function checkKeyRow(row) {
-    row.key.classList.toggle('bad', !/^[0-9A-Za-z]{32}$/.test(row.key.value.trim()));
-    const id = Number(row.id.value);
-    row.id.classList.toggle('bad', !Number.isInteger(id) || id < 1 || id > 65535 ||
-      ntpKeyRows.some((other) => other !== row && Number(other.id.value) === id));
-  }
-
-  function keysChanged() {
-    ntpKeysChanged = true;
-    ntpKeyRows.forEach(checkKeyRow);
-    $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
-  }
-
-  function addKeyRow(id, key) {
-    const table = $('ntp-keys');
-    const idInput = document.createElement('input');
-    idInput.type = 'number';
-    idInput.min = '1';
-    idInput.max = '65535';
-    idInput.value = String(id);
-    idInput.setAttribute('aria-label', t('Key ID'));
-    const keyInput = document.createElement('input');
-    keyInput.type = 'text';
-    keyInput.maxLength = 32;
-    keyInput.spellcheck = false;
-    keyInput.autocomplete = 'off';
-    keyInput.value = key;
-    keyInput.setAttribute('aria-label', t('Key'));
-    const generate = document.createElement('button');
-    generate.type = 'button';
-    generate.textContent = t('Generate');
-    generate.title = t('New random key (32 letters or digits)');
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.textContent = t('Remove');
-    const row = { id: idInput, key: keyInput, elements: [idInput, keyInput, generate, remove] };
-    generate.addEventListener('click', () => { keyInput.value = randomKey(); keysChanged(); });
-    remove.addEventListener('click', () => {
-      row.elements.forEach((el) => el.remove());
-      ntpKeyRows = ntpKeyRows.filter((r) => r !== row);
-      keysChanged();
+  // A table of keys in the element tableId with its add button and state line; at most max keys
+  function makeKeyTable(tableId, addId, stateId, max) {
+    const kt = { rows: [], changed: false };
+    const updateAdd = () => { $(addId).disabled = kt.rows.length >= max; };
+    function check(row) {
+      row.key.classList.toggle('bad', !/^[0-9A-Za-z]{32}$/.test(row.key.value.trim()));
+      const id = Number(row.id.value);
+      row.id.classList.toggle('bad', !Number.isInteger(id) || id < 1 || id > 65535 ||
+        kt.rows.some((other) => other !== row && Number(other.id.value) === id));
+    }
+    function changed() {
+      kt.changed = true;
+      kt.rows.forEach(check);
+      updateAdd();
+    }
+    function add(id, key) {
+      const table = $(tableId);
+      const idInput = document.createElement('input');
+      idInput.type = 'number';
+      idInput.min = '1';
+      idInput.max = '65535';
+      idInput.value = String(id);
+      idInput.setAttribute('aria-label', t('Key ID'));
+      const keyInput = document.createElement('input');
+      keyInput.type = 'text';
+      keyInput.maxLength = 32;
+      keyInput.spellcheck = false;
+      keyInput.autocomplete = 'off';
+      keyInput.value = key;
+      keyInput.setAttribute('aria-label', t('Key'));
+      const generate = document.createElement('button');
+      generate.type = 'button';
+      generate.textContent = t('Generate');
+      generate.title = t('New random key (32 letters or digits)');
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = t('Remove');
+      const row = { id: idInput, key: keyInput, elements: [idInput, keyInput, generate, remove] };
+      generate.addEventListener('click', () => { keyInput.value = randomKey(); changed(); });
+      remove.addEventListener('click', () => {
+        row.elements.forEach((el) => el.remove());
+        kt.rows = kt.rows.filter((r) => r !== row);
+        changed();
+      });
+      idInput.addEventListener('input', changed);
+      keyInput.addEventListener('input', changed);
+      table.append(idInput, keyInput, generate, remove);
+      kt.rows.push(row);
+      check(row);
+    }
+    kt.set = (keys) => {
+      kt.rows.forEach((row) => row.elements.forEach((el) => el.remove()));
+      kt.rows = [];
+      for (const k of keys || []) add(k.id, k.key);
+      kt.changed = false;
+      $(stateId).textContent = kt.rows.length ? t('Keys set on this page are in use.') : t('No keys are set yet.');
+      updateAdd();
+    };
+    kt.updateAdd = updateAdd;
+    // The keys for the request; idMessage / keyMessage: texts with {n} for a wrong key ID / key
+    kt.collect = (idMessage, keyMessage) => kt.rows.map((row, i) => {
+      const id = Number(row.id.value);
+      const key = row.key.value.trim();
+      if (!Number.isInteger(id) || id < 1 || id > 65535) throw fieldError(tableId, t(idMessage, { n: i + 1 }));
+      if (!/^[0-9A-Za-z]{32}$/.test(key)) throw fieldError(tableId, t(keyMessage, { n: i + 1 }));
+      return { id: id, key: key };
     });
-    idInput.addEventListener('input', keysChanged);
-    keyInput.addEventListener('input', keysChanged);
-    table.append(idInput, keyInput, generate, remove);
-    ntpKeyRows.push(row);
-    checkKeyRow(row);
+    $(addId).addEventListener('click', () => {
+      const used = kt.rows.map((r) => Number(r.id.value));
+      let id = 1;
+      while (used.includes(id)) id++;
+      add(id, randomKey());
+      changed();
+    });
+    return kt;
   }
-
-  function setNtpKeys(keys) {
-    ntpKeyRows.forEach((row) => row.elements.forEach((el) => el.remove()));
-    ntpKeyRows = [];
-    for (const k of keys || []) addKeyRow(k.id, k.key);
-    ntpKeysChanged = false;
-    $('ntp-key-state').textContent = ntpKeyRows.length ? t('Keys set on this page are in use.') : t('No keys are set yet.');
-    $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
-  }
-
-  $('ntp-key-add').addEventListener('click', () => {
-    const used = ntpKeyRows.map((r) => Number(r.id.value));
-    let id = 1;
-    while (used.includes(id)) id++;
-    addKeyRow(id, randomKey());
-    keysChanged();
-  });
+  const ntpKeys = makeKeyTable('ntp-keys', 'ntp-key-add', 'ntp-key-state', 8);
+  const ptpKeys = makeKeyTable('ptp-keys', 'ptp-key-add', 'ptp-key-state', 4);
 
   // ---- Settings <-> form ----
   function formValues(s) {
@@ -472,6 +483,9 @@
       ptp_udp4_enabled: s.ptp_udp4_enabled,
       ptp_udp6_enabled: s.ptp_udp6_enabled,
       ptp_master_selection: s.ptp_master_selection,
+      ptp_auth_enabled: s.ptp_auth_enabled,
+      ptp_auth_required: s.ptp_auth_required,
+      ptp_auth_mutable: s.ptp_auth_mutable,
       ...Object.fromEntries(ptpNumbers.map(([name]) => [name, String(s[name])]))
     };
   }
@@ -489,7 +503,9 @@
     ['ptp_follower_timeout', 5, 3600, 'PTP follower timeout: 5 to 3600 s'],
     ['ptp_delay_req_rate_limit', 0, 1000, 'PTP delay requests per follower: 0 to 1000 per second'],
     ['ptp_ingress_latency_ns', -100000, 100000, 'PTP ingress latency: -100000 to 100000 ns'],
-    ['ptp_egress_latency_ns', -100000, 100000, 'PTP egress latency: -100000 to 100000 ns']
+    ['ptp_egress_latency_ns', -100000, 100000, 'PTP egress latency: -100000 to 100000 ns'],
+    ['ptp_auth_spp', 0, 255, 'PTP security parameter pointer: 0 to 255'],
+    ['ptp_auth_active_key_id', 1, 65535, 'PTP active key ID: 1 to 65535']
   ];
   // Text of a selected option (the defaults of the selects)
   function optionText(name, value) {
@@ -517,7 +533,8 @@
     setColours(s.led_colors);
     f.mqtt_password.value = '';
     f.mqtt_password_clear.checked = false;
-    setNtpKeys(s.ntp_keys);
+    ntpKeys.set(s.ntp_keys);
+    ptpKeys.set(s.ptp_keys);
     $('mqtt-password-state').textContent = s.mqtt_password_set ? t('A password is set.') : t('No password is set.');
     updateDependent();
     markDefaults();
@@ -640,7 +657,8 @@
     $('mqtt-buffer-note').textContent = f.mqtt_client_reporting.checked && Number.isInteger(limit) && limit >= 50 && limit <= 1000
       ? t('Report buffer: {kb} kB of RAM (3874 bytes plus 76 bytes per client). Without the TF card at most 50 clients are listed.', { kb: lang === 'de' ? kilobytes.replace('.', ',') : kilobytes })
       : (f.mqtt_client_reporting.checked ? t('50 to 1000.') : t('Only used with client activity reporting.'));
-    $('ntp-key-add').disabled = ntpKeyRows.length >= 8;
+    ntpKeys.updateAdd();
+    ptpKeys.updateAdd();
     f.button_pin.disabled = !f.button_enabled.checked;
     syncPasswordEyes();
     if (state) {
@@ -801,7 +819,10 @@
       ptp_l2_enabled: f.ptp_l2_enabled.checked,
       ptp_udp4_enabled: f.ptp_udp4_enabled.checked,
       ptp_udp6_enabled: f.ptp_udp6_enabled.checked,
-      ptp_master_selection: f.ptp_master_selection.checked
+      ptp_master_selection: f.ptp_master_selection.checked,
+      ptp_auth_enabled: f.ptp_auth_enabled.checked,
+      ptp_auth_required: f.ptp_auth_required.checked,
+      ptp_auth_mutable: f.ptp_auth_mutable.checked
     };
     if (body.ptp_udp4_enabled && body.ip_mode === 'ipv6') throw fieldError('ptp_udp4_enabled', t('PTP over UDP/IPv4 needs IPv4 (address families)'));
     if (body.ptp_udp6_enabled && body.ip_mode === 'ipv4') throw fieldError('ptp_udp6_enabled', t('PTP over UDP/IPv6 needs IPv6 (address families)'));
@@ -811,17 +832,9 @@
       if (text === '' || !Number.isInteger(value) || value < lowest || value > highest) throw fieldError(name, t(message));
       body[name] = value;
     }
-    // NTP keys: only sent when they were changed (an empty list removes all keys)
-    if (ntpKeysChanged) {
-      body.ntp_keys = [];
-      ntpKeyRows.forEach((row, i) => {
-        const id = Number(row.id.value);
-        const key = row.key.value.trim();
-        if (!Number.isInteger(id) || id < 1 || id > 65535) throw fieldError('ntp-keys', t('NTP key {n}: key ID 1 to 65535', { n: i + 1 }));
-        if (!/^[0-9A-Za-z]{32}$/.test(key)) throw fieldError('ntp-keys', t('NTP key {n}: exactly 32 letters or digits', { n: i + 1 }));
-        body.ntp_keys.push({ id: id, key: key });
-      });
-    }
+    // NTP and PTP keys: only sent when they were changed (an empty list removes all keys)
+    if (ntpKeys.changed) body.ntp_keys = ntpKeys.collect('NTP key {n}: key ID 1 to 65535', 'NTP key {n}: exactly 32 letters or digits');
+    if (ptpKeys.changed) body.ptp_keys = ptpKeys.collect('PTP key {n}: key ID 1 to 65535', 'PTP key {n}: exactly 32 letters or digits');
     for (const [key, name] of ledStates) {
       const hex = normaliseHex(colourRows[key].input.value);
       if (!hex) throw fieldError('led-colours', t('LED colour "{name}": #RRGGBB expected', { name: t(name) }));
@@ -1223,6 +1236,11 @@
     $('ptp-identity').textContent = p.started ? p.clock_identity : t('PTP is not running (no hardware time stamps)');
     $('ptp-utc').textContent = t('{n} s ({source})', { n: p.utc_offset,
       source: p.utc_offset_source === 'gnss' ? t('from the GNSS receiver') : t('setting') });
+    const auth = p.authentication || {};
+    $('ptp-auth').textContent = auth.signing
+      ? (auth.required ? t('on: sent messages are signed, unsigned requests are dropped')
+        : t('on: sent messages are signed, unsigned requests are answered'))
+      : (auth.required ? t('required, but no usable key: PTP is silent') : t('off'));
     const ports = $('ptp-ports');
     ports.textContent = '';
     for (const port of p.ports || []) {
@@ -1240,6 +1258,11 @@
         li.appendChild(document.createElement('br'));
         li.appendChild(document.createTextNode(t('rate limited {l}, dropped {d}, invalid {i}, ignored {g}, receive stamp missing {rx}, transmit stamp missing {tx}, send failures {sf}', {
           l: port.rate_limited, d: port.drops, i: port.invalid, g: port.ignored, rx: port.rx_timestamp_misses, tx: port.tx_timestamp_misses, sf: port.transmit_failures })));
+      }
+      if (port.auth_rejected > 0 || port.unsigned_refused > 0) {
+        li.appendChild(document.createElement('br'));
+        li.appendChild(document.createTextNode(t('authentication: {r} rejected (key, ICV or TLV), {u} unsigned refused', {
+          r: port.auth_rejected, u: port.unsigned_refused })));
       }
       ports.appendChild(li);
     }

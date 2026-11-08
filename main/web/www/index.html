@@ -500,6 +500,7 @@
             <dt>TAI − UTC</dt><dd id="ptp-utc"></dd>
             <dt>Ports</dt><dd><ul id="ptp-ports" class="plain"></ul></dd>
             <dt>Followers</dt><dd><ul id="ptp-followers" class="plain"></ul></dd>
+            <dt>Authentication</dt><dd id="ptp-auth"></dd>
           </dl>
           <p class="hint">The state is updated every 10 s while this panel is open.</p>
           <h3 class="sub-heading">Clock</h3>
@@ -574,6 +575,30 @@
               <small class="def" data-for="ptp_egress_latency_ns"></small>
             </label>
           </div>
+          <h3 class="sub-heading">Authentication</h3>
+          <div class="grid">
+            <label class="switch span2"><input type="checkbox" name="ptp_auth_enabled"> Sign PTP messages and check signed requests (AUTHENTICATION TLV, HMAC-SHA256-128)</label>
+            <label class="switch span2"><input type="checkbox" name="ptp_auth_required"> PTP authentication required (no answer to unsigned requests)</label>
+            <label class="switch span2"><input type="checkbox" name="ptp_auth_mutable"> correctionField not covered by the ICV (linuxptp allow_mutable 1)</label>
+            <label><span class="lt">Security parameter pointer (spp)</span>
+              <input type="number" name="ptp_auth_spp" min="0" max="255">
+              <small class="note">0 to 255, the same as on the followers.</small>
+              <small class="def" data-for="ptp_auth_spp"></small>
+            </label>
+            <label><span class="lt">Active key ID</span>
+              <input type="number" name="ptp_auth_active_key_id" min="1" max="65535">
+              <small class="note">The key that signs the sent messages; one of the keys below.</small>
+              <small class="def" data-for="ptp_auth_active_key_id"></small>
+            </label>
+          </div>
+          <p class="hint" id="ptp-key-state"></p>
+          <div class="key-table" id="ptp-keys">
+            <span class="key-head">Key ID</span><span class="key-head">Key (32 letters or digits)</span><span></span><span></span>
+          </div>
+          <div class="buttons left key-actions">
+            <button type="button" id="ptp-key-add">Add key</button>
+          </div>
+          <p class="hint">Followers with linuxptp: in the port section of <code>ptp4l.conf</code> set <code>spp</code>, <code>active_key_id</code> and <code>sa_file</code>; the sa_file has a <code>[security_association]</code> with the same <code>spp</code> (and <code>allow_mutable 1</code> when the switch above is on) and one line per key, e.g. <code>1 SHA256-128 ASCII:&lt;key&gt;</code>. A follower with <code>spp</code> drops every message without the TLV, so switch authentication on here first. Followers without authentication should skip the TLV (IEEE 1588 tells them to ignore unknown TLVs); check yours before you require it. Up to 4 keys; the key ring checks requests signed with any of them. Changes take effect at once with Apply.</p>
         </details>
       </section>
 
@@ -646,7 +671,7 @@
         </form>
         <h3 class="sub-heading">Configuration</h3>
         <p class="hint first"><em>Export configuration</em> saves all settings in use, the allow-list and an own TLS certificate with its key as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the key of the self-signed certificate.</p>
-        <p class="callout">The file contains secrets in clear text (MQTT password, NTP keys, the key of an own TLS certificate): keep it as safe as a password.</p>
+        <p class="callout">The file contains secrets in clear text (MQTT password, NTP and PTP keys, the key of an own TLS certificate): keep it as safe as a password.</p>
         <div class="buttons left">
           <button type="button" id="config-export">Export configuration</button>
         </div>

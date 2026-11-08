@@ -52,10 +52,12 @@ namespace
     //     stay in the layout (mqtt_uri_unused): the URI of versions 5 to 12 is read into the new fields;
     // 14: PTP master appended at the end (versions 5 to 13 are still read, PTP gets its defaults: off);
     // 15: NTP authentication required appended at the end (versions 5 to 14 are still read, it gets its default: off
-    //     = mixed).
+    //     = mixed);
+    // 16: PTP authentication (switches, spp, active key, 4 keys) appended at the end (versions 5 to 15 are still read,
+    //     it gets its defaults: off, no keys).
     // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
     // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
-    constexpr uint32_t BLOB_VERSION = 15;
+    constexpr uint32_t BLOB_VERSION = 16;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
     constexpr uint32_t BLOB_VERSION_7 = 7;
@@ -66,6 +68,7 @@ namespace
     constexpr uint32_t BLOB_VERSION_12 = 12;
     constexpr uint32_t BLOB_VERSION_13 = 13;
     constexpr uint32_t BLOB_VERSION_14 = 14;
+    constexpr uint32_t BLOB_VERSION_15 = 15;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -82,6 +85,7 @@ namespace
     constexpr size_t SETTINGS_SIZE_12 = settings_size_before(offsetof(web_settings_t, mqtt_broker));
     constexpr size_t SETTINGS_SIZE_13 = settings_size_before(offsetof(web_settings_t, ptp_l2_enabled));
     constexpr size_t SETTINGS_SIZE_14 = settings_size_before(offsetof(web_settings_t, ntp_auth_required));
+    constexpr size_t SETTINGS_SIZE_15 = settings_size_before(offsetof(web_settings_t, ptp_auth_enabled));
     // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 12 may fit into that of the
     // version before: the version number tells them apart, and an older set always gets the defaults for the newer
     // fields instead of its padding bytes
@@ -89,7 +93,8 @@ namespace
                       SETTINGS_SIZE_7 <= SETTINGS_SIZE_8 && SETTINGS_SIZE_8 <= SETTINGS_SIZE_9 &&
                       SETTINGS_SIZE_9 <= SETTINGS_SIZE_10 && SETTINGS_SIZE_10 <= SETTINGS_SIZE_11 &&
                       SETTINGS_SIZE_11 <= SETTINGS_SIZE_12 && SETTINGS_SIZE_12 <= SETTINGS_SIZE_13 &&
-                      SETTINGS_SIZE_13 <= SETTINGS_SIZE_14 && SETTINGS_SIZE_14 <= sizeof(web_settings_t),
+                      SETTINGS_SIZE_13 <= SETTINGS_SIZE_14 && SETTINGS_SIZE_14 <= SETTINGS_SIZE_15 &&
+                      SETTINGS_SIZE_15 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
     // Defaults of the fields that later blob versions appended (web_settings_defaults() uses them as well)
@@ -124,6 +129,18 @@ namespace
         out.ptp_utc_offset_s = 37;              // TAI - UTC since 2017-01-01
         out.ptp_ingress_latency_ns = 0;
         out.ptp_egress_latency_ns = 0;
+    }
+
+    // PTP authentication (version 16): off, no keys; spp 0 and key 1 as in the example of the linuxptp manual
+    void ptp_auth_defaults(web_settings_t &out)
+    {
+        out.ptp_auth_enabled = false;
+        out.ptp_auth_required = false;
+        out.ptp_auth_mutable = false;
+        out.ptp_auth_spp = 0;
+        out.ptp_auth_active_key_id = 1;
+        out.ptp_key_count = 0;
+        memset(out.ptp_keys, 0, sizeof(out.ptp_keys));
     }
 
     struct settings_blob_t
@@ -238,6 +255,7 @@ namespace
         const bool version_12 = header.version == BLOB_VERSION_12 && header.size == SETTINGS_SIZE_12;
         const bool version_13 = header.version == BLOB_VERSION_13 && header.size == SETTINGS_SIZE_13;
         const bool version_14 = header.version == BLOB_VERSION_14 && header.size == SETTINGS_SIZE_14;
+        const bool version_15 = header.version == BLOB_VERSION_15 && header.size == SETTINGS_SIZE_15;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
@@ -252,10 +270,12 @@ namespace
                                length != HEADER_SIZE + SETTINGS_SIZE_11 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_12 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_13 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_14 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_14 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_15 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
         else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9 && !version_10 &&
-                                                   !version_11 && !version_12 && !version_13 && !version_14) ||
+                                                   !version_11 && !version_12 && !version_13 && !version_14 &&
+                                                   !version_15) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -338,12 +358,19 @@ namespace
                 if (version_13)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 13 read; the PTP master has its defaults (off)", key);
             }
-            if (header.version < BLOB_VERSION)
+            if (header.version < BLOB_VERSION_15)
             {
                 // Appended in version 15
                 blob.settings.ntp_auth_required = false;
                 if (version_14)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 14 read; NTP authentication required has its default (off)", key);
+            }
+            if (header.version < BLOB_VERSION)
+            {
+                // Appended in version 16
+                ptp_auth_defaults(blob.settings);
+                if (version_15)
+                    ESP_LOGI(TAG, "Stored web settings '%s' of version 15 read; PTP authentication has its defaults (off)", key);
                 blob.version = BLOB_VERSION;
                 blob.size = sizeof(web_settings_t);
             }
@@ -925,8 +952,9 @@ void web_settings_defaults(web_settings_t &out)
     out.ntp_key_override = true;
     out.ntp_key_count = 0;
 
-    // ---- PTP master: off ----
+    // ---- PTP master and its authentication: off ----
     ptp_defaults(out);
+    ptp_auth_defaults(out);
 }
 
 void web_settings_load_boot()
@@ -1371,6 +1399,34 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
                 FAIL("NTP key %u: letters and digits only", static_cast<unsigned>(i + 1));
     }
 
+    // ---- PTP authentication ----
+    if (s.ptp_key_count > WEB_PTP_MAX_KEYS)
+        FAIL("PTP keys: at most %u", static_cast<unsigned>(WEB_PTP_MAX_KEYS));
+    bool ptp_active_key_found = false;
+    for (size_t i = 0; i < s.ptp_key_count; ++i)
+    {
+        const web_ntp_key_t &key = s.ptp_keys[i];
+        if (key.id < 1 || key.id > 65535)
+            FAIL("PTP key %u: key ID 1 to 65535", static_cast<unsigned>(i + 1));
+        for (size_t k = 0; k < i; ++k)
+            if (s.ptp_keys[k].id == key.id)
+                FAIL("PTP key ID %lu is used twice", static_cast<unsigned long>(key.id));
+        if (strnlen(key.key, WEB_NTP_KEY_SIZE) != 32)
+            FAIL("PTP key %u: exactly 32 characters", static_cast<unsigned>(i + 1));
+        for (size_t c = 0; c < 32; ++c)
+            if (!isalnum(static_cast<unsigned char>(key.key[c])))
+                FAIL("PTP key %u: letters and digits only", static_cast<unsigned>(i + 1));
+        ptp_active_key_found = ptp_active_key_found || key.id == s.ptp_auth_active_key_id;
+    }
+    if (s.ptp_auth_active_key_id < 1)
+        FAIL("PTP active key ID: 1 to 65535");
+    if (s.ptp_auth_enabled && s.ptp_key_count == 0)
+        FAIL("PTP authentication needs at least one key");
+    if (s.ptp_auth_enabled && !ptp_active_key_found)
+        FAIL("PTP authentication: the active key ID %u is not one of the keys", static_cast<unsigned>(s.ptp_auth_active_key_id));
+    if (s.ptp_auth_required && !s.ptp_auth_enabled)
+        FAIL("PTP authentication required needs PTP authentication on");
+
     // ---- PTP master ----
     if (s.ptp_domain > WEB_PTP_DOMAIN_MAX)
         FAIL("PTP domain: 0 to %u", static_cast<unsigned>(WEB_PTP_DOMAIN_MAX));
@@ -1464,5 +1520,10 @@ bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
            a.ptp_master_selection == b.ptp_master_selection && a.ptp_clock_accuracy == b.ptp_clock_accuracy &&
            a.ptp_follower_timeout_s == b.ptp_follower_timeout_s && a.ptp_delay_req_rate_limit == b.ptp_delay_req_rate_limit &&
            a.ptp_utc_offset_s == b.ptp_utc_offset_s && a.ptp_ingress_latency_ns == b.ptp_ingress_latency_ns &&
-           a.ptp_egress_latency_ns == b.ptp_egress_latency_ns;
+           a.ptp_egress_latency_ns == b.ptp_egress_latency_ns &&
+           // PTP authentication: at once as well
+           a.ptp_auth_enabled == b.ptp_auth_enabled && a.ptp_auth_required == b.ptp_auth_required &&
+           a.ptp_auth_mutable == b.ptp_auth_mutable && a.ptp_auth_spp == b.ptp_auth_spp &&
+           a.ptp_auth_active_key_id == b.ptp_auth_active_key_id && a.ptp_key_count == b.ptp_key_count &&
+           web_constant_time_equal(reinterpret_cast<const uint8_t *>(a.ptp_keys), reinterpret_cast<const uint8_t *>(b.ptp_keys), sizeof(a.ptp_keys));
 }

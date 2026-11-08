@@ -554,8 +554,8 @@
     'Configuration': 'Konfiguration',
     '<em>Export configuration</em> saves all settings in use, the allow-list and an own TLS certificate with its key as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the key of the self-signed certificate.':
       '<em>Konfiguration exportieren</em> speichert alle verwendeten Einstellungen, die Allow-List und ein eigenes TLS-Zertifikat mit seinem Schlüssel als JSON-Datei; <em>Konfiguration importieren</em> lädt eine solche Datei und ersetzt alle Einstellungen und die Allow-List auf einmal. Nicht in der Datei: das Passwort dieser Seite und der Schlüssel des selbstsignierten Zertifikats.',
-    'The file contains secrets in clear text (MQTT password, NTP keys, the key of an own TLS certificate): keep it as safe as a password.':
-      'Die Datei enthält Geheimnisse im Klartext (MQTT-Passwort, NTP-Schlüssel, der Schlüssel eines eigenen TLS-Zertifikats): bewahren Sie sie so sicher auf wie ein Passwort.',
+    'The file contains secrets in clear text (MQTT password, NTP and PTP keys, the key of an own TLS certificate): keep it as safe as a password.':
+      'Die Datei enthält Geheimnisse im Klartext (MQTT-Passwort, NTP- und PTP-Schlüssel, der Schlüssel eines eigenen TLS-Zertifikats): bewahren Sie sie so sicher auf wie ein Passwort.',
     'Export configuration': 'Konfiguration exportieren',
     'Configuration file (.json)': 'Konfigurationsdatei (.json)',
     'The file is checked like <em>Apply</em> and saved; the device restarts if a setting needs it. Changed network settings have to be confirmed within 120 s and saved afterwards. A setting the file lacks gets its default; a file without an allow-list leaves the allow-list unchanged, a file without a TLS certificate the certificate.':
@@ -896,7 +896,30 @@
     'no address for this IP version': 'keine Adresse dieser IP-Version',
     'PTP clock accuracy: 0x20 to 0x31 or 0xFE': 'PTP-Uhrgenauigkeit: 0x20 bis 0x31 oder 0xFE',
     'PTP over UDP/IPv4 needs IPv4 (address families)': 'PTP über UDP/IPv4 braucht IPv4 (Adressfamilien)',
-    'PTP over UDP/IPv6 needs IPv6 (address families)': 'PTP über UDP/IPv6 braucht IPv6 (Adressfamilien)'
+    'PTP over UDP/IPv6 needs IPv6 (address families)': 'PTP über UDP/IPv6 braucht IPv6 (Adressfamilien)',
+
+    // ---- PTP authentication ----
+    'Authentication': 'Authentifizierung',
+    'Sign PTP messages and check signed requests (AUTHENTICATION TLV, HMAC-SHA256-128)': 'PTP-Nachrichten signieren und signierte Anfragen prüfen (AUTHENTICATION-TLV, HMAC-SHA256-128)',
+    'PTP authentication required (no answer to unsigned requests)': 'PTP-Authentifizierung erforderlich (keine Antwort auf unsignierte Anfragen)',
+    'correctionField not covered by the ICV (linuxptp allow_mutable 1)': 'correctionField nicht vom ICV abgedeckt (linuxptp allow_mutable 1)',
+    'Security parameter pointer (spp)': 'Security Parameter Pointer (spp)',
+    '0 to 255, the same as on the followers.': '0 bis 255, derselbe wie auf den Followern.',
+    'Active key ID': 'Aktive Key-ID',
+    'The key that signs the sent messages; one of the keys below.': 'Der Schlüssel, der die gesendeten Nachrichten signiert; einer der Schlüssel unten.',
+    'Followers with linuxptp: in the port section of <code>ptp4l.conf</code> set <code>spp</code>, <code>active_key_id</code> and <code>sa_file</code>; the sa_file has a <code>[security_association]</code> with the same <code>spp</code> (and <code>allow_mutable 1</code> when the switch above is on) and one line per key, e.g. <code>1 SHA256-128 ASCII:&lt;key&gt;</code>. A follower with <code>spp</code> drops every message without the TLV, so switch authentication on here first. Followers without authentication should skip the TLV (IEEE 1588 tells them to ignore unknown TLVs); check yours before you require it. Up to 4 keys; the key ring checks requests signed with any of them. Changes take effect at once with Apply.':
+      'Follower mit linuxptp: Im Port-Abschnitt von <code>ptp4l.conf</code> <code>spp</code>, <code>active_key_id</code> und <code>sa_file</code> setzen; die sa_file hat eine <code>[security_association]</code> mit demselben <code>spp</code> (und <code>allow_mutable 1</code>, wenn der Schalter oben an ist) und eine Zeile pro Schlüssel, z. B. <code>1 SHA256-128 ASCII:&lt;key&gt;</code>. Ein Follower mit <code>spp</code> verwirft jede Nachricht ohne TLV, also die Authentifizierung zuerst hier einschalten. Follower ohne Authentifizierung sollten das TLV überspringen (IEEE 1588 verlangt, unbekannte TLVs zu ignorieren); prüfen Sie Ihre, bevor Sie sie erzwingen. Bis zu 4 Schlüssel; der Schlüsselbund prüft Anfragen, die mit irgendeinem davon signiert sind. Änderungen wirken sofort mit Übernehmen.',
+    'PTP security parameter pointer: 0 to 255': 'PTP Security Parameter Pointer: 0 bis 255',
+    'PTP active key ID: 1 to 65535': 'PTP aktive Key-ID: 1 bis 65535',
+    'PTP key {n}: key ID 1 to 65535': 'PTP-Schlüssel {n}: Key-ID 1 bis 65535',
+    'PTP key {n}: exactly 32 letters or digits': 'PTP-Schlüssel {n}: genau 32 Buchstaben oder Ziffern',
+    'on: sent messages are signed, unsigned requests are dropped': 'an: gesendete Nachrichten sind signiert, unsignierte Anfragen werden verworfen',
+    'on: sent messages are signed, unsigned requests are answered': 'an: gesendete Nachrichten sind signiert, unsignierte Anfragen werden beantwortet',
+    'required, but no usable key: PTP is silent': 'erforderlich, aber kein nutzbarer Schlüssel: PTP schweigt',
+    'authentication: {r} rejected (key, ICV or TLV), {u} unsigned refused': 'Authentifizierung: {r} abgewiesen (Schlüssel, ICV oder TLV), {u} unsigniert abgewiesen',
+    'authentication required but no usable key': 'Authentifizierung erforderlich, aber kein nutzbarer Schlüssel',
+    'PTP authentication needs at least one key': 'PTP-Authentifizierung braucht mindestens einen Schlüssel',
+    'PTP authentication required needs PTP authentication on': 'PTP-Authentifizierung erforderlich braucht eingeschaltete PTP-Authentifizierung'
   };
 
   // Messages of the firmware with values (printf formats as in the C++ source; {1}, {2} = the values in order)
@@ -936,6 +959,14 @@
     ['NTP key %u: key ID 1 to 65535 and 32 letters or digits expected', 'NTP-Schlüssel {1}: Key-ID 1 bis 65535 und 32 Buchstaben oder Ziffern erwartet'],
     ['NTP key ID %lu is used twice', 'NTP-Key-ID {1} ist doppelt vergeben'],
     ['NTP keys: at most %u', 'NTP-Schlüssel: höchstens {1}'],
+    ['At most %u PTP keys', 'Höchstens {1} PTP-Schlüssel'],
+    ['PTP key %u: exactly 32 characters', 'PTP-Schlüssel {1}: genau 32 Zeichen'],
+    ['PTP key %u: key ID 1 to 65535', 'PTP-Schlüssel {1}: Key-ID 1 bis 65535'],
+    ['PTP key %u: letters and digits only', 'PTP-Schlüssel {1}: nur Buchstaben und Ziffern'],
+    ['PTP key %u: key ID 1 to 65535 and 32 letters or digits expected', 'PTP-Schlüssel {1}: Key-ID 1 bis 65535 und 32 Buchstaben oder Ziffern erwartet'],
+    ['PTP key ID %lu is used twice', 'PTP-Key-ID {1} ist doppelt vergeben'],
+    ['PTP keys: at most %u', 'PTP-Schlüssel: höchstens {1}'],
+    ['PTP authentication: the active key ID %u is not one of the keys', 'PTP-Authentifizierung: Die aktive Key-ID {1} ist keiner der Schlüssel'],
     ['Rate limit per client: 0 (no limit) to %u requests per second', 'Rate-Limit pro Client: 0 (unbegrenzt) bis {1} Anfragen pro Sekunde'],
     ['Minimum GNSS fix age: 0 (off) to %u seconds', 'Mindestalter des GNSS-Fix: 0 (aus) bis {1} Sekunden'],
     ['Minimum satellites in use: 0 (off) to %u', 'Mindestzahl verwendeter Satelliten: 0 (aus) bis {1}'],

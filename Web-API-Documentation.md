@@ -68,6 +68,8 @@ Notes on `/api/apply`:
 
 - PTP master (all fields take effect at once): `ptp_l2_enabled`, `ptp_udp4_enabled`, `ptp_udp6_enabled` (UDP/IPv4 224.0.1.129 and UDP/IPv6 ff02::181, ports 319 and 320; the IP version must be in use, see `ip_mode`), `ptp_domain` (0 to 127), `ptp_priority1`, `ptp_priority2` (0 to 255), `ptp_log_sync_interval` (-3 to 4, 2^n s), `ptp_log_announce_interval` (0 to 4), `ptp_log_min_delay_req_interval` (-3 to 6), `ptp_master_selection` (true: stand aside for a better master; false: always master), `ptp_clock_accuracy` (clockAccuracy of the Announce: 32 to 49 = 0x20 to 0x31, or 254 = unknown), `ptp_follower_timeout` (5 to 3600 s), `ptp_delay_req_rate_limit` (0 = no limit, up to 1000 per follower and second), `ptp_utc_offset` (TAI - UTC, 0 to 100 s; used while the GNSS receiver does not tell it), `ptp_ingress_latency_ns`, `ptp_egress_latency_ns` (-100000 to 100000).
 
+- PTP authentication (takes effect at once; AUTHENTICATION TLV of IEEE 1588-2019 16.14 with HMAC-SHA256-128, as linuxptp `SHA256-128`, on every PTP transport): `ptp_auth_enabled` (sign every sent message, check signed Delay_Req / Announce), `ptp_auth_required` (also drop unsigned Delay_Req / Announce; needs `ptp_auth_enabled`), `ptp_auth_mutable` (the correctionField is not covered by the ICV, linuxptp `allow_mutable 1`), `ptp_auth_spp` (0 to 255), `ptp_auth_active_key_id` (1 to 65535, must be one of the keys while authentication is on), `ptp_keys` (up to 4 `{"id": 1 to 65535, "key": "<32 letters or digits>"}`, sent like `ntp_keys`: the list replaces the keys, a missing list keeps them; the key is used as it is as the HMAC key, linuxptp `ASCII:<key>`). `400` when authentication is on without a key or with an active key ID that is not one of the keys.
+
 **Static files** need no login; only the allow-list applies: `/`, `/app.js`, `/app.css`, `/i18n.js`, `/favicon.ico`.
 
 ## Configuration file (`/api/config`)
@@ -85,7 +87,7 @@ Notes on `/api/apply`:
 ```
 
 - `timeserver_config`: the format (1). A file without it, or of another format, is refused.
-- `settings`: the settings in use, with the field names of `settings` in `/api/state`, but with the MQTT password in clear text (`mqtt_password`) in place of `mqtt_password_set`; the NTP keys (`ntp_keys`) are there as on the page. On import a field the file lacks gets its default. A file of an earlier firmware with `mqtt_uri` instead of `mqtt_broker`, `mqtt_port` and `mqtt_tls` is read as with `/api/apply`; with `mqtts://` and MQTT on it needs `mqtt_ca_pem` as well.
+- `settings`: the settings in use, with the field names of `settings` in `/api/state`, but with the MQTT password in clear text (`mqtt_password`) in place of `mqtt_password_set`; the NTP and PTP keys (`ntp_keys`, `ptp_keys`) are there as on the page. On import a field the file lacks gets its default. A file of an earlier firmware with `mqtt_uri` instead of `mqtt_broker`, `mqtt_port` and `mqtt_tls` is read as with `/api/apply`; with `mqtts://` and MQTT on it needs `mqtt_ca_pem` as well.
 - `hostname`, `firmware`, `exported` (UTC, only when the clock is set): for information, ignored on import.
 - `allow_list`: at most 8 entries as for `/api/allow-list`. On import a file without it leaves the allow-list unchanged; `[]` clears it.
 - `tls`: `mode` (`own` or `self`) and, when an own certificate is stored, `certificate` (PEM chain) and `key` (PEM, in clear text). On import a file without it leaves the certificate unchanged; `{"mode": "self"}` switches to the self-signed one (a stored own one is kept); `own` needs `certificate` and `key` and is checked as for `/api/tls`.
@@ -154,17 +156,20 @@ Read by the page every 10 s while the PTP panel is open. The PTP master serves o
 
 ```json
 {"started": true, "clock_identity": "80f1b2.fffe.d6581d", "utc_offset": 37, "utc_offset_source": "setting",
+ "authentication": {"signing": true, "required": false},
  "ports": [{"transport": "l2", "enabled": true, "state": "serving", "followers": 2, "sync": 3600, "follow_up": 3598,
             "announce": 1800, "delay_req": 7200, "delay_resp": 7190, "rate_limited": 3, "drops": 0, "invalid": 1,
-            "ignored": 12, "rx_timestamp_misses": 0, "tx_timestamp_misses": 2, "transmit_failures": 0, "foreign_announces": 0},
+            "ignored": 12, "rx_timestamp_misses": 0, "tx_timestamp_misses": 2, "transmit_failures": 0, "foreign_announces": 0,
+            "auth_rejected": 0, "unsigned_refused": 0},
            {"transport": "udp4", "enabled": false, "state": "disabled", ...},
            {"transport": "udp6", "enabled": false, "state": "disabled", ...}],
  "followers": [{"transport": "l2", "mac": "00:11:22:33:44:55", "port_identity": "001122.fffe.334455-1", "last_seen_s": 1}]}
 ```
 
 - `started`: the PTP task runs (it needs the hardware time stamps of the Ethernet MAC). `clock_identity`: EUI-64 of the Ethernet MAC address. `utc_offset`: currentUtcOffset in use, from the u-blox receiver (`gnss`) or the setting (`setting`).
-- `state`: `serving`, `disabled`, `no Ethernet link`, `no address for this IP version` (UDP), `PTP clock not mapped to true time`, `not synchronized (stratum 1 needs GNSS and PPS)`, `PPS holdover`, `listening for other masters`, `a better master is present`.
-- Counters since the start: Sync, Follow_Up, Announce and Delay_Resp sent; Delay_Req received; `rate_limited` (over the per-follower limit, not answered), `drops` (queue full or over the limit of 1000 PTP frames per second), `invalid`, `ignored` (other message types and domains), `rx_timestamp_misses` (Delay_Req without a usable receive time stamp), `tx_timestamp_misses` (Sync without a usable transmit time stamp: no Follow_Up), `transmit_failures`, `foreign_announces` (Announces of other masters in the domain).
+- `authentication`: `signing` (sent messages carry the AUTHENTICATION TLV), `required` (unsigned Delay_Req / Announce are dropped). Required without a usable key: no port serves (state `authentication required but no usable key`).
+- `state`: `serving`, `disabled`, `authentication required but no usable key`, `no Ethernet link`, `no address for this IP version` (UDP), `PTP clock not mapped to true time`, `not synchronized (stratum 1 needs GNSS and PPS)`, `PPS holdover`, `listening for other masters`, `a better master is present`.
+- Counters since the start: Sync, Follow_Up, Announce and Delay_Resp sent; Delay_Req received; `rate_limited` (over the per-follower limit, not answered), `drops` (queue full or over the limit of 1000 PTP frames per second), `invalid`, `ignored` (other message types and domains), `rx_timestamp_misses` (Delay_Req without a usable receive time stamp), `tx_timestamp_misses` (Sync without a usable transmit time stamp: no Follow_Up), `transmit_failures` (also a message that could not be signed: it is not sent unsigned), `foreign_announces` (Announces of other masters in the domain), `auth_rejected` (Delay_Req / Announce whose AUTHENTICATION TLV did not verify: unknown key, wrong ICV, other spp, malformed TLV, or authentication off), `unsigned_refused` (unsigned Delay_Req / Announce while authentication is required).
 - `followers`: followers that sent a Delay_Req within the follower timeout (at most 96), with the seconds since their last one.
 
 ## Firmware upload from a script (`/api/ote`)

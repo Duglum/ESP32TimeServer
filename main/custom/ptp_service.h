@@ -13,7 +13,9 @@
 // - it serves only while NTP is at stratum 1 without holdover (GNSS and PPS valid) and announces the quality of a
 //   GNSS-locked grandmaster (clockClass 6, timeTraceable, frequencyTraceable);
 // - TAI only at the output: TAI = UTC + currentUtcOffset (GPS - UTC + 19 from the u-blox, else the setting);
-// - Delay_Req rate limit per follower and an admission limit for all PTP frames; ingress and egress latencies.
+// - Delay_Req rate limit per follower and an admission limit for all PTP frames; ingress and egress latencies;
+// - authentication (AUTHENTICATION TLV, HMAC-SHA256-128, custom/ptp_auth.h) on every transport, keys and policy
+//   from the web settings (upstream: Ethernet only, compiled keys).
 // One task serves every transport: port 1 = Ethernet, port 2 = UDP/IPv4 (224.0.1.129), port 3 = UDP/IPv6 (ff02::181).
 // UDP frames are taken before lwIP and sent raw (with hardware time stamps); the multicast groups are joined with
 // IGMP / MLD only (no sockets: the lwIP socket limit is nearly used up), so switches with snooping forward them.
@@ -27,6 +29,9 @@
 #include "ptp_l2_protocol.h"
 #include "ptp_l3_udp.h"
 #include "ptp_message.h"
+#include "ptp_auth.h"
+
+static_assert(ptp::AUTH_TLV_SIZE == PTP_AUTH_TLV_SIZE, "one size of the AUTHENTICATION TLV");
 
 #if !PTP_FREE_RUNNING
 #error "The PTP master needs the mapping of the free-running PTP clock (PTP_FREE_RUNNING 1)"
@@ -71,6 +76,7 @@ enum class ptp_reason_t : uint8_t
 {
     serving = 0,
     disabled,
+    no_key,            // PTP authentication required, but the active key is not usable (fail closed)
     no_link,           // Ethernet down or in recovery
     no_address,        // UDP: no IPv4 address / no IPv6 link-local address (or the group could not be joined)
     clock_not_ready,   // PTP clock not running, or its mapping to true time not valid (after a set or step)
@@ -88,6 +94,8 @@ static const char *ptp_reason_name(ptp_reason_t reason)
         return "serving";
     case ptp_reason_t::disabled:
         return "disabled";
+    case ptp_reason_t::no_key:
+        return "authentication required but no usable key";
     case ptp_reason_t::no_link:
         return "no Ethernet link";
     case ptp_reason_t::no_address:
@@ -121,6 +129,8 @@ struct ptp_counters_t
     std::atomic<uint32_t> tx_timestamp_misses{0}; // Sync without a usable transmit time stamp (no Follow_Up)
     std::atomic<uint32_t> transmit_failures{0};
     std::atomic<uint32_t> foreign_announces{0};   // Announces of other masters in our domain
+    std::atomic<uint32_t> auth_rejected{0};       // Delay_Req / Announce whose AUTHENTICATION TLV does not verify
+    std::atomic<uint32_t> unsigned_refused{0};    // unsigned Delay_Req / Announce while authentication is required
 };
 
 static constexpr size_t PTP_FOLLOWERS_PER_TRANSPORT = 32;
@@ -578,7 +588,20 @@ static ptp::PortConfig ptp_port_config(const ptp_config_t &config, uint8_t trans
     port.utc_offset_valid = true;
     port.time_traceable = true;
     port.frequency_traceable = true;
+    port.authenticated = ptp_auth_available(); // minorVersionPTP 1, signed by ptp_sign()
     return port;
+}
+
+// Signs a built message (length 0: building failed) when authentication is on. false: do not send it (there is no
+// unsigned fallback; counted as a transmit failure)
+static bool ptp_sign(const ptp::PortConfig &port_config, uint8_t *message, size_t capacity, size_t &length, uint8_t transport)
+{
+    if (length == 0 || !port_config.authenticated)
+        return length != 0;
+    if (ptp_auth_append(message, capacity, &length))
+        return true;
+    s_ptp_counters[transport].transmit_failures.fetch_add(1, std::memory_order_relaxed);
+    return false;
 }
 
 static int64_t ptp_interval_us(int8_t log_interval)
@@ -605,10 +628,11 @@ static void ptp_send_sync(ptp_port_t &port, const ptp::PortConfig &port_config, 
     if (clock_gettime(CLOCK_PTP_SYSTEM, &now_raw) != 0 ||
         !ptp_tai_ns_from_raw(static_cast<int64_t>(now_raw.tv_sec) * 1000000000LL + now_raw.tv_nsec, port_config.utc_offset, origin_tai_ns))
         return;
-    uint8_t message[ptp::ANNOUNCE_SIZE];
-    const size_t length = ptp::build_sync(message, sizeof(message), port_config, sequence, origin_tai_ns);
+    uint8_t message[ptp::FOLLOW_UP_SIZE + ptp::AUTH_TLV_SIZE];
+    size_t length = ptp::build_sync(message, sizeof(message), port_config, sequence, origin_tai_ns);
     eth_mac_time_t egress{};
-    if (length == 0 || !ptp_send(transport, message, length, &egress))
+    // T1 is the hardware transmit time stamp: the time the signing takes does not enter it
+    if (!ptp_sign(port_config, message, sizeof(message), length, transport) || !ptp_send(transport, message, length, &egress))
         return;
     counters.sync_sent.fetch_add(1, std::memory_order_relaxed);
     int64_t precise_tai_ns = 0;
@@ -618,21 +642,21 @@ static void ptp_send_sync(ptp_port_t &port, const ptp::PortConfig &port_config, 
         counters.tx_timestamp_misses.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    const size_t follow_up = ptp::build_follow_up(message, sizeof(message), port_config, sequence,
-                                                  precise_tai_ns + config.egress_latency_ns);
-    if (follow_up != 0 && ptp_send(transport, message, follow_up, nullptr))
+    size_t follow_up = ptp::build_follow_up(message, sizeof(message), port_config, sequence,
+                                            precise_tai_ns + config.egress_latency_ns);
+    if (ptp_sign(port_config, message, sizeof(message), follow_up, transport) && ptp_send(transport, message, follow_up, nullptr))
         counters.follow_up_sent.fetch_add(1, std::memory_order_relaxed);
 }
 
 static void ptp_send_announce(ptp_port_t &port, const ptp::PortConfig &port_config, uint8_t transport)
 {
-    uint8_t message[ptp::ANNOUNCE_SIZE];
+    uint8_t message[ptp::ANNOUNCE_SIZE + ptp::AUTH_TLV_SIZE];
     struct timespec now_raw{};
     int64_t origin_tai_ns = 0;
     if (clock_gettime(CLOCK_PTP_SYSTEM, &now_raw) == 0)
         (void)ptp_tai_ns_from_raw(static_cast<int64_t>(now_raw.tv_sec) * 1000000000LL + now_raw.tv_nsec, port_config.utc_offset, origin_tai_ns);
-    const size_t length = ptp::build_announce(message, sizeof(message), port_config, port.announce_sequence++, origin_tai_ns);
-    if (length != 0 && ptp_send(transport, message, length, nullptr))
+    size_t length = ptp::build_announce(message, sizeof(message), port_config, port.announce_sequence++, origin_tai_ns);
+    if (ptp_sign(port_config, message, sizeof(message), length, transport) && ptp_send(transport, message, length, nullptr))
         s_ptp_counters[transport].announce_sent.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -644,17 +668,26 @@ static void ptp_handle_item(const ptp_rx_item_t &item, ptp_port_t &port, const p
     ptp::ParsedMessage parsed{};
     const uint8_t *source_mac = item.data + 6;
     ptp::MessageKind kind = ptp::MessageKind::Invalid;
+    // The PTP message in the frame (an AUTHENTICATION TLV passes the parsers' length checks, ptp_auth_verify() checks it)
+    const uint8_t *message = nullptr;
+    size_t message_length = 0;
     if (item.transport == PTP_TRANSPORT_L2)
-        kind = ptp::parse_l2_frame(item.data, item.length, config.domain, s_ptp_identity, parsed);
+    {
+        kind = ptp::parse_l2_frame(item.data, item.length, config.domain, s_ptp_identity, parsed, true);
+        message = item.data + 14;
+        message_length = (static_cast<size_t>(item.data[16]) << 8) | item.data[17];
+    }
     else
     {
         // Checksums, lengths, group and ports; the IP version must match the transport. Delay_Req on 319, Announce on
         // 320 (otherwise Invalid)
         ptp_l3_udp::Datagram datagram{};
-        kind = ptp_l3_udp::decode(item.data, item.length, config.domain, s_ptp_identity, datagram, parsed);
+        kind = ptp_l3_udp::decode(item.data, item.length, config.domain, s_ptp_identity, datagram, parsed, true);
         if (kind != ptp::MessageKind::Ignored && kind != ptp::MessageKind::Invalid &&
             datagram.ipv6 != (item.transport == PTP_TRANSPORT_UDP6))
             kind = ptp::MessageKind::Invalid;
+        message = datagram.message;
+        message_length = datagram.length;
     }
     if (kind == ptp::MessageKind::Invalid)
     {
@@ -664,6 +697,19 @@ static void ptp_handle_item(const ptp_rx_item_t &item, ptp_port_t &port, const p
     if (kind == ptp::MessageKind::Ignored)
     {
         counters.ignored.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    // Authentication of the Delay_Req or Announce: unsigned passes unless it is required; a TLV must verify (also an
+    // Announce of another master, so an unauthenticated master cannot make this one stand aside while it is required)
+    const ptp_auth_result_t authentication = ptp_auth_verify(message, message_length);
+    if (authentication == ptp_auth_result_t::authentication_required)
+    {
+        counters.unsigned_refused.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (authentication != ptp_auth_result_t::valid && authentication != ptp_auth_result_t::unauthenticated)
+    {
+        counters.auth_rejected.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (kind == ptp::MessageKind::Announce)
@@ -690,10 +736,11 @@ static void ptp_handle_item(const ptp_rx_item_t &item, ptp_port_t &port, const p
         counters.rate_limited.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    uint8_t message[ptp::DELAY_RESP_SIZE];
-    const size_t length = ptp::build_delay_resp(message, sizeof(message), port_config, parsed.sequence_id, parsed.correction,
-                                                parsed.source_port_identity, receive_tai_ns - config.ingress_latency_ns);
-    if (length == 0 || !ptp_send(item.transport, message, length, nullptr))
+    uint8_t response[ptp::DELAY_RESP_SIZE + ptp::AUTH_TLV_SIZE];
+    size_t length = ptp::build_delay_resp(response, sizeof(response), port_config, parsed.sequence_id, parsed.correction,
+                                          parsed.source_port_identity, receive_tai_ns - config.ingress_latency_ns);
+    if (!ptp_sign(port_config, response, sizeof(response), length, item.transport) ||
+        !ptp_send(item.transport, response, length, nullptr))
         return;
     counters.delay_resp_sent.fetch_add(1, std::memory_order_relaxed);
     if (xSemaphoreTake(ptp_mutex(), portMAX_DELAY) == pdTRUE)
@@ -761,7 +808,9 @@ static void ptp_service_task(void *parameter)
             }
             port.enabled = enabled;
 
-            ptp_reason_t reason = !enabled ? ptp_reason_t::disabled : time_reason;
+            ptp_reason_t reason = !enabled                                        ? ptp_reason_t::disabled
+                                  : ptp_auth_required() && !ptp_auth_available() ? ptp_reason_t::no_key
+                                                                                 : time_reason;
             if (reason == ptp_reason_t::serving && transport != PTP_TRANSPORT_L2 && !s_ptp_udp[transport - PTP_TRANSPORT_UDP4].ready)
                 reason = ptp_reason_t::no_address;
             if (reason == ptp_reason_t::serving && config.master_selection)
@@ -824,7 +873,8 @@ static void ptp_service_task(void *parameter)
                     continue;
                 const ptp_counters_t &c = s_ptp_counters[transport];
                 ESP_LOGI(TAG, "PTP %s: %s; sync %lu follow_up %lu announce %lu delay_req %lu delay_resp %lu rate_limited %lu "
-                              "drops %lu invalid %lu ignored %lu rx_ts_miss %lu tx_ts_miss %lu tx_fail %lu foreign_announce %lu",
+                              "drops %lu invalid %lu ignored %lu rx_ts_miss %lu tx_ts_miss %lu tx_fail %lu foreign_announce %lu "
+                              "auth_rejected %lu unsigned_refused %lu",
                          PTP_TRANSPORT_NAMES[transport], ptp_reason_name(ports[transport].reason),
                          static_cast<unsigned long>(c.sync_sent.load()), static_cast<unsigned long>(c.follow_up_sent.load()),
                          static_cast<unsigned long>(c.announce_sent.load()), static_cast<unsigned long>(c.delay_req_received.load()),
@@ -832,7 +882,8 @@ static void ptp_service_task(void *parameter)
                          static_cast<unsigned long>(c.queue_drops.load()), static_cast<unsigned long>(c.invalid.load()),
                          static_cast<unsigned long>(c.ignored.load()), static_cast<unsigned long>(c.rx_timestamp_misses.load()),
                          static_cast<unsigned long>(c.tx_timestamp_misses.load()), static_cast<unsigned long>(c.transmit_failures.load()),
-                         static_cast<unsigned long>(c.foreign_announces.load()));
+                         static_cast<unsigned long>(c.foreign_announces.load()), static_cast<unsigned long>(c.auth_rejected.load()),
+                         static_cast<unsigned long>(c.unsigned_refused.load()));
             }
         }
 #endif
@@ -891,6 +942,34 @@ static void ptp_apply_settings(const web_settings_t &settings)
     config.utc_offset_s = settings.ptp_utc_offset_s;
     config.ingress_latency_ns = settings.ptp_ingress_latency_ns;
     config.egress_latency_ns = settings.ptp_egress_latency_ns;
+
+    // Authentication first: the task picks the new policy up with its next message
+    ptp_auth_config_t auth;
+    auth.enabled = settings.ptp_auth_enabled;
+    auth.required = settings.ptp_auth_required;
+    auth.mutable_correction = settings.ptp_auth_mutable;
+    auth.spp = settings.ptp_auth_spp;
+    auth.active_key_id = settings.ptp_auth_active_key_id;
+    ptp_auth_key_input_t keys[WEB_PTP_MAX_KEYS];
+    const size_t key_count = std::min<size_t>(settings.ptp_key_count, WEB_PTP_MAX_KEYS);
+    for (size_t i = 0; i < key_count; ++i)
+        keys[i] = {settings.ptp_keys[i].id, settings.ptp_keys[i].key};
+    const bool signing = ptp_auth_configure(auth, keys, key_count);
+    // One console line when the authentication changes (Apply of other settings stays quiet)
+    static int s_last_auth_state = -1;
+    const int auth_state = !auth.enabled ? 0 : (signing ? 1 : 2) + (auth.required ? 2 : 0) + (auth.mutable_correction ? 4 : 0) +
+                                                   8 * auth.spp + 2048 * static_cast<int>(auth.active_key_id);
+    if (auth_state != s_last_auth_state)
+    {
+        const int previous = s_last_auth_state;
+        s_last_auth_state = auth_state;
+        if (signing)
+            ESP_LOGI(TAG, "PTP authentication: on, key %lu signs (HMAC-SHA256-128, spp %u)%s%s", static_cast<unsigned long>(auth.active_key_id),
+                     static_cast<unsigned>(auth.spp), auth.required ? ", unsigned requests are dropped" : ", unsigned requests are answered",
+                     auth.mutable_correction ? ", correctionField not covered" : "");
+        else if (auth.enabled || previous > 0)
+            ESP_LOGI(TAG, "PTP authentication: %s", auth.enabled ? "on, but not usable (see the error above)" : "off");
+    }
     ptp_set_config(config);
 }
 
@@ -900,6 +979,8 @@ void app_get_ptp_status(web_ptp_status_t &status)
     memcpy(status.identity, s_ptp_identity, sizeof(status.identity));
     status.utc_offset = s_ptp_utc_offset_in_use.load(std::memory_order_relaxed);
     status.utc_offset_from_gnss = s_ptp_utc_offset_from_gnss.load(std::memory_order_relaxed);
+    status.auth_signing = ptp_auth_available();
+    status.auth_required = ptp_auth_required();
     for (size_t t = 0; t < PTP_TRANSPORT_COUNT && t < WEB_PTP_TRANSPORTS; ++t)
     {
         const ptp_counters_t &c = s_ptp_counters[t];
@@ -921,6 +1002,8 @@ void app_get_ptp_status(web_ptp_status_t &status)
         port.tx_timestamp_misses = c.tx_timestamp_misses.load(std::memory_order_relaxed);
         port.transmit_failures = c.transmit_failures.load(std::memory_order_relaxed);
         port.foreign_announces = c.foreign_announces.load(std::memory_order_relaxed);
+        port.auth_rejected = c.auth_rejected.load(std::memory_order_relaxed);
+        port.unsigned_refused = c.unsigned_refused.load(std::memory_order_relaxed);
     }
     status.follower_count = 0;
     const int64_t now_us = esp_timer_get_time();
