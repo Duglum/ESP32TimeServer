@@ -7,6 +7,7 @@ set(MAIN_SOURCES
         "auth/radius_proto.cpp"
         "auth/radius_task.cpp"
         "auth/totp.cpp"
+        "auth/totp_store.cpp"
         "custom/app_metadata.cpp"
         "custom/crash_dump.cpp"
         "custom/gnss_console.cpp"

@@ -299,9 +299,11 @@ bool web_settings_get_saved(web_settings_t &out);
 esp_err_t web_settings_save(const web_settings_t &in);
 esp_err_t web_settings_save_oneshot(const web_settings_t &in, bool network_confirm_required);
 
-// Erases the saved settings, the one-shot set and the web admin password and allow-list (back to the defaults).
-// The TLS identity and the calibration namespaces are kept.
+// Erases the saved settings, the one-shot set, the web admin password and allow-list and the TOTP tokens (back to the
+// defaults). The TLS identity and the calibration namespaces are kept.
 esp_err_t web_settings_factory_reset();
+// Bytes of one stored settings set in NVS (the saved and the one-shot set have this size)
+size_t web_settings_stored_size();
 
 // Validation of a complete settings set (err gets a short English message for the page)
 bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size);

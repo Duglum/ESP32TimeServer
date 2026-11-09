@@ -5,6 +5,7 @@
 //
 
 #include "web_settings.h"
+#include "auth/totp_store.h"
 
 #include <cctype>
 #include <cstddef>
@@ -1133,7 +1134,7 @@ esp_err_t web_settings_save_oneshot(const web_settings_t &in, bool network_confi
 esp_err_t web_settings_factory_reset()
 {
     esp_err_t result = ESP_OK;
-    for (const char *ns : {NVS_NAMESPACE, AUTH_NVS_NAMESPACE})
+    for (const char *ns : {NVS_NAMESPACE, AUTH_NVS_NAMESPACE, TOTP_NVS_NAMESPACE})
     {
         nvs_handle_t handle = 0;
         esp_err_t err = nvs_open(ns, NVS_READWRITE, &handle);
@@ -1578,6 +1579,11 @@ namespace
                w.totp_radius == v.totp_radius && w.totp_enroll == v.totp_enroll;
     }
 } // namespace
+
+size_t web_settings_stored_size()
+{
+    return sizeof(settings_blob_t);
+}
 
 bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
 {

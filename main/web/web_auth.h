@@ -68,6 +68,8 @@ void web_auth_end_session(const char *token);
 // The login of the session of token (user name, by RADIUS, with the second factor); false if there is none. The idle
 // timer is not refreshed.
 bool web_auth_session_login(const char *token, char *user, size_t user_size, bool &radius, bool &totp);
+// A random id of the session of token (0 = none; not derived from the token), without refreshing its idle timer
+uint32_t web_auth_session_id(const char *token);
 void web_auth_end_all_sessions();
 
 // ---- Allow-list ----

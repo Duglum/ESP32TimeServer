@@ -66,6 +66,7 @@ namespace
         char user[WEB_SESSION_USER_SIZE]; // "admin" or the RADIUS user name
         bool radius;                      // logged in by RADIUS (else with the local password)
         bool totp;                        // the login passed the second factor
+        uint32_t id;                      // random, never 0
     };
 
     struct throttle_entry_t
@@ -491,8 +492,17 @@ bool web_auth_create_session(char *token, char *csrf, const char *user, bool rad
     snprintf(slot->user, sizeof(slot->user), "%s", user != nullptr ? user : "admin");
     slot->radius = radius;
     slot->totp = totp;
+    do
+        slot->id = esp_random();
+    while (slot->id == 0);
     slot->used = true;
     return true;
+}
+
+uint32_t web_auth_session_id(const char *token)
+{
+    const session_t *session = find_session(token);
+    return session != nullptr ? session->id : 0;
 }
 
 bool web_auth_session_login(const char *token, char *user, size_t user_size, bool &radius, bool &totp)

@@ -9,6 +9,7 @@
 
 #include "web_server.h"
 #include "auth/radius_task.h"
+#include "auth/totp_store.h"
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
 #include "custom/gnss_uart.h"
@@ -43,6 +44,9 @@ extern "C"
 #include "mbedtls/platform_util.h"
 #include "mbedtls/ssl_ciphersuites.h"
 #include "mbedtls/x509_crt.h"
+#include "nvs.h"
+#include "esp_random.h"
+#include "third_party/qrcodegen/qrcodegen.h"
 }
 
 extern const char index_html_start[] asm("_binary_index_html_start");
@@ -1345,11 +1349,169 @@ namespace
             snprintf(err, err_size, "The local password can only be switched off in a session that was logged in by RADIUS.");
             return false;
         }
+        if (candidate.web_login.totp_local && !running.web_login.totp_local && !totp_store_has(AUTH_WEB_LOCAL_USER))
+        {
+            snprintf(err, err_size, "Set up a TOTP token for admin first: the local login would be impossible without it.");
+            return false;
+        }
         return true;
     }
 
-    // The login is complete: the session (the throttling forgets the failures of the source)
-    esp_err_t login_open_session(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius, bool totp)
+    // ---- TOTP: the second step of a login and new tokens (auth/totp_store.h) ----
+    constexpr int64_t TOTP_PENDING_US = 120LL * 1000000LL; // the code within 2 minutes of the password
+    constexpr int64_t TOTP_ENROLL_US = 600LL * 1000000LL;  // a new token is confirmed within 10 minutes
+    constexpr unsigned TOTP_TRIES = 3;                     // wrong codes per password: then the password again
+    constexpr size_t TOTP_PENDING_MAX = 4;
+    constexpr size_t TOTP_PENDING_ID_HEX = 32;
+
+    // A login whose password was right and that waits for its code (or for a new token: totp_enroll)
+    struct totp_pending_t
+    {
+        bool used = false;
+        char id[TOTP_PENDING_ID_HEX + 1] = "";
+        uint8_t source[16] = {};
+        char user[TOTP_USER_SIZE] = "";
+        bool radius = false;
+        bool enroll = false; // a new token: secret is its key, stored with the first right code
+        uint8_t secret[TOTP_SECRET_SIZE] = {};
+        unsigned tries = 0;
+        int64_t expires_us = 0;
+        char codes[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE] = {}; // of a new token, for the answer
+    };
+    totp_pending_t *s_totp_pending = nullptr; // TOTP_PENDING_MAX entries, allocated at the start (server task only)
+
+    // A token being set up on the page (one per web session)
+    struct totp_enroll_t
+    {
+        bool used = false;
+        uint32_t session = 0;
+        char user[TOTP_USER_SIZE] = "";
+        uint8_t secret[TOTP_SECRET_SIZE] = {};
+        int64_t expires_us = 0;
+    };
+    totp_enroll_t s_totp_enroll[4];
+
+    void wipe(totp_pending_t &p)
+    {
+        mbedtls_platform_zeroize(&p, sizeof(p));
+        p = totp_pending_t{};
+    }
+
+    totp_pending_t *pending_new(const uint8_t source[16])
+    {
+        if (s_totp_pending == nullptr)
+            return nullptr;
+        const int64_t now = esp_timer_get_time();
+        totp_pending_t *slot = nullptr;
+        for (size_t i = 0; i < TOTP_PENDING_MAX; ++i)
+        {
+            totp_pending_t &p = s_totp_pending[i];
+            if (p.used && (now > p.expires_us || memcmp(p.source, source, 16) == 0))
+                wipe(p); // expired, or an earlier login of the same source
+            if (!p.used && slot == nullptr)
+                slot = &p;
+        }
+        if (slot == nullptr) // all in use: the one that expires first
+        {
+            slot = &s_totp_pending[0];
+            for (size_t i = 1; i < TOTP_PENDING_MAX; ++i)
+                if (s_totp_pending[i].expires_us < slot->expires_us)
+                    slot = &s_totp_pending[i];
+            wipe(*slot);
+        }
+        slot->used = true;
+        web_random_hex(slot->id, TOTP_PENDING_ID_HEX / 2);
+        memcpy(slot->source, source, 16);
+        slot->expires_us = now + TOTP_PENDING_US;
+        return slot;
+    }
+
+    totp_pending_t *pending_find(const char *id, const uint8_t source[16])
+    {
+        if (s_totp_pending == nullptr || id == nullptr || strlen(id) != TOTP_PENDING_ID_HEX)
+            return nullptr;
+        const int64_t now = esp_timer_get_time();
+        totp_pending_t *found = nullptr;
+        for (size_t i = 0; i < TOTP_PENDING_MAX; ++i)
+        {
+            totp_pending_t &p = s_totp_pending[i];
+            if (p.used && now > p.expires_us)
+                wipe(p);
+            if (p.used && web_constant_time_equal(reinterpret_cast<const uint8_t *>(p.id), reinterpret_cast<const uint8_t *>(id), TOTP_PENDING_ID_HEX) &&
+                memcmp(p.source, source, 16) == 0 && found == nullptr)
+                found = &p;
+        }
+        return found;
+    }
+
+    // The QR code of an otpauth URI: {"size": n, "rows": ["<hex>", ...]} (one row per line, the left module the
+    // highest bit of the first hex digit, a dark module 1); error correction M, version 15 at most
+    bool add_qr(cJSON *object, const char *uri)
+    {
+        constexpr size_t SIZE = qrcodegen_BUFFER_LEN_FOR_VERSION(15);
+        uint8_t *qr = new (std::nothrow) uint8_t[SIZE];
+        uint8_t *temp = new (std::nothrow) uint8_t[SIZE];
+        const bool ok = qr != nullptr && temp != nullptr &&
+                        qrcodegen_encodeText(uri, temp, qr, qrcodegen_Ecc_MEDIUM, 1, 15, qrcodegen_Mask_AUTO, true);
+        if (ok)
+        {
+            const int size = qrcodegen_getSize(qr);
+            cJSON *code = cJSON_AddObjectToObject(object, "qr");
+            cJSON_AddNumberToObject(code, "size", size);
+            cJSON *rows = cJSON_AddArrayToObject(code, "rows");
+            char row[(21 + 4 * 14 + 3) / 4 + 1];
+            static constexpr char HEX[] = "0123456789abcdef";
+            for (int y = 0; y < size; ++y)
+            {
+                int at = 0;
+                for (int x = 0; x < size; x += 4)
+                {
+                    unsigned nibble = 0;
+                    for (int b = 0; b < 4; ++b)
+                        nibble = (nibble << 1) | (x + b < size && qrcodegen_getModule(qr, x + b, y) ? 1u : 0u);
+                    row[at++] = HEX[nibble];
+                }
+                row[at] = '\0';
+                cJSON_AddItemToArray(rows, cJSON_CreateString(row));
+            }
+        }
+        delete[] qr;
+        delete[] temp;
+        return ok;
+    }
+
+    // The key of a new token for the page: base32 (in groups of 4), the otpauth URI and its QR code
+    bool add_new_token(cJSON *object, const char *user, const uint8_t secret[TOTP_SECRET_SIZE])
+    {
+        char host[WEB_HOSTNAME_MAX_LEN + 1];
+        web_settings_hostname(web_settings_boot(), host, sizeof(host));
+        char key[TOTP_BASE32_SIZE];
+        char uri[TOTP_URI_SIZE];
+        if (totp_base32_encode(secret, TOTP_SECRET_SIZE, key, sizeof(key)) == 0 || !totp_uri(host, user, secret, TOTP_SECRET_SIZE, uri, sizeof(uri)))
+            return false;
+        char grouped[TOTP_BASE32_SIZE + TOTP_BASE32_SIZE / 4];
+        size_t at = 0;
+        for (size_t i = 0; key[i] != '\0'; ++i)
+        {
+            if (i > 0 && i % 4 == 0)
+                grouped[at++] = ' ';
+            grouped[at++] = key[i];
+        }
+        grouped[at] = '\0';
+        cJSON_AddStringToObject(object, "user", user);
+        cJSON_AddStringToObject(object, "secret", grouped);
+        cJSON_AddStringToObject(object, "uri", uri);
+        const bool ok = add_qr(object, uri);
+        mbedtls_platform_zeroize(key, sizeof(key));
+        mbedtls_platform_zeroize(grouped, sizeof(grouped));
+        mbedtls_platform_zeroize(uri, sizeof(uri));
+        return ok;
+    }
+
+    // The login is complete: the session (the throttling forgets the failures of the source). codes: the recovery
+    // codes of a token set up with this login.
+    esp_err_t login_open_session(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius, bool totp,
+                                 const char (*codes)[TOTP_RECOVERY_TEXT_SIZE] = nullptr)
     {
         web_auth_record_success(peer);
         char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
@@ -1363,16 +1525,67 @@ namespace
         cJSON_AddStringToObject(reply, "csrf", csrf);
         cJSON_AddStringToObject(reply, "user", user);
         cJSON_AddBoolToObject(reply, "radius", radius);
+        if (codes != nullptr)
+        {
+            cJSON *list = cJSON_AddArrayToObject(reply, "recovery_codes");
+            for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
+                cJSON_AddItemToArray(list, cJSON_CreateString(codes[i]));
+        }
         const esp_err_t err = send_json(req, "200 OK", reply);
         memset(token, 0, sizeof(token));
         memset(cookie, 0, sizeof(cookie));
         return err;
     }
 
-    // A login that passed its check (the password)
+    // A login that passed its first check (the password): the second factor when the settings ask for one, else the
+    // session. The throttling forgets the failures of the source only when the whole login is done.
     esp_err_t login_succeeded(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius)
     {
-        return login_open_session(req, peer, user, radius, false);
+        web_settings_t *running = new (std::nothrow) web_settings_t{};
+        if (running == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        web_settings_get_running(*running);
+        const web_login_settings_t methods = running->web_login;
+        delete running;
+        const bool required = radius ? methods.totp_radius : methods.totp_local;
+        if (!required)
+            return login_open_session(req, peer, user, radius, false);
+        const bool has_token = totp_store_has(user);
+        if (!has_token && !(radius && methods.totp_enroll))
+        {
+            web_auth_record_failed_check(peer);
+            char address[INET6_ADDRSTRLEN];
+            format_address(peer, address, sizeof(address));
+            ESP_LOGW(TAG, "Web admin: login of '%s' from %s refused: no TOTP token for this user", user, address);
+            return send_error(req, "401 Unauthorized", "No TOTP token is set up for this user: ask an administrator");
+        }
+        uint8_t source[16];
+        to_mapped(peer, source);
+        totp_pending_t *p = pending_new(source);
+        if (p == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        snprintf(p->user, sizeof(p->user), "%s", user);
+        p->radius = radius;
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddStringToObject(reply, "pending", p->id);
+        cJSON_AddStringToObject(reply, "user", user);
+        if (has_token)
+            cJSON_AddBoolToObject(reply, "totp", true);
+        else
+        {
+            // The first login of a RADIUS user without a token: a new one, stored with its first right code
+            p->enroll = true;
+            p->expires_us = esp_timer_get_time() + TOTP_ENROLL_US;
+            esp_fill_random(p->secret, sizeof(p->secret));
+            cJSON_AddBoolToObject(reply, "totp_enroll", true);
+            if (!add_new_token(reply, user, p->secret))
+            {
+                wipe(*p);
+                cJSON_Delete(reply);
+                return send_error(req, "500 Internal Server Error", "The new TOTP token could not be made");
+            }
+        }
+        return send_json(req, "200 OK", reply);
     }
 
     // A refused login (the throttling has counted it): the same answer for a wrong user name and a wrong password
@@ -1505,6 +1718,234 @@ namespace
         return result;
     }
 
+    // The second step of a login: {"pending": "...", "code": "123456" or a recovery code}
+    esp_err_t handle_login_totp(httpd_req_t *req)
+    {
+        struct sockaddr_storage peer{};
+        if (!peer_address(req, peer, false))
+            return send_error(req, "400 Bad Request", "No peer address");
+        if (!same_origin(req))
+            return send_error(req, "403 Forbidden", "Request rejected (origin)");
+        const uint32_t wait_s = web_auth_login_wait_seconds(peer);
+        if (wait_s > 0)
+        {
+            char retry[16];
+            snprintf(retry, sizeof(retry), "%lu", static_cast<unsigned long>(wait_s));
+            httpd_resp_set_hdr(req, "Retry-After", retry);
+            cJSON *root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "error", "Too many failed logins, please wait");
+            cJSON_AddNumberToObject(root, "retry_after", wait_s);
+            return send_json(req, "429 Too Many Requests", root);
+        }
+        cJSON *root = read_json(req);
+        if (root == nullptr)
+            return ESP_OK;
+        uint8_t source[16];
+        to_mapped(peer, source);
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "pending");
+        cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+        totp_pending_t *p = pending_find(cJSON_IsString(id) ? id->valuestring : nullptr, source);
+        char typed[24] = "";
+        if (cJSON_IsString(code) && strlen(code->valuestring) < sizeof(typed))
+            snprintf(typed, sizeof(typed), "%s", code->valuestring);
+        if (cJSON_IsString(code))
+            mbedtls_platform_zeroize(code->valuestring, strlen(code->valuestring));
+        cJSON_Delete(root);
+        if (p == nullptr)
+            return send_error(req, "401 Unauthorized", "The login has expired: log in again");
+        bool right = false;
+        if (p->enroll)
+        {
+            uint64_t step = 0;
+            const time_t now = time(nullptr);
+            right = totp_store_time_ok() && totp_verify(p->secret, sizeof(p->secret), static_cast<int64_t>(now), typed, 0, step);
+            if (right)
+            {
+                const esp_err_t err = totp_store_add(p->user, p->secret, p->codes);
+                if (err != ESP_OK)
+                {
+                    wipe(*p);
+                    return send_error(req, "507 Insufficient Storage",
+                                      err == ESP_ERR_NO_MEM ? "All TOTP tokens are in use" : "The TOTP token could not be stored (NVS full?)");
+                }
+            }
+        }
+        else
+            right = totp_store_check(p->user, typed) != totp_check_t::wrong && totp_store_has(p->user);
+        mbedtls_platform_zeroize(typed, sizeof(typed));
+        if (!right)
+        {
+            web_auth_record_failed_check(peer);
+            char address[INET6_ADDRSTRLEN];
+            format_address(peer, address, sizeof(address));
+            ESP_LOGW(TAG, "Web admin: failed login from %s (user '%s': wrong TOTP code)", address, p->user);
+            if (++p->tries >= TOTP_TRIES)
+            {
+                wipe(*p);
+                return send_error(req, "401 Unauthorized", "Wrong code: log in again");
+            }
+            return send_error(req, "401 Unauthorized", "Wrong code");
+        }
+        const esp_err_t err = login_open_session(req, peer, p->user, p->radius, true, p->enroll ? p->codes : nullptr);
+        wipe(*p);
+        return err;
+    }
+
+    // ---- The tokens on the page (Security): set up, confirm, delete ----
+    esp_err_t handle_totp_enroll(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        cJSON *root = read_json(req);
+        if (root == nullptr)
+            return ESP_OK;
+        const cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
+        char name[TOTP_USER_SIZE] = "";
+        const bool valid = cJSON_IsString(user) && radius_user_valid(user->valuestring, strlen(user->valuestring));
+        if (valid)
+            snprintf(name, sizeof(name), "%s", user->valuestring);
+        cJSON_Delete(root);
+        if (!valid)
+            return send_error(req, "400 Bad Request", "User name: 1 to 64 characters, no control characters");
+        if (!totp_store_has(name) && totp_store_count() >= TOTP_TOKENS_MAX)
+            return send_error(req, "409 Conflict", "All TOTP tokens are in use: delete one first");
+        const uint32_t session = web_auth_session_id(token);
+        totp_enroll_t *slot = &s_totp_enroll[0];
+        for (totp_enroll_t &e : s_totp_enroll)
+        {
+            if (e.used && e.session == session)
+            {
+                slot = &e;
+                break;
+            }
+            if (!e.used || e.expires_us < slot->expires_us)
+                slot = &e;
+        }
+        mbedtls_platform_zeroize(slot, sizeof(*slot));
+        *slot = totp_enroll_t{};
+        slot->used = true;
+        slot->session = session;
+        snprintf(slot->user, sizeof(slot->user), "%s", name);
+        esp_fill_random(slot->secret, sizeof(slot->secret));
+        slot->expires_us = esp_timer_get_time() + TOTP_ENROLL_US;
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "replaces", totp_store_has(name));
+        if (!add_new_token(reply, name, slot->secret))
+        {
+            cJSON_Delete(reply);
+            return send_error(req, "500 Internal Server Error", "The new TOTP token could not be made");
+        }
+        return send_json(req, "200 OK", reply);
+    }
+
+    esp_err_t handle_totp_confirm(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        cJSON *root = read_json(req);
+        if (root == nullptr)
+            return ESP_OK;
+        const cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
+        const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+        const uint32_t session = web_auth_session_id(token);
+        const int64_t now_us = esp_timer_get_time();
+        totp_enroll_t *slot = nullptr;
+        for (totp_enroll_t &e : s_totp_enroll)
+            if (e.used && e.session == session && now_us < e.expires_us && cJSON_IsString(user) && strcmp(e.user, user->valuestring) == 0)
+                slot = &e;
+        uint64_t step = 0;
+        const bool right = slot != nullptr && cJSON_IsString(code) && totp_store_time_ok() &&
+                           totp_verify(slot->secret, sizeof(slot->secret), static_cast<int64_t>(time(nullptr)), code->valuestring, 0, step);
+        cJSON_Delete(root);
+        if (slot == nullptr)
+            return send_error(req, "409 Conflict", "Set up the token again (it has expired)");
+        if (!totp_store_time_ok())
+            return send_error(req, "409 Conflict", "The clock of the device is not set (no GNSS time yet): TOTP codes cannot be checked yet");
+        if (!right)
+            return send_error(req, "400 Bad Request", "Wrong code: check the time of the phone and try the next code");
+        char (*codes)[TOTP_RECOVERY_TEXT_SIZE] = new (std::nothrow) char[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE];
+        if (codes == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        const esp_err_t err = totp_store_add(slot->user, slot->secret, codes);
+        char name[TOTP_USER_SIZE];
+        snprintf(name, sizeof(name), "%s", slot->user);
+        mbedtls_platform_zeroize(slot, sizeof(*slot));
+        *slot = totp_enroll_t{};
+        if (err != ESP_OK)
+        {
+            delete[] codes;
+            return send_error(req, "507 Insufficient Storage",
+                              err == ESP_ERR_NO_MEM ? "All TOTP tokens are in use" : "The TOTP token could not be stored (NVS full?)");
+        }
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddStringToObject(reply, "user", name);
+        cJSON *list = cJSON_AddArrayToObject(reply, "recovery_codes");
+        for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
+            cJSON_AddItemToArray(list, cJSON_CreateString(codes[i]));
+        mbedtls_platform_zeroize(codes, sizeof(char[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE]));
+        delete[] codes;
+        return send_json(req, "200 OK", reply);
+    }
+
+    esp_err_t handle_totp_delete(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        cJSON *root = read_json(req);
+        if (root == nullptr)
+            return ESP_OK;
+        const cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
+        char name[TOTP_USER_SIZE] = "";
+        if (cJSON_IsString(user) && strlen(user->valuestring) < sizeof(name))
+            snprintf(name, sizeof(name), "%s", user->valuestring);
+        cJSON_Delete(root);
+        web_settings_t *running = new (std::nothrow) web_settings_t{};
+        if (running == nullptr)
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        web_settings_get_running(*running);
+        const web_login_settings_t methods = running->web_login;
+        delete running;
+        char own[WEB_SESSION_USER_SIZE] = "";
+        bool radius = false;
+        bool totp = false;
+        web_auth_session_login(token, own, sizeof(own), radius, totp);
+        // No lock-out: the token of the local user while the second factor is required for it, and the own token
+        // while it is required for the own login
+        if (strcmp(name, AUTH_WEB_LOCAL_USER) == 0 && methods.totp_local)
+            return send_error(req, "409 Conflict", "Switch off \"Required for the local user\" first: admin could not log in without the token");
+        if (strcmp(name, own) == 0 && (radius ? methods.totp_radius : methods.totp_local))
+            return send_error(req, "409 Conflict", "Your own token cannot be deleted while the second factor is required for your login");
+        if (!totp_store_remove(name))
+            return send_error(req, "404 Not Found", "No token for this user");
+        return send_ok(req, "Token deleted.");
+    }
+
+    // "totp" of /api/state
+    void add_totp(cJSON *object)
+    {
+        cJSON_AddBoolToObject(object, "time_ok", totp_store_time_ok());
+        cJSON_AddNumberToObject(object, "max", TOTP_TOKENS_MAX);
+        cJSON *list = cJSON_AddArrayToObject(object, "tokens");
+        totp_token_info_t *tokens = new (std::nothrow) totp_token_info_t[TOTP_TOKENS_MAX];
+        if (tokens == nullptr)
+            return;
+        const size_t n = totp_store_list(tokens, TOTP_TOKENS_MAX);
+        for (size_t i = 0; i < n; ++i)
+        {
+            cJSON *row = cJSON_CreateObject();
+            cJSON_AddStringToObject(row, "user", tokens[i].user);
+            cJSON_AddNumberToObject(row, "created", static_cast<double>(tokens[i].created_s));
+            cJSON_AddNumberToObject(row, "last_used", static_cast<double>(tokens[i].last_used_s));
+            cJSON_AddNumberToObject(row, "recovery_left", tokens[i].recovery_left);
+            cJSON_AddItemToArray(list, row);
+        }
+        delete[] tokens;
+    }
+
     esp_err_t handle_logout(httpd_req_t *req)
     {
         char token[WEB_SESSION_TOKEN_HEX_LEN + 1] = "";
@@ -1600,6 +2041,7 @@ namespace
         cJSON_AddBoolToObject(root, "unsaved_changes", !web_settings_equal(sets->running, saved ? sets->saved : sets->defaults));
         add_confirm_info(root);
         add_radius(cJSON_AddObjectToObject(root, "radius_status"));
+        add_totp(cJSON_AddObjectToObject(root, "totp"));
         {
             char user[WEB_SESSION_USER_SIZE] = "";
             bool radius = false;
@@ -1877,7 +2319,7 @@ namespace
             return send_error(req, "500 Internal Server Error", "NVS could not be erased");
         web_tls_clear_own();
         web_auth_end_all_sessions();
-        ESP_LOGW(TAG, "Web admin: reset to defaults (settings, password, allow-list and own certificate erased), restarting");
+        ESP_LOGW(TAG, "Web admin: reset to defaults (settings, password, allow-list, own certificate and TOTP tokens erased), restarting");
         const esp_err_t err = send_ok(req, "Reset to defaults done. The device restarts with the default settings.");
         schedule_restart("web_admin_factory_reset");
         return err;
@@ -1996,11 +2438,16 @@ namespace
                 send_error(req, "403 Forbidden", "Scripted uploads are refused while the web admin password is the default");
                 return ESP_FAIL; // closes the connection (the body is not read)
             }
+            web_login_settings_t methods{};
             {
                 web_settings_t *running = new (std::nothrow) web_settings_t{};
-                const bool local = running != nullptr && (web_settings_get_running(*running), running->web_login.local);
+                if (running != nullptr)
+                {
+                    web_settings_get_running(*running);
+                    methods = running->web_login;
+                }
                 delete running;
-                if (!local)
+                if (!methods.local)
                 {
                     send_error(req, "403 Forbidden", "Scripted uploads use the local password, which is switched off: use the page");
                     return ESP_FAIL;
@@ -2044,6 +2491,16 @@ namespace
                                              credentials_length - static_cast<size_t>(colon + 1 - credentials));
             else
                 web_auth_record_failed_check(peer); // header too long or not decodable
+            // The second factor of the local user: the code in X-TOTP-Code (tools/ote_upload.py --totp)
+            if (ok && methods.totp_local)
+            {
+                char code[24] = "";
+                ok = header(req, "X-TOTP-Code", code, sizeof(code)) && totp_store_check(AUTH_WEB_LOCAL_USER, code) != totp_check_t::wrong &&
+                     totp_store_has(AUTH_WEB_LOCAL_USER);
+                mbedtls_platform_zeroize(code, sizeof(code));
+                if (!ok)
+                    web_auth_record_failed_check(peer);
+            }
             memset(authorization, 0, sizeof(authorization));
             memset(credentials, 0, sizeof(credentials));
             if (!ok)
@@ -2260,6 +2717,16 @@ namespace
         cJSON_AddNumberToObject(root, "heap_free", d->heap_free);
         cJSON_AddNumberToObject(root, "heap_min_free", d->heap_min_free);
         cJSON_AddNumberToObject(root, "heap_largest_block", d->heap_largest_block);
+        // NVS (24 kB, entries of 32 bytes): the settings, the password, the certificates, the TOTP tokens
+        nvs_stats_t nvs{};
+        if (nvs_get_stats(nullptr, &nvs) == ESP_OK)
+        {
+            cJSON *n = cJSON_AddObjectToObject(root, "nvs");
+            cJSON_AddNumberToObject(n, "used", nvs.used_entries);
+            cJSON_AddNumberToObject(n, "available", nvs.available_entries);
+            cJSON_AddNumberToObject(n, "total", nvs.total_entries);
+            cJSON_AddNumberToObject(n, "settings", (web_settings_stored_size() + 31) / 32);
+        }
         cJSON *phase = cJSON_AddArrayToObject(root, "tx_delay_phase");
         for (size_t family = 0; family < 2; ++family)
         {
@@ -2945,6 +3412,10 @@ namespace
             {"/api/gnss/command", HTTP_POST, handle_gnss_command},
             {"/api/gnss/console", HTTP_GET, handle_gnss_console},
             {"/api/radius/test", HTTP_POST, handle_radius_test},
+            {"/api/login/totp", HTTP_POST, handle_login_totp},
+            {"/api/totp/enroll", HTTP_POST, handle_totp_enroll},
+            {"/api/totp/confirm", HTTP_POST, handle_totp_confirm},
+            {"/api/totp/delete", HTTP_POST, handle_totp_delete},
         };
         for (const route_t &route : routes)
         {
@@ -2963,6 +3434,10 @@ namespace
     {
         const web_settings_t &boot = web_settings_boot();
         web_auth_init();
+        // The TOTP tokens; NVS keeps room for one more settings set besides them (Save writes the new set before the
+        // old one is erased, and so does the one-shot set of an Apply with a restart; the device restarts with it)
+        totp_store_init(web_settings_stored_size());
+        s_totp_pending = new (std::nothrow) totp_pending_t[TOTP_PENDING_MAX];
 
         if (!web_tls_load_or_create(boot.fqdn, s_identity))
         {
@@ -3004,7 +3479,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 34; // 29 routes in use
+        config.max_uri_handlers = 34; // 33 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match

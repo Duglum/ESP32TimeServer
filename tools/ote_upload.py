@@ -17,7 +17,10 @@ stops and prints the fingerprint the device presented; --insecure skips the chec
 Example:
   python tools\\ote_upload.py -i timeserver1.example.net -f build\\ESP32TimeServer.bin --fingerprint AB:CD:...
 The password is read from the environment variable WEB_ADMIN_PASSWORD, otherwise it is asked for, so that
-several devices with the same password can be updated in a loop without a prompt.
+several devices with the same password can be updated in a loop without a prompt. While the device asks for a second
+factor for its local user (Security, TOTP "Required for the local user admin"), --totp asks for the code of the
+authenticator app (or a recovery code) and sends it in the header X-TOTP-Code. While the local password of the page is
+switched off (RADIUS only), the device refuses scripted uploads: use the page.
 """
 import argparse
 import base64
@@ -153,6 +156,8 @@ def main():
     parser.add_argument("--insecure", action="store_true", help="do not check the certificate fingerprint")
     parser.add_argument("--password-env", default="WEB_ADMIN_PASSWORD", metavar="NAME",
                         help="environment variable with the web admin password (default WEB_ADMIN_PASSWORD)")
+    parser.add_argument("--totp", action="store_true",
+                        help="ask for the TOTP code of the local user (when the device requires the second factor)")
     args = parser.parse_args()
 
     image, project, version = read_image(args.file)
@@ -178,10 +183,13 @@ def main():
     if not password:
         raise SystemExit("error: no web admin password")
     credentials = base64.b64encode(f"{BASIC_USER}:{password}".encode("utf-8")).decode("ascii")
+    code = input("TOTP code (or a recovery code): ").strip() if args.totp else ""
 
     deadline = time.monotonic() + TOTAL_TIMEOUT
     connection.putrequest("POST", "/api/ote")
     connection.putheader("Authorization", "Basic " + credentials)
+    if code:
+        connection.putheader("X-TOTP-Code", code)
     connection.putheader("Content-Type", "application/octet-stream")
     connection.putheader("Content-Length", str(len(image)))
     connection.putheader("Connection", "close")
