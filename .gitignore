@@ -17,6 +17,7 @@
 *.log
 
 .vscode/
+.claude/
 
 # Build artifacts and directories
 **/build/
