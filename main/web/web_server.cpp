@@ -63,14 +63,15 @@ namespace
     constexpr uint16_t HTTPS_PORT = 443;
     constexpr size_t MAX_SOCKETS = 3;
     constexpr size_t MAX_BODY = 4096;
-    // Apply and Save: every setting of the page, with an MQTT CA certificate of up to 4096 characters
-    constexpr size_t SETTINGS_BODY_MAX = 12288;
+    // Apply and Save: every setting of the page, with an MQTT CA certificate of up to 4096 characters and the logins
+    // (two RADIUS servers with DNS names of up to 253 characters, about 1.3 kB)
+    constexpr size_t SETTINGS_BODY_MAX = 14336;
     // /api/tls: the own certificate chain and key with JSON escapes and the other fields
     constexpr size_t TLS_BODY_MAX = WEB_TLS_CERT_PEM_MAX + WEB_TLS_KEY_PEM_MAX + 1024;
     // Configuration files (import): a complete settings set with the secrets, the allow-list and the information
     // fields, formatted (about 4 kB, and up to 4.2 kB more with the MQTT CA certificate), plus the own TLS certificate
     // and key
-    constexpr size_t CONFIG_BODY_MAX = 12288 + TLS_BODY_MAX;
+    constexpr size_t CONFIG_BODY_MAX = 14336 + TLS_BODY_MAX;
     // Marker and format version of a configuration file (export and import, /api/config)
     constexpr char CONFIG_MARKER[] = "timeserver_config";
     constexpr int CONFIG_FORMAT = 1;
@@ -643,6 +644,8 @@ namespace
         cJSON_AddNumberToObject(object, "ptp_auth_active_key_id", s.ptp_auth_active_key_id);
         // Shown on the page like the NTP keys: the followers need them
         add_ntp_keys(cJSON_AddArrayToObject(object, "ptp_keys"), s.ptp_keys, s.ptp_key_count);
+        // "radius" and "web_login" (objects); the shared secrets only with_secrets, else "secret_set"
+        auth_settings_to_json(object, s.radius, s.web_login, with_secrets);
     }
 
     bool json_string(cJSON *root, const char *name, char *out, size_t size, char *err, size_t err_size)
@@ -977,7 +980,11 @@ namespace
             return false;
         if (present)
             s.ntp_key_override = true;
-        return json_keys(root, "ptp_keys", "PTP", s.ptp_keys, WEB_PTP_MAX_KEYS, s.ptp_key_count, present, err, err_size);
+        if (!json_keys(root, "ptp_keys", "PTP", s.ptp_keys, WEB_PTP_MAX_KEYS, s.ptp_key_count, present, err, err_size))
+            return false;
+        // The logins: an empty or missing shared secret keeps the one of base (the page never gets it; a configuration
+        // file without it is read onto the defaults, so the secret is then empty)
+        return auth_settings_from_json(root, s.radius, s.web_login, true, err, err_size);
     }
 
     // ---- Restart and network confirmation ----

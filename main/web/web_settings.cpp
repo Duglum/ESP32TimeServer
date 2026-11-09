@@ -58,7 +58,7 @@ namespace
     //     it gets its defaults: off, no keys).
     // The OTE device name and OTE password were removed later without a new version: their places stay in the layout
     // (ote_name_unused, ote_password_unused) and are zeroed when a set is read.
-    constexpr uint32_t BLOB_VERSION = 16;
+    constexpr uint32_t BLOB_VERSION = 17;
     constexpr uint32_t BLOB_VERSION_5 = 5;
     constexpr uint32_t BLOB_VERSION_6 = 6;
     constexpr uint32_t BLOB_VERSION_7 = 7;
@@ -70,6 +70,7 @@ namespace
     constexpr uint32_t BLOB_VERSION_13 = 13;
     constexpr uint32_t BLOB_VERSION_14 = 14;
     constexpr uint32_t BLOB_VERSION_15 = 15;
+    constexpr uint32_t BLOB_VERSION_16 = 16;
     // Size of web_settings_t in an older version: everything before the first field appended later, with the tail
     // padding
     constexpr size_t settings_size_before(size_t first_new_field)
@@ -87,6 +88,7 @@ namespace
     constexpr size_t SETTINGS_SIZE_13 = settings_size_before(offsetof(web_settings_t, ptp_l2_enabled));
     constexpr size_t SETTINGS_SIZE_14 = settings_size_before(offsetof(web_settings_t, ntp_auth_required));
     constexpr size_t SETTINGS_SIZE_15 = settings_size_before(offsetof(web_settings_t, ptp_auth_enabled));
+    constexpr size_t SETTINGS_SIZE_16 = settings_size_before(offsetof(web_settings_t, radius));
     // Version 7 fits into the tail padding of version 6 (same size), and versions 8 to 12 may fit into that of the
     // version before: the version number tells them apart, and an older set always gets the defaults for the newer
     // fields instead of its padding bytes
@@ -95,7 +97,7 @@ namespace
                       SETTINGS_SIZE_9 <= SETTINGS_SIZE_10 && SETTINGS_SIZE_10 <= SETTINGS_SIZE_11 &&
                       SETTINGS_SIZE_11 <= SETTINGS_SIZE_12 && SETTINGS_SIZE_12 <= SETTINGS_SIZE_13 &&
                       SETTINGS_SIZE_13 <= SETTINGS_SIZE_14 && SETTINGS_SIZE_14 <= SETTINGS_SIZE_15 &&
-                      SETTINGS_SIZE_15 <= sizeof(web_settings_t),
+                      SETTINGS_SIZE_15 <= SETTINGS_SIZE_16 && SETTINGS_SIZE_16 <= sizeof(web_settings_t),
                   "older settings must be a prefix of web_settings_t");
 
     // Defaults of the fields that later blob versions appended (web_settings_defaults() uses them as well)
@@ -261,6 +263,7 @@ namespace
         const bool version_13 = header.version == BLOB_VERSION_13 && header.size == SETTINGS_SIZE_13;
         const bool version_14 = header.version == BLOB_VERSION_14 && header.size == SETTINGS_SIZE_14;
         const bool version_15 = header.version == BLOB_VERSION_15 && header.size == SETTINGS_SIZE_15;
+        const bool version_16 = header.version == BLOB_VERSION_16 && header.size == SETTINGS_SIZE_16;
 
         bool ok = false;
         if (err == ESP_ERR_NVS_NOT_FOUND)
@@ -276,11 +279,12 @@ namespace
                                length != HEADER_SIZE + SETTINGS_SIZE_12 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_13 + sizeof(uint32_t) &&
                                length != HEADER_SIZE + SETTINGS_SIZE_14 + sizeof(uint32_t) &&
-                               length != HEADER_SIZE + SETTINGS_SIZE_15 + sizeof(uint32_t)))
+                               length != HEADER_SIZE + SETTINGS_SIZE_15 + sizeof(uint32_t) &&
+                               length != HEADER_SIZE + SETTINGS_SIZE_16 + sizeof(uint32_t)))
             ESP_LOGW(TAG, "Stored web settings '%s' have an unexpected size, ignored", key);
         else if (header.magic != BLOB_MAGIC || (!current && !version_5 && !version_6 && !version_7 && !version_8 && !version_9 && !version_10 &&
                                                    !version_11 && !version_12 && !version_13 && !version_14 &&
-                                                   !version_15) ||
+                                                   !version_15 && !version_16) ||
                  length != HEADER_SIZE + header.size + sizeof(uint32_t))
             ESP_LOGW(TAG, "Stored web settings '%s' belong to another firmware version, ignored", key);
         else if (stored_crc != esp_rom_crc32_le(0, raw, length - sizeof(uint32_t)))
@@ -370,12 +374,20 @@ namespace
                 if (version_14)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 14 read; NTP authentication required has its default (off)", key);
             }
-            if (header.version < BLOB_VERSION)
+            if (header.version < BLOB_VERSION_16)
             {
                 // Appended in version 16
                 ptp_auth_defaults(blob.settings);
                 if (version_15)
                     ESP_LOGI(TAG, "Stored web settings '%s' of version 15 read; PTP authentication has its defaults (off)", key);
+            }
+            if (header.version < BLOB_VERSION)
+            {
+                // Appended in version 17
+                radius_settings_defaults(blob.settings.radius);
+                web_login_settings_defaults(blob.settings.web_login);
+                if (version_16)
+                    ESP_LOGI(TAG, "Stored web settings '%s' of version 16 read; the logins have their defaults (local password only)", key);
                 blob.version = BLOB_VERSION;
                 blob.size = sizeof(web_settings_t);
             }
@@ -989,6 +1001,8 @@ void web_settings_defaults(web_settings_t &out)
     // ---- PTP master and its authentication: off ----
     ptp_defaults(out);
     ptp_auth_defaults(out);
+    radius_settings_defaults(out.radius);
+    web_login_settings_defaults(out.web_login);
 }
 
 void web_settings_load_boot()
@@ -1495,6 +1509,10 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
     if (s.ptp_udp6_enabled && s.ip_mode == web_ip_mode_t::ipv4)
         FAIL("PTP over UDP/IPv6 needs IPv6 (address families)");
 
+    // ---- Logins of the web page (a RADIUS server is needed while RADIUS logins are on) ----
+    if (!web_login_settings_validate(s.web_login, err, err_size) || !radius_settings_validate(s.radius, s.web_login.radius, err, err_size))
+        return false;
+
 #undef FAIL
     return true;
 }
@@ -1529,9 +1547,41 @@ bool web_settings_restart_fields_differ(const web_settings_t &a, const web_setti
            a.ote_enabled != b.ote_enabled || a.button_enabled != b.button_enabled || a.button_pin != b.button_pin;
 }
 
+namespace
+{
+    // The login settings field by field (the structs have padding); the shared secrets in constant time
+    bool login_settings_equal(const web_settings_t &a, const web_settings_t &b)
+    {
+        for (size_t i = 0; i < RADIUS_SERVERS; ++i)
+        {
+            const radius_server_settings_t &x = a.radius.server[i];
+            const radius_server_settings_t &y = b.radius.server[i];
+            char sx[AUTH_RADIUS_SECRET_SIZE] = {};
+            char sy[AUTH_RADIUS_SECRET_SIZE] = {};
+            snprintf(sx, sizeof(sx), "%s", x.secret);
+            snprintf(sy, sizeof(sy), "%s", y.secret);
+            const bool same_secret = web_constant_time_equal(reinterpret_cast<const uint8_t *>(sx), reinterpret_cast<const uint8_t *>(sy), sizeof(sx));
+            memset(sx, 0, sizeof(sx));
+            memset(sy, 0, sizeof(sy));
+            if (strcmp(x.host, y.host) != 0 || x.port != y.port || !same_secret)
+                return false;
+        }
+        const radius_settings_t &r = a.radius;
+        const radius_settings_t &q = b.radius;
+        const web_login_settings_t &w = a.web_login;
+        const web_login_settings_t &v = b.web_login;
+        return r.timeout_s == q.timeout_s && r.retries == q.retries && r.dead_time_min == q.dead_time_min &&
+               strcmp(r.nas_identifier, q.nas_identifier) == 0 && strcmp(r.nas_ip, q.nas_ip) == 0 && strcmp(r.nas_ipv6, q.nas_ipv6) == 0 &&
+               r.service_type == q.service_type && r.nas_port_type == q.nas_port_type && r.min_privilege == q.min_privilege &&
+               strcmp(r.required, q.required) == 0 && r.require_message_authenticator == q.require_message_authenticator &&
+               w.local == v.local && w.radius == v.radius && w.local_fallback == v.local_fallback && w.totp_local == v.totp_local &&
+               w.totp_radius == v.totp_radius && w.totp_enroll == v.totp_enroll;
+    }
+} // namespace
+
 bool web_settings_equal(const web_settings_t &a, const web_settings_t &b)
 {
-    if (web_settings_network_differs(a, b) || web_settings_restart_fields_differ(a, b))
+    if (web_settings_network_differs(a, b) || web_settings_restart_fields_differ(a, b) || !login_settings_equal(a, b))
         return false;
     return strcmp(a.lcd_title, b.lcd_title) == 0 && a.lcd_24_hour == b.lcd_24_hour && a.lcd_pad_hour == b.lcd_pad_hour &&
            a.lcd_show_time_zone == b.lcd_show_time_zone && a.lcd_address == b.lcd_address && strcmp(a.time_zone, b.time_zone) == 0 &&

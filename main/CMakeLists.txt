@@ -2,6 +2,7 @@
 # LED, MQTT, NTP authentication, button) are always compiled in; the web admin page switches them.
 set(MAIN_SOURCES
         "main.cpp"
+        "auth/auth_config.cpp"
         "auth/radius_client.cpp"
         "auth/radius_proto.cpp"
         "auth/totp.cpp"

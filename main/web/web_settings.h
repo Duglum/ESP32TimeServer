@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "auth/auth_config.h"
 #include "esp_err.h"
 #include "soc/soc_caps.h"
 
@@ -267,6 +268,12 @@ struct web_settings_t
     uint16_t ptp_auth_active_key_id;   // signs the sent messages, one of ptp_keys
     uint8_t ptp_key_count;
     web_ntp_key_t ptp_keys[WEB_PTP_MAX_KEYS];
+
+    // Logins of the web page (added in version 17; take effect at once): the RADIUS servers and the attributes of the
+    // requests, the login methods and the TOTP second factor (auth/auth_config.h). The shared secrets are secret: the
+    // page gets "secret_set"; the stored settings and the configuration file carry them.
+    radius_settings_t radius;
+    web_login_settings_t web_login;
 };
 
 // Defaults of all settings (the state after a reset to defaults)

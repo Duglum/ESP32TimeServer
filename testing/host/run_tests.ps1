@@ -52,8 +52,10 @@ function Psa-Link {
     return @($libs) + @('-lbcrypt')
 }
 
+# cJSON comes with the ESP-IDF component manager (managed_components after the first firmware build)
+$cjson = Join-Path $here '..\..\managed_components\espressif__cjson\cJSON'
 $common = @('-g', '-O1', '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
-    "-I$here\stubs", "-I$here", "-I$main", "-I$main\custom", '-DAPP_BUILD_DATE="2026-10-28"')
+    "-I$here\stubs", "-I$here", "-I$main", "-I$main\custom", "-I$cjson", '-DAPP_BUILD_DATE="2026-10-28"')
 $warnings = @('-Wall', '-Wextra', '-Werror')
 $fuzz = @('-fsanitize-coverage=inline-8bit-counters,pc-table,trace-cmp', '-DHOST_FUZZ')
 
@@ -73,11 +75,13 @@ $targets = [ordered]@{
     ip_text_test   = @("$here\ip_text_test.cpp", "$main\net\ip_text.cpp")
     radius_test    = @("$here\radius_test.cpp", "$main\auth\radius_proto.cpp", "$main\auth\radius_client.cpp")
     totp_test      = @("$here\totp_test.cpp", "$main\auth\totp.cpp", "$main\third_party\qrcodegen\qrcodegen.c")
+    auth_config_test = @("$here\auth_config_test.cpp", "$main\auth\auth_config.cpp", "$main\auth\radius_proto.cpp",
+        "$main\net\ip_text.cpp", "$cjson\cJSON.c")
 }
 # Test programs without a fuzz target
 $no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test')
 # Test programs with TF-PSA-Crypto
-$with_psa = @('radius_test', 'totp_test')
+$with_psa = @('radius_test', 'totp_test', 'auth_config_test')
 
 function Build-Target([string]$name, [string[]]$sources, [string]$folder, [string[]]$flags, [string[]]$extra) {
     New-Item -ItemType Directory -Force $folder | Out-Null
@@ -85,7 +89,7 @@ function Build-Target([string]$name, [string[]]$sources, [string]$folder, [strin
     foreach ($source in $sources) {
         $object = Join-Path $folder ([IO.Path]::GetFileNameWithoutExtension($source) + '.o')
         # Third-party code (unchanged) is compiled without -Werror
-        $sourceFlags = if ($source.StartsWith("$main\third_party")) { $flags | Where-Object { $_ -notin $warnings } } else { $flags }
+        $sourceFlags = if ($source.StartsWith("$main\third_party") -or $source.StartsWith($cjson)) { $flags | Where-Object { $_ -notin $warnings } } else { $flags }
         if ($source.EndsWith('.c')) { & clang -std=gnu11 @sourceFlags -c $source -o $object }
         else { & clang++ -std=gnu++23 @sourceFlags -c $source -o $object }
         if ($LASTEXITCODE -ne 0) { throw "compile failed: $source" }

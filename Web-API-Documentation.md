@@ -29,7 +29,7 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
    - the page shows a red warning;
    - scripted uploads are refused.
 
-Request bodies are limited to 4096 bytes; `/api/apply` and `/api/save` take up to 12288 bytes (the MQTT CA certificate may have 4096 characters), `/api/tls` up to 13312 bytes, `/api/config` (import) up to 25600 bytes (a complete settings set with the own TLS certificate and its key), the firmware upload more. A JSON body may nest at most 8 levels deep and have at most 512 separators (`,` and `:` outside strings); otherwise, or when it is no JSON object, the answer is `400`. Errors come back as `{"error": "..."}` with a matching HTTP status.
+Request bodies are limited to 4096 bytes; `/api/apply` and `/api/save` take up to 14336 bytes (the MQTT CA certificate may have 4096 characters, the RADIUS servers DNS names of 253), `/api/tls` up to 13312 bytes, `/api/config` (import) up to 27648 bytes (a complete settings set with the own TLS certificate and its key), the firmware upload more. A JSON body may nest at most 8 levels deep and have at most 512 separators (`,` and `:` outside strings); otherwise, or when it is no JSON object, the answer is `400`. Errors come back as `{"error": "..."}` with a matching HTTP status.
 
 ## Endpoints
 
@@ -70,6 +70,34 @@ Notes on `/api/apply`:
 
 - PTP authentication (takes effect at once; AUTHENTICATION TLV of IEEE 1588-2019 16.14 with HMAC-SHA256-128, as linuxptp `SHA256-128`, on every PTP transport): `ptp_auth_enabled` (sign every sent message, check signed Delay_Req / Announce), `ptp_auth_required` (also drop unsigned Delay_Req / Announce; needs `ptp_auth_enabled`), `ptp_auth_mutable` (the correctionField is not covered by the ICV, linuxptp `allow_mutable 1`), `ptp_auth_spp` (0 to 255), `ptp_auth_active_key_id` (1 to 65535, must be one of the keys while authentication is on), `ptp_keys` (up to 4 `{"id": 1 to 65535, "key": "<32 letters or digits>"}`, sent like `ntp_keys`: the list replaces the keys, a missing list keeps them; the key is used as it is as the HMAC key, linuxptp `ASCII:<key>`). `400` when authentication is on without a key or with an active key ID that is not one of the keys.
 
+- Logins of the web page (take effect at once; *Security*): the objects `radius` and `web_login` (a missing field keeps its value).
+
+Fields of `radius` (defaults in brackets). The API never returns a shared secret: a server has `secret_set` (bool) instead, and an empty or missing `secret` keeps the stored one. The configuration file (export) carries the secrets:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `servers` | list of up to 2 objects | `host` (an IPv4 or IPv6 address or a DNS name, `""` = not used; a server without a host loses its secret), `port` (1 to 65535, 1812), `secret` (the shared secret, 1 to 64 printable ASCII characters; required with a host). Server 2 is asked when server 1 does not answer. A login method with RADIUS needs at least one server |
+| `timeout_s` | 1 to 30 | Seconds per try (3) |
+| `retries` | 0 to 5 | More tries per server (2) |
+| `dead_time_min` | 0 to 60 | A server that did not answer is skipped this long; 0 = never skipped (2) |
+| `nas_identifier` | text, at most 64 characters | NAS-Identifier of the requests, `""` = the host name (`""`) |
+| `nas_ip`, `nas_ipv6` | text | NAS-IP-Address / NAS-IPv6-Address, `""` = the address the request is sent from (`""`) |
+| `service_type` | 0, 1, 6, 7 | Service-Type of the requests: Login, Administrative, NAS-Prompt; 0 = not sent (1) |
+| `nas_port_type` | -1, 0, 5 | NAS-Port-Type: Async, Virtual; -1 = not sent (5) |
+| `min_privilege` | 1 to 15 | An Access-Accept is accepted from this privilege level: `Cisco-AVPair` `shell:priv-lvl=N`, without it Service-Type Administrative-User = 15, anything else = 1 (15) |
+| `required` | text | `""` or an attribute the Access-Accept must also carry, compared exactly: `Cisco-AVPair=<value>`, `Class=<value>` or `Filter-Id=<value>` (`""`) |
+| `require_message_authenticator` | bool | An answer without a valid Message-Authenticator is dropped (BlastRADIUS, CVE-2024-3596); requests always carry one (true) |
+
+Fields of `web_login` (defaults in brackets):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `local` | bool | Login of the user `admin` with the password of the page (true) |
+| `radius` | bool | Login with user name and password, checked by the RADIUS servers (false). At least one of `local` and `radius` stays on |
+| `local_fallback` | bool | With both: every user name is checked by RADIUS first, the local password of `admin` only when no RADIUS server answers. false: `admin` is checked with the local password only, other names by RADIUS (true) |
+| `totp_local`, `totp_radius` | bool | A TOTP code is required after the password of the local user / of a RADIUS user (false) |
+| `totp_enroll` | bool | A RADIUS user without a TOTP token sets one up at the first login; false: a user without a token is refused while `totp_radius` is on (false) |
+
 **Static files** need no login; only the allow-list applies: `/`, `/app.js`, `/app.css`, `/i18n.js`, `/favicon.ico`.
 
 ## Configuration file (`/api/config`)
@@ -87,7 +115,7 @@ Notes on `/api/apply`:
 ```
 
 - `timeserver_config`: the format (1). A file without it, or of another format, is refused.
-- `settings`: the settings in use, with the field names of `settings` in `/api/state`, but with the MQTT password in clear text (`mqtt_password`) in place of `mqtt_password_set`; the NTP and PTP keys (`ntp_keys`, `ptp_keys`) are there as on the page. On import a field the file lacks gets its default. A file of an earlier firmware with `mqtt_uri` instead of `mqtt_broker`, `mqtt_port` and `mqtt_tls` is read as with `/api/apply`; with `mqtts://` and MQTT on it needs `mqtt_ca_pem` as well.
+- `settings`: the settings in use, with the field names of `settings` in `/api/state`, but with the MQTT password in clear text (`mqtt_password`) in place of `mqtt_password_set` and the shared secrets of the RADIUS servers (`secret`) in place of `secret_set`; the NTP and PTP keys (`ntp_keys`, `ptp_keys`) are there as on the page. On import a field the file lacks gets its default. A file of an earlier firmware with `mqtt_uri` instead of `mqtt_broker`, `mqtt_port` and `mqtt_tls` is read as with `/api/apply`; with `mqtts://` and MQTT on it needs `mqtt_ca_pem` as well.
 - `hostname`, `firmware`, `exported` (UTC, only when the clock is set): for information, ignored on import.
 - `allow_list`: at most 8 entries as for `/api/allow-list`. On import a file without it leaves the allow-list unchanged; `[]` clears it.
 - `tls`: `mode` (`own` or `self`) and, when an own certificate is stored, `certificate` (PEM chain) and `key` (PEM, in clear text). On import a file without it leaves the certificate unchanged; `{"mode": "self"}` switches to the self-signed one (a stored own one is kept); `own` needs `certificate` and `key` and is checked as for `/api/tls`.
