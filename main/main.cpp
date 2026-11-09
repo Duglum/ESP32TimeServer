@@ -309,7 +309,10 @@ static constexpr size_t NTP_Server_Task_Stack_Size = 3560;
 static constexpr size_t OTE_Service_Task_Stack_Size = 3560;
 static constexpr size_t GNSS_UART_Reader_Task_Stack_Size = 2464; // GNSS UART reader (custom/gnss_uart, NMEA and UBX): measure
 static constexpr size_t PPS_Discipline_Task_Stack_Size = 3620; // was 3135: the PTP servo runs in this task (measure again)
-static constexpr size_t PTP_Service_Task_Stack_Size = 3584; // PTP master (custom/ptp_service.h): first estimate, measure
+// PTP master (custom/ptp_service.h). Board 2026-11-09 (7adc901): 2656 of 3584 B used with Ethernet, UDP/IPv4 and
+// UDP/IPv6 serving and every message signed, without followers (the Delay_Req verify + Delay_Resp path not yet seen):
+// 4096 keeps about 1.4 kB in reserve; measure again with followers
+static constexpr size_t PTP_Service_Task_Stack_Size = 4096;
 
 static constexpr unsigned int Default_Safety_Margin_Percent = 30; // unless otherwise specified add this percentage to the highest stack usage as a safety margin
 
