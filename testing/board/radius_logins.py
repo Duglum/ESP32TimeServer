@@ -229,6 +229,10 @@ def totp_tests(a, admin, apply, wanted, web_on, srv1, web_password):
             Web(a.device).login("admin15", PW)
         if wanted(20) and not a.no_throttle and "admin15" in created:
             apply(dict(web_on, totp_radius=True))
+            # The earlier tests refuse logins as well: 20 failures within a minute block every login for 60 s (the
+            # global limit), which would hide the lock-out of the source tested here
+            print("  waiting 61 s for a new minute of the global login limit", flush=True)
+            time.sleep(61)
 
             def wrong_code():
                 near = {totp_code(secret15, offset=k) for k in (-1, 0, 1)}
