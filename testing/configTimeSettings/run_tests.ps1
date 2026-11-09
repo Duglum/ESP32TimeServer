@@ -361,7 +361,8 @@ try {
         $payload = Read-BackupFile $backupPath
         if ($payload.registry.Count -ne 16) { throw "backup contained $($payload.registry.Count) registry states instead of 16" }
         if ($payload.scriptVersion -ne '1.1' -or
-            $payload.capturedLocalOffset -notmatch '^[+-]\d{2}:\d{2}(:\d{2})?$') {
+            # TimeSpan.ToString() writes a positive offset without a sign (CET: 01:00:00), a negative one with '-'
+            $payload.capturedLocalOffset -notmatch '^[+-]?\d{2}:\d{2}(:\d{2})?$') {
             throw 'backup omitted its version or local UTC offset'
         }
         $backupAcl = Get-Acl -LiteralPath $backupPath
