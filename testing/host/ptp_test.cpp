@@ -758,6 +758,29 @@ namespace
             CHECK(ptp::detail::read_u16(frame + 14 + (v6 ? 40 : 20) + 2) == ptp_l3_udp::EVENT_PORT);
             CHECK(ptp_l3_udp::decode(frame, request_length, 7, nullptr, datagram, parsed) == ptp::MessageKind::DelayRequest);
             CHECK(parsed.sequence_id == 0x4567 && datagram.port == ptp_l3_udp::EVENT_PORT);
+
+            // Messages with an AUTHENTICATION TLV (26 bytes): the signed Announce (90) and a signed Delay_Req (70) are
+            // encapsulated, and decoded when the caller allows authentication; 91 bytes are refused
+            uint8_t signed_message[ptp::ANNOUNCE_SIZE + ptp::AUTH_TLV_SIZE + 1]{};
+            std::memcpy(signed_message, message, 64);
+            signed_message[1] = 0x12;
+            signed_message[2] = 0;
+            signed_message[3] = 64 + ptp::AUTH_TLV_SIZE;
+            const size_t signed_length = ptp_l3_udp::encapsulate(frame, sizeof(frame), mac, v6 ? ipv6 : ipv4, v6, signed_message, 90);
+            CHECK(signed_length == 14 + (v6 ? 40U : 20U) + 8 + 90);
+            CHECK(ptp_l3_udp::decode(frame, signed_length, 7, nullptr, datagram, parsed, true) == ptp::MessageKind::Announce);
+            CHECK(datagram.length == 90);
+            CHECK(ptp_l3_udp::decode(frame, signed_length, 7, nullptr, datagram, parsed) == ptp::MessageKind::Invalid);
+            CHECK(ptp_l3_udp::encapsulate(frame, sizeof(frame), mac, v6 ? ipv6 : ipv4, v6, signed_message, 91) == 0);
+            uint8_t signed_request[44 + ptp::AUTH_TLV_SIZE]{};
+            std::memcpy(signed_request, request.data() + 14, 44);
+            signed_request[1] = 0x12;
+            signed_request[3] = 44 + ptp::AUTH_TLV_SIZE;
+            const size_t signed_request_length =
+                ptp_l3_udp::encapsulate(frame, sizeof(frame), mac, v6 ? ipv6 : ipv4, v6, signed_request, sizeof(signed_request));
+            CHECK(signed_request_length == 14 + (v6 ? 40U : 20U) + 8 + 70);
+            CHECK(ptp_l3_udp::decode(frame, signed_request_length, 7, nullptr, datagram, parsed, true) ==
+                  ptp::MessageKind::DelayRequest);
         }
     }
 

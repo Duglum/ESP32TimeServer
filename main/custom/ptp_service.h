@@ -32,6 +32,7 @@
 #include "ptp_auth.h"
 
 static_assert(ptp::AUTH_TLV_SIZE == PTP_AUTH_TLV_SIZE, "one size of the AUTHENTICATION TLV");
+static_assert(ptp_l3_udp::MAX_MESSAGE_SIZE >= ptp::ANNOUNCE_SIZE + ptp::AUTH_TLV_SIZE, "signed messages fit into UDP");
 
 #if !PTP_FREE_RUNNING
 #error "The PTP master needs the mapping of the free-running PTP clock (PTP_FREE_RUNNING 1)"
@@ -456,7 +457,12 @@ static bool ptp_send(uint8_t transport, const uint8_t *message, size_t message_l
         frame_length = ptp_l3_udp::encapsulate(frame, sizeof(frame), s_ptp_source_mac, family.source,
                                                transport == PTP_TRANSPORT_UDP6, message, message_length);
         if (frame_length == 0)
+        {
+            // Not silent: a message the encapsulation refuses is a transmit failure (4.107 sent no signed UDP at all
+            // because of the 64 byte limit, and nothing counted it)
+            s_ptp_counters[transport].transmit_failures.fetch_add(1, std::memory_order_relaxed);
             return false;
+        }
     }
 
     const esp_eth_handle_t handle = s_eth_handle;

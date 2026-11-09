@@ -15,7 +15,9 @@ namespace ptp_l3_udp
 {
 static constexpr uint16_t EVENT_PORT = 319;
 static constexpr uint16_t GENERAL_PORT = 320;
-static constexpr size_t MAX_FRAME_SIZE = 14 + 40 + 8 + 64;
+// Largest PTP message: an Announce with an AUTHENTICATION TLV (fork: upstream does not sign UDP, its limit was 64)
+static constexpr size_t MAX_MESSAGE_SIZE = 64 + ptp::AUTH_TLV_SIZE;
+static constexpr size_t MAX_FRAME_SIZE = 14 + 40 + 8 + MAX_MESSAGE_SIZE;
 static constexpr uint8_t IPV4_GROUP[4] = {224, 0, 1, 129};
 static constexpr uint8_t IPV6_GROUP[16] = {0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x81};
 static constexpr uint8_t IPV4_MAC[6] = {1, 0, 0x5e, 0, 1, 0x81};
@@ -87,7 +89,7 @@ inline size_t encapsulate(uint8_t *frame, size_t capacity, const uint8_t *source
     const size_t udp_length = 8 + message_length;
     const size_t frame_length = 14 + ip_header + udp_length;
     if (frame == nullptr || source_mac == nullptr || source_ip == nullptr || message == nullptr ||
-        message_length < 34 || message_length > 64 || capacity < frame_length)
+        message_length < 34 || message_length > MAX_MESSAGE_SIZE || capacity < frame_length)
         return 0;
     std::memset(frame, 0, frame_length);
     std::memcpy(frame, ipv6 ? IPV6_MAC : IPV4_MAC, 6);
