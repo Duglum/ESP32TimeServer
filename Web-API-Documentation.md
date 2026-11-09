@@ -84,7 +84,7 @@ Fields of `radius` (defaults in brackets). The API never returns a shared secret
 
 | Field | Type | Meaning |
 |---|---|---|
-| `servers` | list of up to 2 objects | `host` (an IPv4 or IPv6 address or a DNS name, `""` = not used; a server without a host loses its secret), `port` (1 to 65535, 1812), `secret` (the shared secret, 1 to 64 printable ASCII characters; required with a host). Server 2 is asked when server 1 does not answer. A login method with RADIUS needs at least one server |
+| `servers` | list of up to 2 objects | `host` (an IPv4 or IPv6 address or a DNS name, looked up for every request, a name ending in `.local` with mDNS; `""` = not used; a server without a host loses its secret), `port` (1 to 65535, 1812), `secret` (the shared secret, 1 to 64 printable ASCII characters; required with a host). Server 2 is asked when server 1 does not answer. A login method with RADIUS needs at least one server |
 | `timeout_s` | 1 to 30 | Seconds per try (3) |
 | `retries` | 0 to 5 | More tries per server (2) |
 | `dead_time_min` | 0 to 60 | A server that did not answer is skipped this long; 0 = never skipped (2) |
