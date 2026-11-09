@@ -1,14 +1,14 @@
 """Board test of the RADIUS and TOTP logins of the web page, against the RADIUS test server of this folder
 (radius_server.py) that runs on this PC during the test. Taken from ESP32-ConsoleServer (tests 1 to 9 and 16 to 19,
-without the SSH tests 10 to 15, 20 and 21).
+without its SSH tests 10 to 15, 20 and 21; test 20 here is a test of this fork).
 
-    python -I testing/board/radius_logins.py <device name> [--pc-address 192.168.8.100] [--only 1,3] [--no-throttle]
+    python -I testing/board/radius_logins.py <device name> [--pc-address 192.168.8.100] [--only 1,3] [--no-throttle] [--port-base 18120]
 
 Takes the web password from the environment variable WEB_ADMIN_PASSWORD or asks for it (a login of the page is needed
 to change the settings). The settings are changed with Apply
 only (never saved) and set back at the end; a restart would set them back as well. Every test login logs out again
 (the device keeps at most four sessions: a new login replaces the one used least recently). The PC must accept UDP on ports 18120 and
-18121 from the device (the Windows firewall asks once for Python).
+18121 (--port-base and the next one) from the device (the Windows firewall asks once for Python).
 
 What is tested (numbers for --only):
   1  the RADIUS test of Security (POST /api/radius/test): accept, privilege level too low, reject, required attribute
@@ -32,6 +32,9 @@ TOTP of the web page (the device needs the time from GNSS; the codes are compute
  18  the local user: "Required for the local user" refused without a token; with one admin needs its code; its token
      cannot be deleted while it is required
  19  set up at the first login (totp_enroll): adminst gets a new token with the login, the first code stores it
+ 20  a right password does not reset the lock-out before the second factor: 3 wrong codes, the password again, 2 wrong
+     codes lock the source out (429); the code after the lock-out forgets the failures (needs 16; skipped with
+     --no-throttle: it locks this PC out of the web page for 30 s)
 """
 import argparse
 import base64
@@ -224,6 +227,34 @@ def totp_tests(a, admin, apply, wanted, web_on, srv1, web_password):
             apply(web_on)
             # a success forgets the failures of the codes (5 lock out)
             Web(a.device).login("admin15", PW)
+        if wanted(20) and not a.no_throttle and "admin15" in created:
+            apply(dict(web_on, totp_radius=True))
+
+            def wrong_code():
+                near = {totp_code(secret15, offset=k) for k in (-1, 0, 1)}
+                return next(c for c in ("000000", "000001", "000002", "999999") if c not in near)
+
+            w, status, reply = web_login("admin15", PW)
+            pending = reply.get("pending", "")
+            answers = [second(w, pending, wrong_code())[0] for _ in range(3)]
+            w, status, reply = web_login("admin15", PW)
+            pending = reply.get("pending", "")
+            result(status == 200 and pending, "20 3 wrong codes, then the right password: a pending login", f"{answers} {status} {reply}")
+            answers = [second(w, pending, wrong_code())[0] for _ in range(2)]
+            w, status, reply = web_login("admin15", PW)
+            result(status == 429, "20 2 more wrong codes lock the source out (the password did not reset the counter)",
+                   f"{answers} then {status} {reply}")
+            wait = int(reply.get("retry_after", 30)) + 1 if status == 429 else 0
+            print(f"  waiting {wait} s for the lock-out to end", flush=True)
+            time.sleep(wait)
+            w, status, reply = web_login("admin15", PW)
+            status, done = second(w, reply.get("pending", ""), next_step_code(secret15))
+            result(status == 200, "20 the right code after the lock-out: logged in", f"{status} {done.get('error', '')}")
+            w.logout()
+            apply(web_on)
+            w, status, reply = web_login("admin15", PW)
+            result(status == 200 and reply.get("csrf"), "20 the session forgot the failures", f"{status} {reply.get('error', '')}")
+            w.logout()
         if wanted(18):
             status, reply = admin.apply({"web_login": dict(web_on, totp_local=True)})
             result(status == 400 and "TOTP token for admin" in reply.get("error", ""), "18 the local second factor needs a token for admin", f"{status} {reply}")
@@ -274,6 +305,7 @@ def main():
     p.add_argument("--pc-address", default="192.168.8.100", help="the address of this PC as the device reaches it")
     p.add_argument("--only", default="", help="comma separated test numbers")
     p.add_argument("--no-throttle", action="store_true")
+    p.add_argument("--port-base", type=int, default=18120, help="UDP port of the test server 1 (server 2: the next one)")
     a = p.parse_args()
     only = {int(x) for x in a.only.split(",") if x.strip()}
 
@@ -290,9 +322,9 @@ def main():
     for server in original["radius"]["servers"]:
         server.pop("secret_set", None)  # an empty secret keeps the stored one
 
-    srv1 = rs.RadiusTestServer(18120, SECRET1).start()
-    srv2 = rs.RadiusTestServer(18121, SECRET2).start()
-    servers = [{"host": a.pc_address, "port": 18120, "secret": SECRET1}, {"host": "", "port": 1812, "secret": ""}]
+    srv1 = rs.RadiusTestServer(a.port_base, SECRET1).start()
+    srv2 = rs.RadiusTestServer(a.port_base + 1, SECRET2).start()
+    servers = [{"host": a.pc_address, "port": a.port_base, "secret": SECRET1}, {"host": "", "port": 1812, "secret": ""}]
     radius = {"servers": servers, "timeout_s": 1, "retries": 1, "dead_time_min": 1, "nas_identifier": "", "nas_ip": "",
               "nas_ipv6": "", "service_type": 1, "nas_port_type": 5, "min_privilege": 15, "required": "",
               "require_message_authenticator": True}
@@ -416,7 +448,7 @@ def main():
             result(status == 401 and reply.get("error") == "Wrong user name or password", "5 a wrong local password after no answer", f"{status} {reply}")
             fresh()
             srv1.mode = "silent"
-            servers[1] = {"host": a.pc_address, "port": 18121, "secret": SECRET2}
+            servers[1] = {"host": a.pc_address, "port": a.port_base + 1, "secret": SECRET2}
             apply(web_on, {"dead_time_min": 1})
             status, reply, own, took = try_login("admin15", PW)
             result(status == 200 and 0.8 < took < 3, "5 failover to server 2", f"{status} {reply.get('error', '')} {took:.1f} s")
@@ -476,7 +508,7 @@ def main():
             result(first.get("status") == 401, "8 the first one ends with no answer", str(first))
             fresh()
 
-        if any(wanted(n) for n in range(16, 20)):
+        if any(wanted(n) for n in range(16, 21)):
             fresh()
             totp_tests(a, admin, apply, wanted, web_on, srv1, web_password)
 

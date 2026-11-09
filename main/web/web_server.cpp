@@ -1608,8 +1608,9 @@ namespace
         }
         if (o.result == radius_result_t::no_answer && w.local_fallback)
         {
-            // No server answered: the local password of the local user (as "group radius local" of a Cisco switch)
-            const bool ok = web_auth_check_password(w.peer, w.password, strlen(w.password));
+            // No server answered: the local password of the local user (as "group radius local" of a Cisco switch);
+            // the failures of the source are forgotten only when the session is opened (after a second factor)
+            const bool ok = web_auth_verify_current_password(w.peer, w.password, strlen(w.password));
             if (ok)
                 login_succeeded(w.req, w.peer, AUTH_WEB_LOCAL_USER, false);
             else
@@ -1685,8 +1686,8 @@ namespace
         esp_err_t result = ESP_OK;
         if (password_ok && local_user && methods.local && (!radius_on || !methods.local_fallback))
         {
-            // The local password decides
-            if (web_auth_check_password(peer, w->password, strlen(w->password)))
+            // The local password decides (the failures of the source are forgotten only when the session is opened)
+            if (web_auth_verify_current_password(peer, w->password, strlen(w->password)))
                 result = login_succeeded(req, peer, AUTH_WEB_LOCAL_USER, false);
             else
                 result = login_refused(req, peer, w->user, "wrong password", "Wrong user name or password");
@@ -2487,8 +2488,8 @@ namespace
             const unsigned char *colon = decoded ? static_cast<const unsigned char *>(memchr(credentials, ':', credentials_length)) : nullptr;
             bool ok = false;
             if (colon != nullptr)
-                ok = web_auth_check_password(peer, reinterpret_cast<const char *>(colon + 1),
-                                             credentials_length - static_cast<size_t>(colon + 1 - credentials));
+                ok = web_auth_verify_current_password(peer, reinterpret_cast<const char *>(colon + 1),
+                                                      credentials_length - static_cast<size_t>(colon + 1 - credentials));
             else
                 web_auth_record_failed_check(peer); // header too long or not decodable
             // The second factor of the local user: the code in X-TOTP-Code (tools/ote_upload.py --totp)
@@ -2501,6 +2502,8 @@ namespace
                 if (!ok)
                     web_auth_record_failed_check(peer);
             }
+            if (ok)
+                web_auth_record_success(peer); // the password and, when required, the code
             memset(authorization, 0, sizeof(authorization));
             memset(credentials, 0, sizeof(credentials));
             if (!ok)

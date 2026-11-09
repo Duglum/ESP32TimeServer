@@ -33,10 +33,10 @@ python -I testing/web_certs/web_certs.py --ip <address> --dns <FQDN>
 Copy a file to the clipboard with `Get-Content web-certs\chain-ecdsa.pem -Raw | Set-Clipboard` (PowerShell) and paste the chain into *Certificate chain* and the key into *Private key*.
 
 ### RADIUS and TOTP logins of the website
-[/testing/board/radius_logins.py](/testing/board/radius_logins.py) tests the logins of the website on the board against the RADIUS test server [/testing/board/radius_server.py](/testing/board/radius_server.py), which it runs on the PC (UDP 18120 and 18121; the Windows firewall asks once for Python). Both come from the ESP32-ConsoleServer project (its web tests 1 to 9 and 16 to 19, without SSH). The settings are changed with *Apply* only and set back at the end; TOTP tokens it makes are deleted again. Test 9 locks the PC out of the website for 30 s (skip it with `--no-throttle`). The TOTP tests need the time from GNSS.
+[/testing/board/radius_logins.py](/testing/board/radius_logins.py) tests the logins of the website on the board against the RADIUS test server [/testing/board/radius_server.py](/testing/board/radius_server.py), which it runs on the PC (UDP 18120 and 18121, other ports with `--port-base`; the Windows firewall asks once for Python). Both come from the ESP32-ConsoleServer project (its web tests 1 to 9 and 16 to 19, without SSH). The settings are changed with *Apply* only and set back at the end; TOTP tokens it makes are deleted again. Test 20 (this fork: a right password does not reset the lock-out before the TOTP code) is added. Tests 9 and 20 each lock the PC out of the website for 30 s (skip them with `--no-throttle`). The TOTP tests need the time from GNSS.
 
 ```
-python -I testing/board/radius_logins.py esp32timeserver.test [--pc-address 192.168.8.100] [--only 1,3] [--no-throttle]
+python -I testing/board/radius_logins.py esp32timeserver.test [--pc-address 192.168.8.100] [--only 1,3] [--no-throttle] [--port-base 18120]
 ```
 
 The web password comes from the environment variable `WEB_ADMIN_PASSWORD` or is asked for. `radius_server.py` alone is a RADIUS server for own tries (`--secret testing123 [--port 1812] [--mode normal|silent|bad_auth|bad_ma|no_ma|wrong_id|challenge|accept_all]`; users and modes in its header).

@@ -391,16 +391,6 @@ uint32_t web_auth_login_wait_seconds(const sockaddr_storage &source)
     return until_us > now_us ? static_cast<uint32_t>((until_us - now_us + 999999LL) / 1000000LL) : 0;
 }
 
-bool web_auth_check_password(const sockaddr_storage &source, const char *password, size_t length)
-{
-    const bool ok = check_password_hash(password, length);
-    if (ok)
-        record_success(source);
-    else
-        record_failure(source);
-    return ok;
-}
-
 bool web_auth_verify_current_password(const sockaddr_storage &source, const char *password, size_t length)
 {
     const bool ok = check_password_hash(password, length);
