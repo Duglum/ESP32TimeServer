@@ -176,7 +176,8 @@
     }
     let data = {};
     try { data = await response.json(); } catch (e) { data = {}; }
-    if (response.status === 401 && path !== '/api/login') showLogin();
+    // A refused login (both steps) is no expired session: loginDone() shows it
+    if (response.status === 401 && path !== '/api/login' && path !== '/api/login/totp') showLogin();
     return { status: response.status, data: data };
   }
 
