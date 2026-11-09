@@ -512,7 +512,8 @@ try {
     if ($script:InventoryRecommendation.Guid -cne '{00000000-0000-0000-0000-000000000001}' -or
         $script:InventoryRecommendation.Active -ne 'Yes' -or
         $inventoryOutput -notmatch 'Recommendation: Hardware Candidate B' -or
-        $inventoryOutput -notmatch 'partial-sample mean RTT: 1\.500 ms' -or
+        # The RTTs are formatted with the culture of the computer (German: 1,500 ms)
+        $inventoryOutput -notmatch 'partial-sample mean RTT: 1[.,]500 ms' -or
         $inventoryOutput -notmatch 'Wrong Route.*Not measurable' -or
         $inventoryOutput -notmatch 'Down Adapter.*Not tested \(not operationally up\)' -or
         $inventoryOutput -notmatch 'Connected Wi-Fi.*eligibility: No \(not physical wired Ethernet\)' -or
@@ -638,7 +639,7 @@ try {
     if (-not $case.Readiness.Ready -or $case.Readiness.Candidate.Adapter.ifIndex -ne 23 -or $case.Yellow.Count -ne 0 -or
         $case.Green.Count -ne 2 -or $case.Green[1] -notmatch "^PTP readiness: Ready - expected PTP adapter 'Ethernet 1 GB'" -or
         $case.Text -match 'This is allowed' -or
-        $case.Text -notmatch 'ping 3/3 replies; mean RTT: 9\.000 ms' -or
+        $case.Text -notmatch 'ping 3/3 replies; mean RTT: 9[.,]000 ms' -or
         $case.Text -notmatch 'Windows does not confirm that hardware timestamping is active on .Ethernet 1 GB.*ERROR_BAD_DRIVER.*Hardware timestamping is not required') {
         throw "single-path readiness was not reported as ready`n$($case.Text)"
     }
