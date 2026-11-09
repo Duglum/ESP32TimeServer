@@ -8,6 +8,7 @@
 // esp_https_server) so that the source address allow-list is checked before the TLS handshake.
 
 #include "web_server.h"
+#include "auth/radius_task.h"
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
 #include "custom/gnss_uart.h"
@@ -95,6 +96,7 @@ namespace
         0};
 
     httpd_handle_t s_server = nullptr;
+    void radius_use_settings(const web_settings_t &s, bool start);
     std::atomic<bool> s_running{false}; // the HTTPS server answers (web_admin_running)
     esp_tls_cfg_server_t s_tls_config{};
     web_tls_identity_t s_identity{};
@@ -1042,6 +1044,7 @@ namespace
         memcpy(restored.dns, s_pending->previous.dns, sizeof(restored.dns));
         web_net_apply(app_eth_netif(), restored, &running);
         web_settings_set_running(restored);
+        radius_use_settings(restored, false);
         memset(sets, 0, sizeof(sets_t)); // no secrets left on the heap
         delete sets;
         app_network_settings_changed();
@@ -1105,6 +1108,216 @@ namespace
     esp_err_t handle_not_found(httpd_req_t *req, httpd_err_code_t)
     {
         return send_error(req, "404 Not Found", "Not found");
+    }
+
+    // ---- RADIUS: requests that wait for the radius task (auth/radius_task.h) ----
+    // The handler hands the request over to the async API of esp_http_server and returns at once, so the server task
+    // goes on with the other connections (a request that waits keeps its socket: the LRU purge passes it over); the
+    // outcome comes back to the server task with httpd_queue_work, where the answer is sent (web_auth is only used in
+    // the server task).
+    struct radius_wait_t
+    {
+        enum class kind_t : uint8_t
+        {
+            test,
+        };
+        kind_t kind = kind_t::test;
+        httpd_req_t *req = nullptr; // the async copy of the request
+        radius_outcome_t outcome{};
+    };
+
+    // The settings in use for the radius task: started once a login method uses RADIUS (or start: the test of the
+    // page), then every change is handed to it
+    void radius_use_settings(const web_settings_t &s, bool start)
+    {
+        char host[WEB_HOSTNAME_MAX_LEN + 1];
+        web_settings_hostname(s, host, sizeof(host));
+        if ((start || s.web_login.radius) && !radius_task_running() && !radius_task_start(s.radius, host))
+            ESP_LOGE(TAG, "RADIUS: the client task could not be started (no memory)");
+        radius_task_apply(s.radius, host);
+    }
+
+    void radius_test_finish(radius_wait_t &w)
+    {
+        const radius_outcome_t &o = w.outcome;
+        cJSON *root = cJSON_CreateObject();
+        static const char *const NAMES[] = {"accept", "reject", "low_privilege", "missing_attribute", "no_answer", "busy"};
+        cJSON_AddStringToObject(root, "result", NAMES[static_cast<size_t>(o.result)]);
+        cJSON_AddStringToObject(root, "text", radius_result_text(o.result));
+        if (o.result != radius_result_t::no_answer && o.result != radius_result_t::busy)
+        {
+            cJSON_AddNumberToObject(root, "server", o.server + 1);
+            cJSON_AddNumberToObject(root, "rtt_ms", o.rtt_ms);
+            cJSON_AddBoolToObject(root, "challenge", o.challenge);
+            cJSON_AddStringToObject(root, "summary", o.summary);
+            if (o.result != radius_result_t::reject)
+                cJSON_AddNumberToObject(root, "privilege", o.privilege);
+        }
+        send_json(w.req, "200 OK", root);
+    }
+
+    // In the server task
+    void radius_finish(void *argument)
+    {
+        radius_wait_t *w = static_cast<radius_wait_t *>(argument);
+        switch (w->kind)
+        {
+        case radius_wait_t::kind_t::test:
+            radius_test_finish(*w);
+            break;
+        }
+        httpd_req_async_handler_complete(w->req);
+        delete w;
+    }
+
+    // In the radius task
+    void radius_done(void *context, uint32_t, const radius_outcome_t &outcome)
+    {
+        radius_wait_t *w = static_cast<radius_wait_t *>(context);
+        w->outcome = outcome;
+        if (s_server == nullptr || httpd_queue_work(s_server, radius_finish, w) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "RADIUS: the answer could not be handed to the web server");
+            httpd_req_async_handler_complete(w->req);
+            delete w;
+        }
+    }
+
+    // Submits a RADIUS login for the request; the answer is sent by radius_finish. On ESP_OK the request belongs to the
+    // async API (the handler returns ESP_OK and sends nothing); otherwise an error was sent.
+    esp_err_t radius_begin(httpd_req_t *req, radius_wait_t *w, radius_login_t &login)
+    {
+        httpd_req_t *copy = nullptr;
+        if (httpd_req_async_handler_begin(req, &copy) != ESP_OK)
+        {
+            memset(login.password, 0, sizeof(login.password));
+            delete w;
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        }
+        w->req = copy;
+        if (radius_submit(login, radius_done, w) == 0)
+        {
+            send_error(copy, "503 Service Unavailable", "A login from your address is still being checked, or too many at once: try again");
+            httpd_req_async_handler_complete(copy);
+            delete w;
+        }
+        return ESP_OK;
+    }
+
+    void to_mapped(const struct sockaddr_storage &peer, uint8_t out[16])
+    {
+        memset(out, 0, 16);
+        if (peer.ss_family == AF_INET)
+        {
+            out[10] = 0xFF;
+            out[11] = 0xFF;
+            memcpy(out + 12, &reinterpret_cast<const sockaddr_in *>(&peer)->sin_addr, 4);
+        }
+        else if (peer.ss_family == AF_INET6)
+            memcpy(out, &reinterpret_cast<const sockaddr_in6 *>(&peer)->sin6_addr, 16);
+    }
+
+    // The test of Security: a login with the RADIUS settings of the form (also before Apply; an empty secret keeps the
+    // one in use). Not counted for the login throttling (the page is logged in). Starts the radius task if needed.
+    esp_err_t handle_radius_test(httpd_req_t *req)
+    {
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (check_session(req, true, token) != gate_t::passed)
+            return ESP_OK;
+        struct sockaddr_storage peer{};
+        if (!peer_address(req, peer, false))
+            return send_error(req, "400 Bad Request", "No peer address");
+        cJSON *root = read_json(req);
+        if (root == nullptr)
+            return ESP_OK;
+        struct parts_t
+        {
+            web_settings_t running;
+            radius_settings_t radius;
+            web_login_settings_t web_login;
+            radius_login_t login;
+        };
+        parts_t *p = new (std::nothrow) parts_t{}; // about 7 kB: not on the server task stack
+        if (p == nullptr)
+        {
+            cJSON_Delete(root);
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        }
+        web_settings_get_running(p->running);
+        p->radius = p->running.radius;
+        char err[160] = "";
+        const cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
+        cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
+        bool ok = auth_settings_from_json(root, p->radius, p->web_login, true, err, sizeof(err)) &&
+                  radius_settings_validate(p->radius, true, err, sizeof(err));
+        if (ok && (!cJSON_IsString(user) || !radius_user_valid(user->valuestring, strlen(user->valuestring))))
+        {
+            snprintf(err, sizeof(err), "User name: 1 to %u characters, no control characters", static_cast<unsigned>(RADIUS_USER_MAX));
+            ok = false;
+        }
+        if (ok && (!cJSON_IsString(password) || !radius_password_valid(password->valuestring, strlen(password->valuestring))))
+        {
+            snprintf(err, sizeof(err), "Password: 1 to %u characters", static_cast<unsigned>(RADIUS_PASSWORD_MAX));
+            ok = false;
+        }
+        if (ok)
+        {
+            snprintf(p->login.user, sizeof(p->login.user), "%s", user->valuestring);
+            snprintf(p->login.password, sizeof(p->login.password), "%s", password->valuestring);
+        }
+        if (cJSON_IsString(password))
+            memset(password->valuestring, 0, strlen(password->valuestring));
+        cJSON_Delete(root);
+        radius_wait_t *w = ok ? new (std::nothrow) radius_wait_t{} : nullptr;
+        if (!ok || w == nullptr)
+        {
+            memset(p, 0, sizeof(*p)); // the secrets of the form
+            delete p;
+            return ok ? send_error(req, "503 Service Unavailable", "Out of memory") : send_error(req, "400 Bad Request", err);
+        }
+        radius_use_settings(p->running, true);
+        to_mapped(peer, p->login.source);
+        snprintf(p->login.nas_port_id, sizeof(p->login.nas_port_id), "https");
+        p->login.test = true;
+        p->login.settings = &p->radius; // copied by radius_submit
+        w->kind = radius_wait_t::kind_t::test;
+        const esp_err_t result = radius_begin(req, w, p->login);
+        memset(p, 0, sizeof(*p)); // the secrets of the form
+        delete p;
+        return result;
+    }
+
+    // "radius_status" of /api/state
+    void add_radius(cJSON *object)
+    {
+        radius_status_t st{};
+        radius_task_status(st);
+        cJSON_AddBoolToObject(object, "running", st.running);
+        cJSON *servers = cJSON_AddArrayToObject(object, "servers");
+        for (const radius_server_status_t &s : st.server)
+        {
+            cJSON *row = cJSON_CreateObject();
+            cJSON_AddBoolToObject(row, "used", s.used);
+            cJSON_AddStringToObject(row, "host", s.host);
+            cJSON_AddStringToObject(row, "address", s.address);
+            cJSON_AddNumberToObject(row, "port", s.port);
+            cJSON_AddBoolToObject(row, "dead", s.dead);
+            cJSON_AddNumberToObject(row, "dead_for_s", s.dead_for_s);
+            cJSON_AddNumberToObject(row, "last_answer_s", static_cast<double>(s.last_answer_ago_s));
+            cJSON_AddNumberToObject(row, "rtt_ms", s.last_rtt_ms);
+            cJSON_AddNumberToObject(row, "requests", s.requests);
+            cJSON_AddNumberToObject(row, "accepts", s.accepts);
+            cJSON_AddNumberToObject(row, "rejects", s.rejects);
+            cJSON_AddNumberToObject(row, "timeouts", s.timeouts);
+            cJSON_AddNumberToObject(row, "dropped", s.dropped);
+            cJSON_AddItemToArray(servers, row);
+        }
+        cJSON_AddNumberToObject(object, "accepted", st.accepted);
+        cJSON_AddNumberToObject(object, "rejected", st.rejected);
+        cJSON_AddNumberToObject(object, "refused", st.low_privilege);
+        cJSON_AddNumberToObject(object, "no_answer", st.no_answer);
+        cJSON_AddNumberToObject(object, "busy", st.busy);
+        cJSON_AddNumberToObject(object, "active", st.active);
     }
 
     esp_err_t handle_login(httpd_req_t *req)
@@ -1252,6 +1465,7 @@ namespace
         // Settings in use differ from what the next start would load (saved settings, else the defaults)
         cJSON_AddBoolToObject(root, "unsaved_changes", !web_settings_equal(sets->running, saved ? sets->saved : sets->defaults));
         add_confirm_info(root);
+        add_radius(cJSON_AddObjectToObject(root, "radius_status"));
 
         cJSON *allow = cJSON_AddArrayToObject(root, "allow_list");
         web_allow_entry_t entries[WEB_ALLOW_LIST_MAX];
@@ -1414,6 +1628,7 @@ namespace
         }
         web_settings_set_running(sets->candidate);
         app_apply_live_settings(sets->candidate);
+        radius_use_settings(sets->candidate, false);
         if (network_changed)
             app_network_settings_changed();
         ESP_LOGI(TAG, "Web admin: settings applied%s", network_changed ? " (network: waiting for the confirmation)" : "");
@@ -1801,6 +2016,10 @@ namespace
         app_get_diag(*d);
         if (d->task_count < WEB_DIAG_TASKS) // this task: the web admin (TLS, JSON)
             d->tasks[d->task_count++] = {"httpd", static_cast<uint32_t>(TASK_STACK), static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr))};
+        uint32_t radius_size = 0;
+        uint32_t radius_free = 0;
+        if (d->task_count < WEB_DIAG_TASKS && radius_task_stack(radius_size, radius_free)) // only once it was started
+            d->tasks[d->task_count++] = {"radius", radius_size, radius_free};
 
         cJSON *root = cJSON_CreateObject();
         cJSON_AddBoolToObject(root, "servo", d->servo);
@@ -2500,6 +2719,7 @@ namespace
         {
             web_settings_set_running(sets->candidate);
             app_apply_live_settings(sets->candidate);
+            radius_use_settings(sets->candidate, false);
             if (network_changed)
                 app_network_settings_changed();
         }
@@ -2561,6 +2781,7 @@ namespace
             {"/api/coredump/erase", HTTP_POST, handle_coredump_erase},
             {"/api/gnss/command", HTTP_POST, handle_gnss_command},
             {"/api/gnss/console", HTTP_GET, handle_gnss_console},
+            {"/api/radius/test", HTTP_POST, handle_radius_test},
         };
         for (const route_t &route : routes)
         {
@@ -2620,7 +2841,7 @@ namespace
         config.backlog_conn = 3;
         config.recv_wait_timeout = IO_TIMEOUT_S;
         config.send_wait_timeout = IO_TIMEOUT_S;
-        config.max_uri_handlers = 29; // 28 routes in use
+        config.max_uri_handlers = 34; // 29 routes in use
         config.max_resp_headers = 12;
         config.open_fn = transport_open;
         config.uri_match_fn = nullptr; // exact match
@@ -2641,6 +2862,7 @@ namespace
         esp_log_level_set("httpd", ESP_LOG_NONE);
         ESP_LOGI(TAG, "Web admin: https://%s/ (TCP %u, IPv4 and IPv6)", boot.fqdn, static_cast<unsigned int>(HTTPS_PORT));
         s_running.store(true, std::memory_order_release);
+        radius_use_settings(boot, false); // the radius task only while a login method uses RADIUS
 
         bool network_confirm = false;
         if (web_settings_boot_was_oneshot(&network_confirm) && network_confirm)

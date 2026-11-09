@@ -5,6 +5,7 @@ set(MAIN_SOURCES
         "auth/auth_config.cpp"
         "auth/radius_client.cpp"
         "auth/radius_proto.cpp"
+        "auth/radius_task.cpp"
         "auth/totp.cpp"
         "custom/app_metadata.cpp"
         "custom/crash_dump.cpp"
