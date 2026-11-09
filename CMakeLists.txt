@@ -1,6 +1,26 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Targets: ESP32-P4 (Waveshare ESP32-P4-ETH) and ESP32-S31 (ESP32-S31-Function-CoreBoard-1, ESP-IDF preview target,
+# untested on hardware in this fork)
+if(DEFINED IDF_TARGET AND NOT IDF_TARGET STREQUAL "" AND
+   NOT IDF_TARGET STREQUAL "esp32p4" AND NOT IDF_TARGET STREQUAL "esp32s31")
+    message(FATAL_ERROR "ESP32TimeServer supports only the esp32p4 and esp32s31 targets")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Each build folder resolves its own component graph (the LCD components depend on the target), so a P4 and an S31
+# build do not overwrite each other's lock file. A build folder without a lock starts from the lock of the project
+# folder (used before) when it is for the same target: the component versions in use stay as they are instead of being
+# resolved again to the newest ones.
+set(build_dependencies_lock "${CMAKE_BINARY_DIR}/dependencies.lock")
+if(NOT EXISTS "${build_dependencies_lock}" AND EXISTS "${CMAKE_SOURCE_DIR}/dependencies.lock")
+    file(READ "${CMAKE_SOURCE_DIR}/dependencies.lock" project_dependencies_lock)
+    string(FIND "${project_dependencies_lock}" "\ntarget: ${IDF_TARGET}\n" project_lock_target)
+    if(NOT project_lock_target EQUAL -1)
+        configure_file("${CMAKE_SOURCE_DIR}/dependencies.lock" "${build_dependencies_lock}" COPYONLY)
+    endif()
+endif()
+idf_build_set_property(DEPENDENCIES_LOCK "${build_dependencies_lock}")
 # Version text of the firmware (application description, console, web admin page). Set before project(): the
 # VERSION argument below has to be numeric for CMake.
 set(PROJECT_VER "3.0.5-WebIf")
@@ -9,6 +29,10 @@ project(ESP32TimeServer
         SPDX_LICENSE MIT
         DESCRIPTION "ESP32 NTP Stratum 1 Time Server for your home network"
 )
+
+if(NOT IDF_TARGET STREQUAL "esp32p4" AND NOT IDF_TARGET STREQUAL "esp32s31")
+    message(FATAL_ERROR "ESP32TimeServer supports only the esp32p4 and esp32s31 targets (idf.py set-target esp32p4)")
+endif()
 
 # Require ESP-IDF 6.1 or newer
 if (IDF_VERSION_MAJOR LESS 6 OR

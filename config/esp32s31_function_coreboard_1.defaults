@@ -1,0 +1,15 @@
+# ESP32-S31-Function-CoreBoard-1 (ESP-IDF preview target, untested on hardware in this fork; from upstream 4.0):
+# 16 MB flash, RGMII Gigabit Ethernet (YT8531 PHY). Build with
+#   idf.py --preview -B build_s31 -DIDF_TARGET=esp32s31 -D SDKCONFIG=build_s31/sdkconfig
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;config/esp32s31_function_coreboard_1.defaults" build
+CONFIG_IDF_TARGET="esp32s31"
+CONFIG_IDF_TARGET_ESP32S31=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_ESP32S31_REV_MIN_0=y
+CONFIG_ETH_EMAC_RGMII_TX_CLK_SRC_AUTO=y
+CONFIG_IEEE802154_ENABLED=n
+CONFIG_ESP_WIFI_REMOTE_ENABLED=n
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
+CONFIG_LWIP_IPV6=y
+CONFIG_LWIP_IPV6_AUTOCONFIG=y

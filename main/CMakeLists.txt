@@ -38,18 +38,23 @@ set(MAIN_REQUIRES
         esp_driver_gpio
         esp_driver_ledc
         esp_driver_mcpwm
-        esp_driver_sdmmc
         esp_driver_uart
         lwip
         mbedtls
         mqtt
         fatfs
         sdmmc
-        hd44780
-        pcf8574
         led_strip
         cjson
 )
+# TF card and LCD driver per target: the P4 has the TF slot on SDMMC and uses esp-idf-lib's HD44780 / PCF8574 driver;
+# the S31 board has an external TF reader on SPI, and esp-idf-lib does not declare the S31 (upstream 4.0 uses
+# jef-sure/hd44780 there)
+if(IDF_TARGET STREQUAL "esp32s31")
+    list(APPEND MAIN_REQUIRES esp_driver_sdspi esp_driver_spi jef-sure__hd44780)
+else()
+    list(APPEND MAIN_REQUIRES esp_driver_sdmmc hd44780 pcf8574)
+endif()
 
 idf_component_register(
     SRCS ${MAIN_SOURCES}

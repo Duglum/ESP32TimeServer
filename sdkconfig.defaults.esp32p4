@@ -1,0 +1,7 @@
+# ESP32-P4 only (ESP-IDF loads this file after sdkconfig.defaults when the target is esp32p4): Waveshare ESP32-P4-ETH
+# boards with 32 MB flash. Select the target with "idf.py set-target esp32p4" (or -DIDF_TARGET=esp32p4) in a new
+# build folder.
+CONFIG_IDF_TARGET="esp32p4"
+CONFIG_IDF_TARGET_ESP32P4=y
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="32MB"

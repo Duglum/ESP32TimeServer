@@ -20,7 +20,9 @@ struct web_app_status_t
     char build[48];
     bool firmware_check_pending;  // a new firmware of an update is still being checked (review E-06)
     char chip_revision[8];        // e.g. "v3.2"
-    bool ptp_loopback_supported;  // chip revision 3.0 or newer (PTP PPS loopback)
+    const char *chip_model;       // a string literal: "ESP32-P4" or "ESP32-S31"
+    uint8_t gpio_max;             // highest GPIO number of the chip (WEB_GPIO_MAX)
+    bool ptp_loopback_supported;  // ESP32-P4: chip revision 3.0 or newer; ESP32-S31: always (PTP PPS loopback)
     bool time_set;
     bool pps_active;
     bool gnss_locked;

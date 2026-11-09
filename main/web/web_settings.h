@@ -16,6 +16,11 @@
 #include <cstdint>
 
 #include "esp_err.h"
+#include "soc/soc_caps.h"
+
+// Highest GPIO number of the chip (ESP32-P4: 54, ESP32-S31: 61); web_is_reserved_gpio() also refuses the numbers the
+// chip does not have
+static constexpr int WEB_GPIO_MAX = SOC_GPIO_PIN_COUNT - 1;
 
 static constexpr size_t WEB_FQDN_SIZE = 254;        // 253 characters + NUL
 static constexpr size_t WEB_HOSTNAME_MAX_LEN = 32;  // first label of the FQDN (DHCP host name, esp_netif limit)

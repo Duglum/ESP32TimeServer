@@ -334,8 +334,8 @@
     'GNSS RX pin (GPIO)': 'GNSS-RX-Pin (GPIO)',
     'PPS pin (GPIO)': 'PPS-Pin (GPIO)',
     'PTP PPS loopback pin (GPIO, empty = off)': 'PTP-PPS-Loopback-Pin (GPIO, leer = aus)',
-    'The pin has to be empty: a free GPIO with nothing connected; it is driven as an output. Needs an ESP32-P4 with chip revision v3.0 or higher (this board: <span id="ptp-chip"></span>).':
-      'Der Pin muss frei sein: ein unbenutzter GPIO, an dem nichts angeschlossen ist; er wird als Ausgang betrieben. Benötigt einen ESP32-P4 mit Chip-Revision v3.0 oder höher (dieses Board: <span id="ptp-chip"></span>).',
+    'The pin has to be empty: a free GPIO with nothing connected; it is driven as an output. Needs an ESP32-P4 with chip revision v3.0 or higher, or an ESP32-S31 (this board: <span id="ptp-chip"></span>).':
+      'Der Pin muss frei sein: ein unbenutzter GPIO, an dem nichts angeschlossen ist; er wird als Ausgang betrieben. Benötigt einen ESP32-P4 mit Chip-Revision v3.0 oder höher oder einen ESP32-S31 (dieses Board: <span id="ptp-chip"></span>).',
     'This board\'s chip revision is below v3.0: the loopback does not work here, leave the field empty.':
       'Die Chip-Revision dieses Boards ist unter v3.0: Der Loopback funktioniert hier nicht, lassen Sie das Feld leer.',
     'GNSS TX pin': 'GNSS-TX-Pin',
@@ -500,6 +500,8 @@
     'TF card CMD, CLK, D0 to D3': 'TF-Karte CMD, CLK, D0 bis D3',
     'Waveshare ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH and ESP32-P4-WIFI-POE-ETH: the TF card slot is wired to these pins. If you use one of these boards, do not change them.':
       'Waveshare ESP32-P4-ETH, ESP32-P4-POE-ETH, ESP32-P4-WIFI-ETH und ESP32-P4-WIFI-POE-ETH: Der TF-Kartenslot ist mit diesen Pins verbunden. Wenn Sie eines dieser Boards verwenden, ändern Sie sie nicht.',
+    'ESP32-S31: an external 3.3 V TF card reader on SPI: CMD = MOSI, CLK = CLK, D0 = MISO, D3 = CS; D1 and D2 are not used. The pins are always reserved for the reader, also while MQTT or QoS 1 / 2 are off.':
+      'ESP32-S31: ein externer 3,3-V-TF-Kartenleser an SPI: CMD = MOSI, CLK = CLK, D0 = MISO, D3 = CS; D1 und D2 werden nicht verwendet. Die Pins sind immer für den Leser reserviert, auch wenn MQTT oder QoS 1 / 2 aus sind.',
     '4-bit SD mode. The pins are always reserved for the card, also while MQTT or QoS 1 / 2 are off.':
       '4-Bit-SD-Modus. Die Pins sind immer für die Karte reserviert, auch wenn MQTT oder QoS 1 / 2 aus sind.',
     'TF card CMD pin': 'TF-Karte CMD-Pin',

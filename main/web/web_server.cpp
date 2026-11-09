@@ -751,11 +751,11 @@ namespace
                   json_int(root, "ipv6_prefix", s.ipv6_prefix, 0, 128, err, err_size) &&
                   json_string(root, "ipv6_gateway", s.ipv6_gateway, sizeof(s.ipv6_gateway), err, err_size) &&
                   json_int(root, "ntp_client_rate_limit", s.ntp_client_rate_limit, 0, WEB_NTP_RATE_LIMIT_MAX, err, err_size) &&
-                  json_int(root, "gnss_tx_pin", s.gnss_tx_pin, -1, 54, err, err_size) &&
-                  json_int(root, "gnss_rx_pin", s.gnss_rx_pin, -1, 54, err, err_size) &&
-                  json_int(root, "gnss_pps_pin", s.gnss_pps_pin, -1, 54, err, err_size) &&
+                  json_int(root, "gnss_tx_pin", s.gnss_tx_pin, -1, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "gnss_rx_pin", s.gnss_rx_pin, -1, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "gnss_pps_pin", s.gnss_pps_pin, -1, WEB_GPIO_MAX, err, err_size) &&
                   json_int(root, "gnss_baud", s.gnss_baud, 0, 921600, err, err_size) &&
-                  json_int(root, "ptp_loopback_pin", s.ptp_loopback_pin, -1, 54, err, err_size) &&
+                  json_int(root, "ptp_loopback_pin", s.ptp_loopback_pin, -1, WEB_GPIO_MAX, err, err_size) &&
                   json_int(root, "pps_holdover", s.pps_holdover_s, 0, WEB_PPS_HOLDOVER_MAX_S, err, err_size) &&
                   json_int(root, "pps_lost_stratum", s.pps_lost_stratum, 2, 16, err, err_size) &&
                   json_bool(root, "pps_lost_serve", s.pps_lost_serve, err, err_size) &&
@@ -769,13 +769,13 @@ namespace
                   json_bool(root, "lcd_pad_hour", s.lcd_pad_hour, err, err_size) &&
                   json_bool(root, "lcd_show_time_zone", s.lcd_show_time_zone, err, err_size) &&
                   json_bool(root, "button_enabled", s.button_enabled, err, err_size) &&
-                  json_int(root, "button_pin", s.button_pin, 0, 54, err, err_size) &&
+                  json_int(root, "button_pin", s.button_pin, 0, WEB_GPIO_MAX, err, err_size) &&
                   json_string(root, "time_zone", s.time_zone, sizeof(s.time_zone), err, err_size) &&
                   json_int(root, "led_brightness", s.led_brightness_percent, 0, 100, err, err_size) &&
-                  json_int(root, "led_red_pin", s.led_red_pin, -1, 54, err, err_size) &&
-                  json_int(root, "led_green_pin", s.led_green_pin, -1, 54, err, err_size) &&
-                  json_int(root, "led_blue_pin", s.led_blue_pin, -1, 54, err, err_size) &&
-                  json_int(root, "led_ws2812_pin", s.led_ws2812_pin, -1, 54, err, err_size) &&
+                  json_int(root, "led_red_pin", s.led_red_pin, -1, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "led_green_pin", s.led_green_pin, -1, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "led_blue_pin", s.led_blue_pin, -1, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "led_ws2812_pin", s.led_ws2812_pin, -1, WEB_GPIO_MAX, err, err_size) &&
                   json_bool(root, "mqtt_enabled", s.mqtt_enabled, err, err_size) &&
                   json_mqtt_uri(root, s, err, err_size) &&
                   json_string(root, "mqtt_broker", s.mqtt_broker, sizeof(s.mqtt_broker), err, err_size) &&
@@ -792,12 +792,12 @@ namespace
                   json_bool(root, "mqtt_historical_reporting", s.mqtt_historical_reporting, err, err_size) &&
                   json_bool(root, "mqtt_distinguish_auth", s.mqtt_distinguish_auth, err, err_size) &&
                   json_int(root, "mqtt_tf_client_limit", s.mqtt_tf_client_limit, WEB_MQTT_TF_CLIENT_LIMIT_MIN, WEB_MQTT_TF_CLIENT_LIMIT_MAX, err, err_size) &&
-                  json_int(root, "tf_cmd_pin", s.tf_cmd_pin, 0, 54, err, err_size) &&
-                  json_int(root, "tf_clk_pin", s.tf_clk_pin, 0, 54, err, err_size) &&
-                  json_int(root, "tf_d0_pin", s.tf_d0_pin, 0, 54, err, err_size) &&
-                  json_int(root, "tf_d1_pin", s.tf_d1_pin, 0, 54, err, err_size) &&
-                  json_int(root, "tf_d2_pin", s.tf_d2_pin, 0, 54, err, err_size) &&
-                  json_int(root, "tf_d3_pin", s.tf_d3_pin, 0, 54, err, err_size) &&
+                  json_int(root, "tf_cmd_pin", s.tf_cmd_pin, 0, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "tf_clk_pin", s.tf_clk_pin, 0, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "tf_d0_pin", s.tf_d0_pin, 0, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "tf_d1_pin", s.tf_d1_pin, 0, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "tf_d2_pin", s.tf_d2_pin, 0, WEB_GPIO_MAX, err, err_size) &&
+                  json_int(root, "tf_d3_pin", s.tf_d3_pin, 0, WEB_GPIO_MAX, err, err_size) &&
                   json_bool(root, "ntp_auth_enabled", s.ntp_auth_enabled, err, err_size) &&
                   json_bool(root, "ntp_auth_required", s.ntp_auth_required, err, err_size) &&
                   json_bool(root, "ote_enabled", s.ote_enabled, err, err_size) &&
@@ -1283,6 +1283,8 @@ namespace
         cJSON_AddStringToObject(status, "build", sets->app.build);
         cJSON_AddBoolToObject(status, "firmware_check_pending", sets->app.firmware_check_pending);
         cJSON_AddStringToObject(status, "chip_revision", sets->app.chip_revision);
+        cJSON_AddStringToObject(status, "chip_model", sets->app.chip_model != nullptr ? sets->app.chip_model : "");
+        cJSON_AddNumberToObject(status, "gpio_max", sets->app.gpio_max);
         cJSON_AddBoolToObject(status, "ptp_loopback_supported", sets->app.ptp_loopback_supported);
         cJSON_AddNumberToObject(status, "uptime_s", static_cast<double>(esp_timer_get_time() / 1000000LL));
         char now_text[32] = "";

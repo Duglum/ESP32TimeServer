@@ -124,8 +124,13 @@ extern "C"
 #if RBG_LED_WS2812_MODULE_ENABLED
 #include "led_strip.h"
 #endif
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "driver/sdspi_host.h"
+#include "driver/spi_common.h"
+#else
 #include "driver/sdmmc_host.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
+#endif
 #include "sdmmc_cmd.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
@@ -135,8 +140,10 @@ extern "C"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
-#include "hd44780.h"
+#include "hd44780.h" // ESP32-P4: esp-idf-lib/hd44780; ESP32-S31: jef-sure/hd44780 (another API, see lcd_hw_start())
+#if !CONFIG_IDF_TARGET_ESP32S31
 #include "pcf8574.h"
+#endif
 #endif
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
@@ -188,6 +195,7 @@ static char s_time_zone[WEB_TZ_SIZE] = "";            // protected by s_live_set
 // (above 1.3: 14500 upstream; the board test of 4.76 received at most about 10600 frames per second, see CHANGELOG 4.77)
 static constexpr uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion1_3 = 8500;
 static constexpr uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion_above_1_3 = 10000;
+static constexpr uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32S31 = 8500; // upstream 4.0, not measured
 static uint32_t NTP_Requests_Per_Second_Load_Shedding_Threshold = 0;
 
 // Optional startup health test
@@ -677,6 +685,26 @@ static constexpr uint32_t periodicGNSSRefreshEveryThisNumberOfMinutes = 5UL;
 static constexpr time_t safeguardThresholdInSeconds = 1;
 static constexpr bool rebootIfSanityCheckFails = true;
 
+#if CONFIG_IDF_TARGET_ESP32S31
+// ESP32-S31-Function-CoreBoard-1 (upstream 4.0; untested on hardware in this fork): YT8531 Gigabit PHY on RGMII, the
+// PHY address is found on the bus (-1)
+static constexpr gpio_num_t ETH_MDC_GPIO = GPIO_NUM_5;
+static constexpr gpio_num_t ETH_MDIO_GPIO = GPIO_NUM_6;
+static constexpr gpio_num_t ETH_PHY_RST_GPIO = GPIO_NUM_7;
+static constexpr int ETH_PHY_ADDRESS = -1;
+static constexpr gpio_num_t ETH_RGMII_RX_CLK_GPIO = GPIO_NUM_14;
+static constexpr gpio_num_t ETH_RGMII_TX_CLK_GPIO = GPIO_NUM_13;
+static constexpr gpio_num_t ETH_RGMII_TX_CTL_GPIO = GPIO_NUM_12;
+static constexpr gpio_num_t ETH_RGMII_TXD0_GPIO = GPIO_NUM_8;
+static constexpr gpio_num_t ETH_RGMII_TXD1_GPIO = GPIO_NUM_9;
+static constexpr gpio_num_t ETH_RGMII_TXD2_GPIO = GPIO_NUM_10;
+static constexpr gpio_num_t ETH_RGMII_TXD3_GPIO = GPIO_NUM_11;
+static constexpr gpio_num_t ETH_RGMII_RX_CTL_GPIO = GPIO_NUM_15;
+static constexpr gpio_num_t ETH_RGMII_RXD0_GPIO = GPIO_NUM_19;
+static constexpr gpio_num_t ETH_RGMII_RXD1_GPIO = GPIO_NUM_18;
+static constexpr gpio_num_t ETH_RGMII_RXD2_GPIO = GPIO_NUM_17;
+static constexpr gpio_num_t ETH_RGMII_RXD3_GPIO = GPIO_NUM_16;
+#else
 // IP101 PHY with the external 50 MHz RMII clock of the Waveshare ESP32-P4 Ethernet boards
 static constexpr gpio_num_t ETH_MDC_GPIO = GPIO_NUM_31;
 static constexpr gpio_num_t ETH_MDIO_GPIO = GPIO_NUM_52;
@@ -689,11 +717,17 @@ static constexpr gpio_num_t ETH_RMII_TXD1_GPIO = GPIO_NUM_35;
 static constexpr gpio_num_t ETH_RMII_CRS_DV_GPIO = GPIO_NUM_28;
 static constexpr gpio_num_t ETH_RMII_RXD0_GPIO = GPIO_NUM_29;
 static constexpr gpio_num_t ETH_RMII_RXD1_GPIO = GPIO_NUM_30;
+#endif
 
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
 static constexpr i2c_port_t LCD_I2C_PORT = I2C_NUM_0;
+#if CONFIG_IDF_TARGET_ESP32S31
+static constexpr gpio_num_t LCD_I2C_SDA_GPIO = GPIO_NUM_38; // J2 pin 22
+static constexpr gpio_num_t LCD_I2C_SCL_GPIO = GPIO_NUM_39; // J2 pin 21
+#else
 static constexpr gpio_num_t LCD_I2C_SDA_GPIO = GPIO_NUM_8;
 static constexpr gpio_num_t LCD_I2C_SCL_GPIO = GPIO_NUM_7;
+#endif
 #endif
 
 static constexpr uint16_t NTP_PORT = 123;
@@ -728,10 +762,15 @@ static constexpr uint32_t OTE_Failure_Display_Time_Ms = 10000;
 static constexpr uint32_t OTE_Reboot_Delay_Ms = 5000;
 
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
+#if CONFIG_IDF_TARGET_ESP32S31
+static hd44780_t *s_lcd = nullptr;                // jef-sure/hd44780: created by lcd_hw_start()
+static lcd_bus_hd44780_t *s_lcd_bus = nullptr;    // bus found by lcd_try_device_address(), taken over by lcd_init()
+#else
 static i2c_dev_t s_lcd_io{};
+static hd44780_t s_lcd{};
+#endif
 static uint8_t s_lcd_addr = 0;
 static bool s_lcd_ready = false;
-static hd44780_t s_lcd{};
 static char s_lcd_last_lines[lcdRows][lcdColumns + 1] = {};
 static bool s_lcd_line_cached[lcdRows] = {};
 #else
@@ -1088,11 +1127,11 @@ static bool ptp_map_offset_at(int64_t raw_ns, int64_t &offset_ns)
 // timeouts and statistics, where 1 us does not matter.
 // 1 = raw systimer counter (recommended), 0 = esp_timer_get_time() (1 us, previous behaviour)
 #define FINE_LOCAL_TIMEBASE 1
-#if FINE_LOCAL_TIMEBASE && defined(CONFIG_IDF_TARGET_ESP32P4)
+#if FINE_LOCAL_TIMEBASE && (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31))
 // Counter behind esp_timer_get_time() (esp_timer/src/esp_timer_impl_systimer.c, placed in IRAM like esp_timer_get_time).
 // It is declared in a private esp_timer header, therefore the declaration is repeated here.
 extern "C" uint64_t esp_timer_impl_get_counter_reg(void);
-static constexpr uint32_t LOCAL_TICKS_PER_US = 16; // ESP32-P4 systimer: 16 MHz from the 40 MHz crystal
+static constexpr uint32_t LOCAL_TICKS_PER_US = 16; // ESP32-P4 and ESP32-S31 systimer: 16 MHz from the 40 MHz crystal
 static inline __attribute__((always_inline)) uint64_t local_ticks() { return esp_timer_impl_get_counter_reg(); }
 static inline __attribute__((always_inline)) int64_t local_ticks_to_ns(uint64_t ticks) { return static_cast<int64_t>((ticks * 125u) >> 1); } // 62.5 ns per tick
 static constexpr int8_t LOCAL_TIMEBASE_PRECISION_EXPONENT = -24; // 2^-24 s = 60 ns
@@ -2290,6 +2329,59 @@ static bool first_sync_candidates_are_plausible(const sync_candidate_t &first_ca
 }
 
 #if LIQUID_CRYSTAL_DISPLAY_ENABLED
+#if CONFIG_IDF_TARGET_ESP32S31
+// jef-sure/hd44780 (ESP32-S31): the geometry of the display
+static constexpr hd44780_geometry_t lcd_geometry()
+{
+    return lcdColumns == 20 && lcdRows == 4   ? HD44780_GEOMETRY_20X4
+           : lcdColumns == 20 && lcdRows == 2 ? HD44780_GEOMETRY_20X2
+           : lcdColumns == 16 && lcdRows == 4 ? HD44780_GEOMETRY_16X4
+           : lcdColumns == 16 && lcdRows == 2 ? HD44780_GEOMETRY_16X2
+           : lcdColumns == 40 && lcdRows == 2 ? HD44780_GEOMETRY_40X2
+                                              : HD44780_GEOMETRY_8X2;
+}
+static_assert((lcdColumns == 20 || lcdColumns == 16) && (lcdRows == 4 || lcdRows == 2), "LCD geometry not supported by jef-sure/hd44780");
+
+static esp_err_t lcd_hw_goto(uint8_t row)
+{
+    return s_lcd != nullptr ? lcd_try_set_cursor(s_lcd, 0, row) : ESP_ERR_INVALID_STATE;
+}
+
+static esp_err_t lcd_hw_puts(const char *text)
+{
+    return s_lcd != nullptr ? lcd_try_write_str(s_lcd, text) : ESP_ERR_INVALID_STATE;
+}
+
+// Init sequence, backlight on, display on, no cursor, cleared. Again later (set up again): a new bus and init
+static esp_err_t lcd_hw_start()
+{
+    if (s_lcd != nullptr)
+    {
+        const esp_err_t cleanup = lcd_deinit(&s_lcd); // also removes its bus
+        if (cleanup != ESP_OK)
+            ESP_LOGE(TAG, "LCD cleanup failed: %s", esp_err_to_name(cleanup));
+        s_lcd = nullptr;
+    }
+    if (s_lcd_bus == nullptr)
+        s_lcd_bus = lcd_bus_pcf8574_i2c_create(LCD_I2C_PORT, s_lcd_addr, LCD_I2C_SDA_GPIO, LCD_I2C_SCL_GPIO, 100000);
+    if (s_lcd_bus == nullptr)
+        return ESP_ERR_NOT_FOUND;
+    s_lcd = lcd_init(s_lcd_bus, lcd_geometry(), true);
+    s_lcd_bus = nullptr; // lcd_init owns the bus now, also when it fails
+    if (s_lcd == nullptr)
+        return ESP_FAIL;
+    esp_err_t err = lcd_try_backlight_on(s_lcd);
+    if (err == ESP_OK)
+        err = lcd_try_display_on(s_lcd);
+    if (err == ESP_OK)
+        err = lcd_try_cursor_off(s_lcd);
+    if (err == ESP_OK)
+        err = lcd_try_blink_off(s_lcd);
+    if (err == ESP_OK)
+        err = lcd_try_clear_screen(s_lcd);
+    return err;
+}
+#else
 static esp_err_t lcd_write_i2c(const hd44780_t *lcd, uint8_t data)
 {
     (void)lcd;
@@ -2311,6 +2403,30 @@ static void init_lcd_descriptor()
     s_lcd.pins.bl = 3;
     s_lcd.backlight = true;
 }
+
+static inline esp_err_t lcd_hw_goto(uint8_t row)
+{
+    return hd44780_gotoxy(&s_lcd, 0, row);
+}
+
+static inline esp_err_t lcd_hw_puts(const char *text)
+{
+    return hd44780_puts(&s_lcd, text);
+}
+
+// Init sequence, backlight on, display on, no cursor, cleared (also to set the display up again)
+static esp_err_t lcd_hw_start()
+{
+    esp_err_t err = hd44780_init(&s_lcd);
+    if (err == ESP_OK)
+        err = hd44780_switch_backlight(&s_lcd, true);
+    if (err == ESP_OK)
+        err = hd44780_control(&s_lcd, true, false, false);
+    if (err == ESP_OK)
+        err = hd44780_clear(&s_lcd);
+    return err;
+}
+#endif
 
 static void write_lcd_line(uint8_t row, const char *padded);
 
@@ -2371,7 +2487,7 @@ static void write_lcd_line(uint8_t row, const char *padded)
         return;
     }
 
-    esp_err_t err = hd44780_gotoxy(&s_lcd, 0, row);
+    esp_err_t err = lcd_hw_goto(row);
     if (err != ESP_OK)
     {
 #if DEBUG_ENABLED
@@ -2383,7 +2499,7 @@ static void write_lcd_line(uint8_t row, const char *padded)
         return;
     }
 
-    err = hd44780_puts(&s_lcd, padded);
+    err = lcd_hw_puts(padded);
     if (err != ESP_OK)
     {
 #if DEBUG_ENABLED
@@ -2454,13 +2570,7 @@ static bool maintain_lcd()
     s_lcd_write_failed.store(false, std::memory_order_relaxed);
 
     xSemaphoreTake(s_lcd_mutex, portMAX_DELAY);
-    esp_err_t err = hd44780_init(&s_lcd);
-    if (err == ESP_OK)
-        err = hd44780_switch_backlight(&s_lcd, true);
-    if (err == ESP_OK)
-        err = hd44780_control(&s_lcd, true, false, false);
-    if (err == ESP_OK)
-        err = hd44780_clear(&s_lcd);
+    const esp_err_t err = lcd_hw_start();
     memset(s_lcd_line_cached, 0, sizeof(s_lcd_line_cached));
     xSemaphoreGive(s_lcd_mutex);
     if (err != ESP_OK)
@@ -2472,6 +2582,12 @@ static bool maintain_lcd()
 
 static esp_err_t lcd_try_device_address(uint8_t address)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    // The bus factory probes the address (i2c_master_probe)
+    s_lcd_bus = lcd_bus_pcf8574_i2c_create(LCD_I2C_PORT, address, LCD_I2C_SDA_GPIO, LCD_I2C_SCL_GPIO, 100000);
+    if (s_lcd_bus == nullptr)
+        return ESP_ERR_NOT_FOUND;
+#else
     uint8_t port_state = 0;
 
     memset(&s_lcd_io, 0, sizeof(s_lcd_io));
@@ -2486,6 +2602,7 @@ static esp_err_t lcd_try_device_address(uint8_t address)
         memset(&s_lcd_io, 0, sizeof(s_lcd_io));
         return err;
     }
+#endif
 
     s_lcd_addr = address;
     return ESP_OK;
@@ -2493,11 +2610,15 @@ static esp_err_t lcd_try_device_address(uint8_t address)
 
 static esp_err_t setup_lcd()
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    esp_err_t err = ESP_OK;
+#else
     init_lcd_descriptor();
 
     esp_err_t err = i2cdev_init();
     if (err != ESP_OK)
         return err;
+#endif
 
     err = lcd_try_device_address(lcdI2CAddressPrimary);
     if (err != ESP_OK)
@@ -2506,19 +2627,7 @@ static esp_err_t setup_lcd()
     if (err != ESP_OK)
         return err;
 
-    err = hd44780_init(&s_lcd);
-    if (err != ESP_OK)
-        return err;
-
-    err = hd44780_switch_backlight(&s_lcd, true);
-    if (err != ESP_OK)
-        return err;
-
-    err = hd44780_control(&s_lcd, true, false, false);
-    if (err != ESP_OK)
-        return err;
-
-    err = hd44780_clear(&s_lcd);
+    err = lcd_hw_start();
     if (err != ESP_OK)
         return err;
 
@@ -8994,6 +9103,42 @@ static void mqtt_tf_mount()
 {
 #if MQTT_ENABLED
     {
+#if CONFIG_IDF_TARGET_ESP32S31
+        // ESP32-S31-Function-CoreBoard-1: no slot, an external 3.3 V TF reader on SPI (upstream 4.0). The SD pins of the
+        // settings in SPI mode: CMD = MOSI, CLK = SCK, D0 = MISO, D3 = CS; D1 and D2 are not used
+        sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+        host.max_freq_khz = 4000; // conservative for short jumper wires
+        const spi_host_device_t spi_host = static_cast<spi_host_device_t>(host.slot);
+        spi_bus_config_t bus_config{};
+        bus_config.mosi_io_num = s_cfg->tf_cmd_pin;
+        bus_config.miso_io_num = s_cfg->tf_d0_pin;
+        bus_config.sclk_io_num = s_cfg->tf_clk_pin;
+        bus_config.quadwp_io_num = -1;
+        bus_config.quadhd_io_num = -1;
+        bus_config.data4_io_num = -1;
+        bus_config.data5_io_num = -1;
+        bus_config.data6_io_num = -1;
+        bus_config.data7_io_num = -1;
+        bus_config.max_transfer_sz = 4000;
+        esp_err_t result = spi_bus_initialize(spi_host, &bus_config, SDSPI_DEFAULT_DMA);
+        if (result != ESP_OK)
+        {
+#if DEBUG_ENABLED
+            ESP_LOGW(TAG, "Unable to initialize the TF SPI bus: %s. Queued MQTT messages will be stored in ram.", esp_err_to_name(result));
+#endif
+            return;
+        }
+        // Same name as on the P4: releases what the mount needed (here the SPI bus)
+        auto cleanup_power_control = [spi_host]()
+        {
+            const esp_err_t cleanup = spi_bus_free(spi_host);
+            if (cleanup != ESP_OK)
+                ESP_LOGW(TAG, "Unable to release the TF SPI bus: %s", esp_err_to_name(cleanup));
+        };
+        sdspi_device_config_t slot = SDSPI_DEVICE_CONFIG_DEFAULT();
+        slot.host_id = spi_host;
+        slot.gpio_cs = static_cast<gpio_num_t>(s_cfg->tf_d3_pin);
+#else
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
         sd_pwr_ctrl_ldo_config_t ldo_config{};
         ldo_config.ldo_chan_id = 4;
@@ -9026,12 +9171,17 @@ static void mqtt_tf_mount()
         slot.d2 = static_cast<gpio_num_t>(s_cfg->tf_d2_pin);
         slot.d3 = static_cast<gpio_num_t>(s_cfg->tf_d3_pin);
         slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+#endif
         esp_vfs_fat_mount_config_t mount_config{};
         mount_config.format_if_mount_failed = false;
         mount_config.max_files = 4;
         mount_config.allocation_unit_size = 16 * 1024;
 
+#if CONFIG_IDF_TARGET_ESP32S31
+        result = esp_vfs_fat_sdspi_mount(TF_MOUNT_POINT, &host, &slot, &mount_config, &s_tf_card);
+#else
         result = esp_vfs_fat_sdmmc_mount(TF_MOUNT_POINT, &host, &slot, &mount_config, &s_tf_card);
+#endif
         if (result != ESP_OK)
         {
 #if DEBUG_ENABLED
@@ -9542,9 +9692,48 @@ static void ethernet_ip_event_handler(void *, esp_event_base_t, int32_t event, v
     }
 }
 
-// ESP-IDF Ethernet driver (internal EMAC, IP101 PHY, RMII with external clock) and its lwIP interface. The host
-// name is set before the start, so the first DHCP request already carries it. DHCPv4 runs by default; the network
-// settings of the web admin are applied by web_net_apply() afterwards.
+#if CONFIG_IDF_TARGET_ESP32S31
+// YT8531 Gigabit PHY of the ESP32-S31-Function-CoreBoard-1 (upstream 4.0): RX and TX clock delays of RGMII in its
+// extended registers (0xA001 bit 8: RX delay; 0xA003 low byte 0xDD: TX delay) and autonegotiation. Untested on
+// hardware in this fork.
+static esp_err_t yt8531_phy_init(esp_eth_handle_t handle)
+{
+    constexpr uint32_t CHIP_CONFIG = 0xA001;
+    constexpr uint32_t RGMII_CONFIG = 0xA003;
+    bool autonegotiation = true;
+    esp_err_t error = esp_eth_ioctl(handle, ETH_CMD_S_AUTONEGO, &autonegotiation);
+    if (error != ESP_OK)
+        return error;
+    const auto modify = [handle](uint32_t address, uint32_t clear_mask, uint32_t set_mask) -> esp_err_t
+    {
+        constexpr uint32_t EXT_ADDRESS_REGISTER = 0x1E;
+        constexpr uint32_t EXT_DATA_REGISTER = 0x1F;
+        uint32_t value = address;
+        esp_eth_phy_reg_rw_data_t access{};
+        access.reg_value_p = &value;
+        access.reg_addr = EXT_ADDRESS_REGISTER;
+        esp_err_t result = esp_eth_ioctl(handle, ETH_CMD_WRITE_PHY_REG, &access);
+        if (result != ESP_OK)
+            return result;
+        access.reg_addr = EXT_DATA_REGISTER;
+        result = esp_eth_ioctl(handle, ETH_CMD_READ_PHY_REG, &access);
+        if (result != ESP_OK)
+            return result;
+        value = (value & ~clear_mask) | set_mask;
+        return esp_eth_ioctl(handle, ETH_CMD_WRITE_PHY_REG, &access);
+    };
+    error = modify(CHIP_CONFIG, 0, 1U << 8);
+    if (error == ESP_OK)
+        error = modify(RGMII_CONFIG, 0xFFU, 0xDDU);
+    if (error == ESP_OK)
+        ESP_LOGI(TAG, "YT8531 RGMII delays and autonegotiation configured");
+    return error;
+}
+#endif
+
+// ESP-IDF Ethernet driver (internal EMAC; P4: IP101 PHY, RMII with external clock; S31: YT8531 PHY, RGMII) and its
+// lwIP interface. The host name is set before the start, so the first DHCP request already carries it. DHCPv4 runs by
+// default; the network settings of the web admin are applied by web_net_apply() afterwards.
 static bool start_ethernet_driver()
 {
     const auto failed = [](const char *what, esp_err_t result)
@@ -9566,6 +9755,22 @@ static bool start_ethernet_driver()
     eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
     emac_config.smi_gpio.mdc_num = ETH_MDC_GPIO;
     emac_config.smi_gpio.mdio_num = ETH_MDIO_GPIO;
+#if CONFIG_IDF_TARGET_ESP32S31
+    emac_config.interface = EMAC_DATA_INTERFACE_RGMII;
+    emac_config.clock_config.rgmii.clock_rx_gpio = ETH_RGMII_RX_CLK_GPIO;
+    emac_config.clock_config.rgmii.clock_tx_gpio = ETH_RGMII_TX_CLK_GPIO;
+    emac_config.clock_config.rgmii.clock_phy_ref_gpio = GPIO_NUM_NC;
+    emac_config.emac_dataif_gpio.rgmii.tx_ctl_num = ETH_RGMII_TX_CTL_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.txd0_num = ETH_RGMII_TXD0_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.txd1_num = ETH_RGMII_TXD1_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.txd2_num = ETH_RGMII_TXD2_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.txd3_num = ETH_RGMII_TXD3_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.rx_ctl_num = ETH_RGMII_RX_CTL_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.rxd0_num = ETH_RGMII_RXD0_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.rxd1_num = ETH_RGMII_RXD1_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.rxd2_num = ETH_RGMII_RXD2_GPIO;
+    emac_config.emac_dataif_gpio.rgmii.rxd3_num = ETH_RGMII_RXD3_GPIO;
+#else
     emac_config.interface = EMAC_DATA_INTERFACE_RMII;
     emac_config.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
     emac_config.clock_config.rmii.clock_gpio = ETH_RMII_CLK_GPIO;
@@ -9575,6 +9780,7 @@ static bool start_ethernet_driver()
     emac_config.emac_dataif_gpio.rmii.crs_dv_num = ETH_RMII_CRS_DV_GPIO;
     emac_config.emac_dataif_gpio.rmii.rxd0_num = ETH_RMII_RXD0_GPIO;
     emac_config.emac_dataif_gpio.rmii.rxd1_num = ETH_RMII_RXD1_GPIO;
+#endif
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
     if (mac == nullptr)
         return failed("esp_eth_mac_new_esp32", ESP_ERR_NO_MEM);
@@ -9591,6 +9797,11 @@ static bool start_ethernet_driver()
     result = esp_eth_driver_install(&eth_config, &s_eth_handle);
     if (result != ESP_OK)
         return failed("esp_eth_driver_install", result);
+#if CONFIG_IDF_TARGET_ESP32S31
+    result = yt8531_phy_init(s_eth_handle);
+    if (result != ESP_OK)
+        return failed("yt8531_phy_init", result);
+#endif
 
     const esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
     s_eth_netif = esp_netif_new(&netif_config);
@@ -12245,7 +12456,14 @@ void app_get_status(web_app_status_t &status)
     esp_chip_info(&chip_info);
     snprintf(status.chip_revision, sizeof(status.chip_revision), "v%u.%u",
              static_cast<unsigned int>(chip_info.revision / 100) % 100u, static_cast<unsigned int>(chip_info.revision % 100));
+#if CONFIG_IDF_TARGET_ESP32S31
+    status.chip_model = "ESP32-S31";
+    status.ptp_loopback_supported = true; // the EMAC PPS output can be routed to any GPIO
+#else
+    status.chip_model = "ESP32-P4";
     status.ptp_loopback_supported = chip_info.revision >= 300;
+#endif
+    status.gpio_max = WEB_GPIO_MAX;
     status.time_set = s_time_has_been_set.load(std::memory_order_acquire);
     status.pps_active = s_pps_discipline_active.load(std::memory_order_acquire);
     status.gnss_locked = s_gnss_locked.load(std::memory_order_acquire);
@@ -12337,7 +12555,11 @@ void app_get_status(web_app_status_t &status)
     if (status.link_up && s_eth_handle != nullptr && esp_eth_ioctl(s_eth_handle, ETH_CMD_G_SPEED, &link_speed) == ESP_OK &&
         esp_eth_ioctl(s_eth_handle, ETH_CMD_G_DUPLEX_MODE, &link_duplex) == ESP_OK)
     {
+#if CONFIG_IDF_TARGET_ESP32S31
+        status.link_speed_mbps = link_speed == ETH_SPEED_1000M ? 1000 : link_speed == ETH_SPEED_100M ? 100 : 10;
+#else
         status.link_speed_mbps = link_speed == ETH_SPEED_100M ? 100 : 10;
+#endif
         status.link_full_duplex = link_duplex == ETH_DUPLEX_FULL;
     }
     status.eth_recoveries = s_ethernet_recoveries.load(std::memory_order_relaxed);
@@ -12526,9 +12748,14 @@ void setup_ntp_server()
     // set the NTP load shedding threshold based on the ESP32-P4 chip version
     esp_chip_info_t chip_info{};
     esp_chip_info(&chip_info);
+#if CONFIG_IDF_TARGET_ESP32S31
+    (void)chip_info;
+    NTP_Requests_Per_Second_Load_Shedding_Threshold = NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32S31;
+#else
     NTP_Requests_Per_Second_Load_Shedding_Threshold = chip_info.revision <= 103
                                                           ? NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion1_3
                                                           : NTP_Requests_Per_Second_Load_Shedding_Threshold_ESP32P4_ChipVersion_above_1_3;
+#endif
 
 #if DEBUG_ENABLED
     ESP_LOGI(TAG, "NTP load shedding threshold set to %u requests per second", NTP_Requests_Per_Second_Load_Shedding_Threshold);

@@ -16,6 +16,7 @@
 
 extern "C"
 {
+#include "esp_bit_defs.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_rom_crc.h"
@@ -107,7 +108,11 @@ namespace
     constexpr uint16_t DEFAULT_GNSS_MIN_FIX_AGE_S = 0;
     constexpr uint8_t DEFAULT_GNSS_MIN_SATELLITES = 0;
     constexpr bool DEFAULT_BUTTON_ENABLED = false;
+#if CONFIG_IDF_TARGET_ESP32S31
+    constexpr int8_t DEFAULT_BUTTON_PIN = 40; // ESP32-S31-Function-CoreBoard-1, J2 pin 19
+#else
     constexpr int8_t DEFAULT_BUTTON_PIN = 3;
+#endif
     constexpr char DEFAULT_MQTT_TOPIC[] = "ESP32TimeServer";
 
     // PTP master (version 14): off; the values of the default profile of IEEE 1588-2019
@@ -569,6 +574,16 @@ bool web_is_valid_time_zone(const char *tz)
 
 bool web_is_reserved_gpio(int gpio)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    // ESP32-S31-Function-CoreBoard-1 (upstream 4.0 wiring; the strapping and USB pins of the S31 are not known to this
+    // fork, see the board documentation): RGMII and SMI of the YT8531 PHY (5 to 19), UART0 console (58, 59) and the
+    // LCD I2C bus (38, 39). GPIO 29 and 41 do not exist (SOC_GPIO_VALID_GPIO_MASK).
+    static constexpr int reserved[] = {
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, // Ethernet RGMII, MDC, MDIO, PHY reset
+        58, 59,                                                 // UART0 console
+        38, 39,                                                 // LCD I2C (SDA, SCL)
+    };
+#else
     // Waveshare ESP32-P4-ETH: RMII and SMI of the Ethernet PHY, UART0 (console), strapping pins (34 to 38, partly
     // RMII as well), USB Serial/JTAG and the LCD I2C bus. The TF card pins and the button pin are settings of their
     // own (TF default 39 to 44, the TF slot of the board) and are checked against the other pins by
@@ -579,7 +594,8 @@ bool web_is_reserved_gpio(int gpio)
         24, 25,                                 // USB Serial/JTAG
         7, 8,                                   // LCD I2C (SCL, SDA)
     };
-    if (gpio < 0 || gpio > 54)
+#endif
+    if (gpio < 0 || gpio > WEB_GPIO_MAX || ((SOC_GPIO_VALID_GPIO_MASK >> gpio) & 1ULL) == 0)
         return true;
     for (int r : reserved)
         if (gpio == r)
@@ -916,10 +932,17 @@ void web_settings_defaults(web_settings_t &out)
     // ---- RGB LED ----
     out.led_type = web_led_type_t::none;
     out.led_brightness_percent = 70;
+#if CONFIG_IDF_TARGET_ESP32S31
+    out.led_red_pin = 48;    // J2 pin 14
+    out.led_green_pin = 47;  // J2 pin 13
+    out.led_blue_pin = 46;   // J2 pin 16
+    out.led_ws2812_pin = 60; // the addressable LED on the board
+#else
     out.led_red_pin = 6;
     out.led_green_pin = 5;
     out.led_blue_pin = 4;
     out.led_ws2812_pin = 4;
+#endif
     out.led_rgb[static_cast<size_t>(web_led_state_t::startup)] = 0x0000FF;  // blue
     out.led_rgb[static_cast<size_t>(web_led_state_t::normal)] = 0x00FF00;   // green
     out.led_rgb[static_cast<size_t>(web_led_state_t::sync)] = 0xFFFFFF;     // white
@@ -938,12 +961,23 @@ void web_settings_defaults(web_settings_t &out)
     out.mqtt_retain = true;
     out.mqtt_report_period_s = 900;
     out.mqtt_tf_client_limit = 500;
+#if CONFIG_IDF_TARGET_ESP32S31
+    // External SPI TF reader of upstream 4.0 (GPIO 0 and 1 need the optional 32.768 kHz crystal of the board to stay
+    // unpopulated): CMD = MOSI 1, CLK 2, D0 = MISO 3, D3 = CS 0; D1 and D2 are not used in SPI mode
+    out.tf_cmd_pin = 1;
+    out.tf_clk_pin = 2;
+    out.tf_d0_pin = 3;
+    out.tf_d1_pin = 0;
+    out.tf_d2_pin = 0;
+    out.tf_d3_pin = 0;
+#else
     out.tf_cmd_pin = 44;
     out.tf_clk_pin = 43;
     out.tf_d0_pin = 39;
     out.tf_d1_pin = 40;
     out.tf_d2_pin = 41;
     out.tf_d3_pin = 42;
+#endif
 
     // ---- Over The Ethernet updates and NTP authentication: off, no keys ----
     out.ote_enabled = false;
@@ -1287,10 +1321,17 @@ bool web_settings_validate(const web_settings_t &s, char *err, size_t err_size)
         FAIL("PTP PPS loopback pin: GPIO %d cannot be used", s.ptp_loopback_pin);
     if (s.button_enabled && !add_pin(s.button_pin, "Button"))
         FAIL("Button pin: GPIO %d cannot be used", s.button_pin);
-    // TF card: always taken (on the Waveshare boards the slot is wired to these pins)
+    // TF card: always taken (on the Waveshare boards the slot is wired to these pins). ESP32-S31: SPI mode, D1 and D2
+    // are not used
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (!add_pin(s.tf_cmd_pin, "TF CMD") || !add_pin(s.tf_clk_pin, "TF CLK") || !add_pin(s.tf_d0_pin, "TF D0") ||
+        !add_pin(s.tf_d3_pin, "TF D3"))
+        FAIL("TF card pins: one of the GPIOs cannot be used");
+#else
     if (!add_pin(s.tf_cmd_pin, "TF CMD") || !add_pin(s.tf_clk_pin, "TF CLK") || !add_pin(s.tf_d0_pin, "TF D0") ||
         !add_pin(s.tf_d1_pin, "TF D1") || !add_pin(s.tf_d2_pin, "TF D2") || !add_pin(s.tf_d3_pin, "TF D3"))
         FAIL("TF card pins: one of the GPIOs cannot be used");
+#endif
     switch (s.led_type)
     {
     case web_led_type_t::none:

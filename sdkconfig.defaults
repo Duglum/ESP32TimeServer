@@ -4,8 +4,8 @@
 # 1 ms ticks (the timing code waits in steps of a few ms)
 CONFIG_FREERTOS_HZ=1000
 
-CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="32MB"
+# Target and flash size: sdkconfig.defaults.esp32p4 (Waveshare ESP32-P4-ETH, loaded by ESP-IDF for the P4 only) and
+# config/esp32s31_function_coreboard_1.defaults (ESP32-S31)
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
@@ -14,9 +14,6 @@ CONFIG_BOOTLOADER_SIZE_IN_BYTES=0x7000
 # Review E-06: an image written by an OTE update starts as "pending verify"; the firmware keeps it after its self
 # check, otherwise the bootloader starts the previous image (needs the new bootloader: flash it once over USB)
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-
-CONFIG_IDF_TARGET="esp32p4"
-CONFIG_IDF_TARGET_ESP32P4=y
 
 # Required to build on ESP-IDF v6.0.2+
 CONFIG_LIBC_NEWLIB=y

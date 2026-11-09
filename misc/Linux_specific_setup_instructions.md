@@ -90,6 +90,12 @@ For ESP32-P4 modules at revision 3.1 and above (including the WaveShare ESP32-P4
 idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;config/esp32p4_rev_v3_1.defaults" set-target esp32p4 build
 ```
 
+For the ESP32-S31-Function-CoreBoard-1 (experimental and untested on hardware, see [ESP32-S31.md](ESP32-S31.md)):
+```
+python tools/build.py --profile s31
+```
+`tools/build.py` builds the other profiles as well, each in its own folder (`--profile pre_v3`, `v3_0`, `v3_1`).
+
 **Setup Step 4 - Flash**
 
 Before you can flash the ESP32, you need to find out what port Linux knows it as.  /dev/ttyACM0 is generally a good assumption, but it is also easy to find.  Look in the /dev directory for devices that are in the dialout group.  Devices that start with ttyS are serial ports, you probably do not want those.  This example is from my system:

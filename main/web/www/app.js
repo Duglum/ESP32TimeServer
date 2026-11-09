@@ -992,8 +992,16 @@
       : t('off, {n} requests dropped since the start', { n: st.ntp_rate_limited });
     $('st-firmware').textContent = st.firmware + ' (' + st.build + ')' +
       (st.firmware_check_pending ? ', ' + t('new after an update: being checked (at most 15 min)') : '');
-    $('st-chip').textContent = 'ESP32-P4 ' + st.chip_revision;
-    $('ptp-chip').textContent = st.chip_revision;
+    const chip = (st.chip_model || 'ESP32-P4') + ' ' + st.chip_revision;
+    $('st-chip').textContent = chip;
+    $('ptp-chip').textContent = chip;
+    // ESP32-S31: TF card reader on SPI (D1, D2 not used), GPIOs up to 61
+    const s31 = st.chip_model === 'ESP32-S31';
+    document.querySelectorAll('.tf-sd-only').forEach((el) => { el.hidden = s31; });
+    $('tf-p4-note').hidden = s31;
+    $('tf-sd-hint').hidden = s31;
+    $('tf-s31-note').hidden = !s31;
+    if (st.gpio_max) document.querySelectorAll('input[data-gpio]').forEach((el) => { el.max = String(st.gpio_max); });
     $('st-uptime').textContent = duration(st.uptime_s);
     $('st-heap').textContent = Math.round(st.free_heap / 1024) + ' kB';
     renderMqtt(st);
@@ -1821,7 +1829,7 @@
     // On for this start only: a one-shot start while the next start (saved settings, else defaults) has them off
     const next = state.saved || state.defaults;
     $('ote-once-on').hidden = !(on && state.oneshot_boot && !next.ote_enabled);
-    $('ote-chip').textContent = 'ESP32-P4 ' + state.status.chip_revision;
+    $('ote-chip').textContent = (state.status.chip_model || 'ESP32-P4') + ' ' + state.status.chip_revision;
     if (!oteUploading) {
       $('ote-file').disabled = !on;
       $('ote-upload').disabled = !on;
