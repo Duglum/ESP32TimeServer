@@ -175,18 +175,31 @@ static SemaphoreHandle_t ptp_mutex()
 }
 
 static ptp_config_t s_ptp_config;                  // guarded by ptp_mutex()
+// Incremented when a setting changes that the master selection or the Sync / Announce schedule depends on: the
+// ports then listen again before they serve (two announce intervals without Sync, Announce and Delay_Resp). Not for
+// an Apply that leaves these settings as they are (an Apply of other settings, a transport switched on or off, the
+// rate limit, the follower timeout, TAI - UTC, the latencies, the authentication): those take effect without a pause.
 static std::atomic<uint32_t> s_ptp_config_generation{0};
 static ptp::FollowerTable<PTP_FOLLOWER_CAPACITY, PTP_FOLLOWER_CAPACITY> s_ptp_followers(30LL * 1000000LL); // ptp_mutex()
+
+static bool ptp_selection_settings_equal(const ptp_config_t &a, const ptp_config_t &b)
+{
+    return a.domain == b.domain && a.priority1 == b.priority1 && a.priority2 == b.priority2 &&
+           a.clock_accuracy == b.clock_accuracy && a.master_selection == b.master_selection &&
+           a.log_sync_interval == b.log_sync_interval && a.log_announce_interval == b.log_announce_interval;
+}
 
 // Takes over new settings (any task)
 static void ptp_set_config(const ptp_config_t &config)
 {
     if (xSemaphoreTake(ptp_mutex(), portMAX_DELAY) != pdTRUE)
         return;
+    const bool restart_selection = !ptp_selection_settings_equal(s_ptp_config, config);
     s_ptp_config = config;
     for (size_t t = 0; t < PTP_TRANSPORT_COUNT; ++t)
         s_ptp_transport_enabled[t].store(config.enabled[t], std::memory_order_release);
-    s_ptp_config_generation.fetch_add(1, std::memory_order_acq_rel);
+    if (restart_selection)
+        s_ptp_config_generation.fetch_add(1, std::memory_order_acq_rel);
     xSemaphoreGive(ptp_mutex());
 }
 
@@ -800,8 +813,8 @@ static void ptp_service_task(void *parameter)
             const bool enabled = config.enabled[transport];
             const ptp::PortConfig port_config = ptp_port_config(config, transport, utc_offset);
 
-            // New settings, a changed clock or a port switched on: the master selection starts again (it listens
-            // for two of our announce intervals before it serves)
+            // New selection settings, a changed clock or a port switched on: the master selection starts again (it
+            // listens for two of our announce intervals before it serves)
             if (enabled && (!port.enabled || port.config_generation != generation || port.epoch != epoch))
             {
                 const int64_t announce_us = ptp_interval_us(config.log_announce_interval);
