@@ -37,8 +37,8 @@
     'Log in': 'Anmelden',
     'Password': 'Passwort',
     'Default: <code>password</code>': 'Standard: <code>password</code>',
-    '<a href="https://github.com/Duglum/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer WebInterface fork</a> · based on <a href="https://github.com/roblatour/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer</a> by Rob Latour · MIT license':
-      '<a href="https://github.com/Duglum/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer WebInterface Fork</a> · basierend auf <a href="https://github.com/roblatour/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer</a> von Rob Latour · MIT-Lizenz',
+    '<a href="https://github.com/Duglum/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer WebUI fork</a> · based on <a href="https://github.com/roblatour/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer</a> by Rob Latour · MIT license':
+      '<a href="https://github.com/Duglum/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer WebUI Fork</a> · basierend auf <a href="https://github.com/roblatour/ESP32TimeServer" target="_blank" rel="noopener noreferrer">ESP32TimeServer</a> von Rob Latour · MIT-Lizenz',
 
     // ---- Status ----
     'Status': 'Status',
