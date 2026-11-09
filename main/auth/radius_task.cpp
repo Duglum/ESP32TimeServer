@@ -16,12 +16,15 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/ip6.h"
 #include "lwip/netdb.h"
+#include "lwip/netif.h"
 #include "lwip/sockets.h"
 
 namespace
@@ -118,9 +121,32 @@ namespace
         job.fd = -1;
     }
 
+    // The IPv6 source address lwIP takes for a packet to `dest` (its own selection, run in the TCP/IP task)
+    struct v6_source_t
+    {
+        struct netif *netif;
+        ip6_addr_t dest;
+        uint8_t source[16];
+        bool found;
+    };
+
+    esp_err_t select_v6_source(void *context)
+    {
+        v6_source_t &q = *static_cast<v6_source_t *>(context);
+        const ip_addr_t *chosen = ip6_select_source_address(q.netif, &q.dest);
+        if (chosen != nullptr && !ip6_addr_isany(ip_2_ip6(chosen)))
+        {
+            memcpy(q.source, ip_2_ip6(chosen)->addr, sizeof(q.source));
+            q.found = true;
+        }
+        return ESP_OK;
+    }
+
     // lwIP leaves the local address of a connected UDP socket unspecified until a packet goes out (the route is chosen
-    // per packet): then the address of the Ethernet interface (IPv6: a global or unique local one) is the one used
-    void local_address(sockaddr_storage &local)
+    // per packet): then the address of the Ethernet interface is the one used. IPv6: the address lwIP selects for the
+    // server (a unique local one for a unique local server, a global one for a global server), else a global or unique
+    // local one.
+    void local_address(sockaddr_storage &local, const sockaddr_storage &remote)
     {
         esp_netif_t *netif = app_eth_netif();
         if (netif == nullptr)
@@ -138,6 +164,18 @@ namespace
             static constexpr uint8_t ANY[16] = {};
             if (memcmp(&v6.sin6_addr, ANY, sizeof(ANY)) != 0)
                 return;
+            if (remote.ss_family == AF_INET6)
+            {
+                v6_source_t q{};
+                q.netif = static_cast<struct netif *>(esp_netif_get_netif_impl(netif));
+                memcpy(q.dest.addr, &reinterpret_cast<const sockaddr_in6 &>(remote).sin6_addr, 16);
+                ip6_addr_clear_zone(&q.dest);
+                if (q.netif != nullptr && esp_netif_tcpip_exec(select_v6_source, &q) == ESP_OK && q.found)
+                {
+                    memcpy(&v6.sin6_addr, q.source, 16);
+                    return;
+                }
+            }
             esp_ip6_addr_t addresses[CONFIG_LWIP_IPV6_NUM_ADDRESSES]{};
             const int count = esp_netif_get_all_ip6(netif, addresses);
             for (int pass = 0; pass < 2; ++pass)
@@ -194,7 +232,7 @@ namespace
             return false;
         }
         job.fd = fd;
-        local_address(local);
+        local_address(local, remote);
         return true;
     }
 
