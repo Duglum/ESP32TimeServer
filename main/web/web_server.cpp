@@ -1138,6 +1138,64 @@ namespace
 
     void radius_login_finish(radius_wait_t &w);
 
+    // The sockets of the requests that wait for RADIUS. close_sessions_work() must not close them: esp_http_server would
+    // free the session (its slot and TLS context) while the async copy of the request still points to it, and the late
+    // answer would go to freed memory or to the next connection in that slot. Such a socket is closed after its answer.
+    struct async_socket_t
+    {
+        std::atomic<int> fd{-1};
+        std::atomic<bool> close_after{false};
+    };
+    async_socket_t s_async_sockets[MAX_SOCKETS];
+
+    void async_socket_add(int fd)
+    {
+        for (async_socket_t &slot : s_async_sockets)
+        {
+            int expected = -1;
+            if (slot.fd.compare_exchange_strong(expected, fd))
+            {
+                slot.close_after = false;
+                return;
+            }
+        }
+    }
+
+    // Returns whether the socket was to be closed meanwhile
+    bool async_socket_remove(int fd)
+    {
+        for (async_socket_t &slot : s_async_sockets)
+            if (slot.fd.load() == fd)
+            {
+                const bool close = slot.close_after.exchange(false);
+                slot.fd = -1;
+                return close;
+            }
+        return false;
+    }
+
+    // In the server task: marks the socket to be closed after its answer; false if no request waits on it
+    bool async_socket_close_later(int fd)
+    {
+        for (async_socket_t &slot : s_async_sockets)
+            if (slot.fd.load() == fd)
+            {
+                slot.close_after = true;
+                return true;
+            }
+        return false;
+    }
+
+    // Ends the async request (any task) and closes its socket if close_sessions_work() passed it over
+    void radius_complete(httpd_req_t *req)
+    {
+        const int fd = httpd_req_to_sockfd(req);
+        const bool close = async_socket_remove(fd);
+        httpd_req_async_handler_complete(req);
+        if (close && s_server != nullptr)
+            httpd_sess_trigger_close(s_server, fd);
+    }
+
     // The settings in use for the radius task: started once a login method uses RADIUS (or start: the test of the
     // page), then every change is handed to it
     void radius_use_settings(const web_settings_t &s, bool start)
@@ -1181,7 +1239,7 @@ namespace
             radius_login_finish(*w);
             break;
         }
-        httpd_req_async_handler_complete(w->req);
+        radius_complete(w->req);
         mbedtls_platform_zeroize(w->password, sizeof(w->password));
         delete w;
     }
@@ -1194,7 +1252,7 @@ namespace
         if (s_server == nullptr || httpd_queue_work(s_server, radius_finish, w) != ESP_OK)
         {
             ESP_LOGW(TAG, "RADIUS: the answer could not be handed to the web server");
-            httpd_req_async_handler_complete(w->req);
+            radius_complete(w->req);
             mbedtls_platform_zeroize(w->password, sizeof(w->password));
             delete w;
         }
@@ -1207,15 +1265,17 @@ namespace
         httpd_req_t *copy = nullptr;
         if (httpd_req_async_handler_begin(req, &copy) != ESP_OK)
         {
-            memset(login.password, 0, sizeof(login.password));
+            mbedtls_platform_zeroize(login.password, sizeof(login.password));
+            mbedtls_platform_zeroize(w->password, sizeof(w->password));
             delete w;
             return send_error(req, "503 Service Unavailable", "Out of memory");
         }
         w->req = copy;
+        async_socket_add(httpd_req_to_sockfd(copy));
         if (radius_submit(login, radius_done, w) == 0)
         {
             send_error(copy, "503 Service Unavailable", "A login from your address is still being checked, or too many at once: try again");
-            httpd_req_async_handler_complete(copy);
+            radius_complete(copy);
             mbedtls_platform_zeroize(w->password, sizeof(w->password));
             delete w;
         }
@@ -3018,7 +3078,8 @@ namespace
         if (httpd_get_client_list(s_server, &count, fds) != ESP_OK)
             return;
         for (size_t i = 0; i < count; ++i)
-            httpd_sess_trigger_close(s_server, fds[i]);
+            if (!async_socket_close_later(fds[i])) // a request waiting for RADIUS: closed after its answer
+                httpd_sess_trigger_close(s_server, fds[i]);
     }
 
     // New connections use identity: a TLS session copies the certificate and key when it starts, and starts in this
