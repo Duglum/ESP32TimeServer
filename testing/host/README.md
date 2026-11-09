@@ -14,6 +14,9 @@ the few ESP-IDF and FreeRTOS functions they call (single-threaded, with a simula
 | `ntp_auth_test` | `main/custom/ntp_auth.cpp` | NTP symmetric-key authentication: the MAC (SHA-256 of key and packet, 160 bit) against a value of Python `hashlib`, the results of `ntp_auth_verify_request()` in the mixed and the authenticated-only policy (NTPv3 and NTPv4 without MAC, unknown key ID, changed bytes, malformed lengths), the policy without authentication and without a key (fail closed), invalid keys of the settings, a failing hash. `stubs/psa/crypto.h` gives the PSA hash calls with a plain SHA-256 (checked against FIPS 180-4 examples); no fuzz target |
 | `ptp_auth_test` | `main/custom/ptp_auth.cpp` (with `ptp_message.h`) | PTP AUTHENTICATION TLV: layout (type 0x8009, length 22, spp, key ID) and the HMAC-SHA256-128 ICV against values of Python `hmac` (with the correctionField covered and, linuxptp `allow_mutable`, not covered), HMAC itself (RFC 4231 case 2), signing of Sync, Follow_Up, Delay_Resp and Announce from the message builder, every changed byte of a signed Delay_Req, key ring, key ID 0, other spp, lengths, the mixed / required policy, fail closed without the active key, invalid keys, a failing hash; no fuzz target |
 | `ptp_selection_test` | `main/custom/ptp_l2_master_selection.h` | upstream's master selection test (ranking, start-up wait, qualification by two Announces, sequence wrap and replay, expiry, capacity, legacy mode); no fuzz target |
+| `ip_text_test` | `main/net/ip_text.cpp` | IPv4 dotted decimal (strict: no leading zeros, exactly 4 parts), IPv6 text forms (`::`, embedded IPv4, refused forms such as a second `::`, 9 groups, zones, brackets), the canonical forms of RFC 5952 (longest zero run, the first of equal runs, no single-group `::`, IPv4-mapped), round trips of 20000 random addresses |
+| `radius_test` | `main/auth/radius_proto.cpp`, `main/auth/radius_client.cpp` | RADIUS packets of the client: the User-Password and the Access-Accept of RFC 2865 7.1; Access-Requests byte by byte against an independent Python reference (`gen_radius_vectors.py`: Message-Authenticator first, every attribute, a password of three blocks) and their limits (user name, password, shared secret, texts, the buffer one byte too small); answers: Access-Accept, -Reject, the privilege level from `Cisco-AVPair` (every form, several pairs: the lowest, other vendors ignored) or from Service-Type, the required attribute, a missing or wrong Message-Authenticator, a wrong Response Authenticator, shared secret, identifier, code or length, attributes that do not fit, two Message-Authenticators, the largest packet, the summary cut to its buffer; the timing of a login: tries and timeouts per server, failover to the second server, the dead time (skipped servers, a login that gives up at once while every server is dead, dead time 0), the round trip time, a packet that could not be sent; the 256 identifiers of a socket |
+| `totp_test` | `main/auth/totp.cpp`, `main/third_party/qrcodegen` | the second factor: base32 (RFC 4648 vectors, lower case, padding, refused characters, buffers one byte too small), HOTP (RFC 4226 appendix D), TOTP with SHA-1 (RFC 6238 appendix B), the check of a code (the step of now, one before and one after, not two; each code once; spaces; wrong lengths and characters; no time yet), the otpauth URI byte by byte (percent-encoding, too small a buffer), the QR code of the longest URI (version 15 at most, error correction M, the finder patterns), the recovery codes (text of 50 bits, normalising, the salted hashes, a used code, another salt) |
 
 Fuzz targets (`-DHOST_FUZZ`, libFuzzer):
 
@@ -22,15 +25,23 @@ Fuzz targets (`-DHOST_FUZZ`, libFuzzer):
 - `ntp_cache_fuzz`: a sequence of requests, stored exchanges, time steps, expiries and rate limit changes on 8 IPv4 and 8 IPv6 addresses (4 of them in one /64) and many others. Every interleaved T3 the cache hands out must have been stored for this address and this T2 (a model of the stored exchanges); a planted defect (exchange map lookup without the address) is found within two minutes.
 
 - `ptp_fuzz`: the input is a received Ethernet frame. The L2 parser and the UDP decoder must stay within it, and a Delay_Req they accept must give a Delay_Resp with its sequence, correctionField and port identity.
+- `ip_text_fuzz`: the input as text: an accepted IPv4 address is in canonical form, an accepted IPv6 address formats and parses back to the same bytes; the first 16 bytes as an address round-trip as well.
+- `radius_fuzz`: the input as an answer datagram (both settings of the Message-Authenticator) and as the attributes of a correctly signed Access-Accept, so that the attribute checks are reached: an accepted answer has a terminated summary and a privilege level of 0 to 15.
+- `totp_fuzz`: the input as base32 (a decoded text encodes and decodes to the same bytes), as a TOTP code (an accepted one matched a step of the window), as a recovery code and as the user name of an otpauth URI (an accepted URI fits its buffer).
+
+The login modules and their tests (`ip_text`, `radius`, `totp`, `check.h`, the seeds in `seeds/`) come from ESP32-ConsoleServer. The RADIUS vectors in `radius_vectors.h` come from `gen_radius_vectors.py` (Python standard library only: `hashlib`, `hmac`); run `python -I gen_radius_vectors.py > radius_vectors.h` only to change them.
 
 ## Running
 
 Needs clang with the sanitizer and libFuzzer runtimes for Windows: [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)
-(`winget install MartinStorsjo.LLVM-MinGW.UCRT`). No ESP-IDF needed.
+(`winget install MartinStorsjo.LLVM-MinGW.UCRT`). `radius_test` and `totp_test` also need ESP-IDF 6.1 (`IDF_PATH`,
+default `C:\esp\v6.1\esp-idf`) and its CMake and Ninja: the first run builds TF-PSA-Crypto of ESP-IDF for the PC into
+`build\psa` (ESP-IDF's copy includes two headers of its port: `stubs\psa_shim` stands in for them).
 
 ```powershell
 .\run_tests.ps1                    # unit tests
 .\run_tests.ps1 -FuzzSeconds 300   # also each fuzz target for 300 s (corpus and crash files in build\)
+.\run_tests.ps1 -FuzzSeconds 180 -Only radius   # only the targets whose name contains "radius"
 ```
 
 `gnss_test.exe --seeds <folder>` writes seed inputs (valid sentences and frames) for the GNSS fuzzer; the script

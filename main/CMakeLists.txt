@@ -2,6 +2,9 @@
 # LED, MQTT, NTP authentication, button) are always compiled in; the web admin page switches them.
 set(MAIN_SOURCES
         "main.cpp"
+        "auth/radius_client.cpp"
+        "auth/radius_proto.cpp"
+        "auth/totp.cpp"
         "custom/app_metadata.cpp"
         "custom/crash_dump.cpp"
         "custom/gnss_console.cpp"
@@ -12,6 +15,8 @@ set(MAIN_SOURCES
         "custom/ptp_auth.cpp"
         "custom/ntp_cache.c"
         "custom/time_diag.cpp"
+        "net/ip_text.cpp"
+        "third_party/qrcodegen/qrcodegen.c"
         "web/web_auth.cpp"
         "web/web_net.cpp"
         "web/web_ote.cpp"
@@ -71,6 +76,9 @@ idf_component_register(
     EMBED_FILES
         "web/www/favicon.ico"
 )
+
+# qrcodegen (THIRD_PARTY_NOTICES) is taken unchanged: its warnings are not errors
+set_source_files_properties("third_party/qrcodegen/qrcodegen.c" PROPERTIES COMPILE_OPTIONS "-Wno-error")
 
 # ---------------------------------------------------------------------------
 # Embed custom metadata into the binary
