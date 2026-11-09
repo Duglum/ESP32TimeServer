@@ -50,6 +50,10 @@ default `C:\esp\v6.1\esp-idf`) and its CMake and Ninja: the first run builds TF-
 does this before fuzzing. A crash is saved as `build\crash-*` and can be replayed with
 `build\gnss_fuzz.exe build\crash-...`.
 
+## Results (2026-11-09, RADIUS and TOTP logins)
+
+With the login modules from ESP32-ConsoleServer: all checks pass (the earlier tests as below, ip_text_test 60080, radius_test 702, totp_test 104, auth_config_test 65). Fuzzing without a finding: radius_fuzz 180 s (3.0 million inputs), totp_fuzz 180 s (39.1 million), ip_text_fuzz 180 s (35.5 million), auth_config_fuzz 120 s (0.7 million).
+
 ## Results (2026-11-09, PTP authentication)
 
 With CHANGELOG 4.107: all checks pass (gnss_test 108, gnss_console_test 363, ntp_cache_test 734, ptp_test, ptp_selection_test and mqtt_queue_test pass, ntp_auth_test 91, ptp_auth_test 141).
