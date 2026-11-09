@@ -190,10 +190,20 @@
     clearInterval(consoleTimer);
     $('app').hidden = true;
     $('logout').hidden = true;
+    $('hdr-user').hidden = true;
     for (const id of ['banner-default-pw', 'banner-network', 'banner-oneshot', 'banner-unsaved']) $(id).hidden = true;
     $('login-card').hidden = false;
+    $('totp-card').hidden = true;
+    $('recovery-card').hidden = true;
     $('login-password').focus();
-    api('/api/info').then((r) => { if (r.status === 200) setHost(r.data.fqdn || r.data.hostname); });
+    api('/api/info').then((r) => {
+      if (r.status !== 200) return;
+      setHost(r.data.fqdn || r.data.hostname);
+      // RADIUS logins on: a user name (empty = the local user admin); off: the hidden admin field for password managers
+      $('login-user-row').hidden = !r.data.login_user;
+      $('login-user-fixed').disabled = !!r.data.login_user;
+      if (r.data.login_user) $('login-user').focus();
+    });
   }
 
   // ---- LED colours ----
@@ -486,8 +496,31 @@
       ptp_auth_enabled: s.ptp_auth_enabled,
       ptp_auth_required: s.ptp_auth_required,
       ptp_auth_mutable: s.ptp_auth_mutable,
-      ...Object.fromEntries(ptpNumbers.map(([name]) => [name, String(s[name])]))
+      ...Object.fromEntries(ptpNumbers.map(([name]) => [name, String(s[name])])),
+      ...loginValues(s)
     };
+  }
+
+  // Logins (Security): the RADIUS servers (the shared secrets are never sent: their fields stay empty) and the methods
+  function loginValues(s) {
+    const radius = s.radius || {};
+    const servers = radius.servers || [];
+    const web = s.web_login || {};
+    const values = {};
+    for (const n of [1, 2]) {
+      const server = servers[n - 1] || {};
+      values['r' + n + '_host'] = server.host || '';
+      values['r' + n + '_port'] = String(server.port || 1812);
+      values['r' + n + '_secret'] = '';
+    }
+    return Object.assign(values, {
+      r_timeout: String(radius.timeout_s), r_retries: String(radius.retries), r_deadtime: String(radius.dead_time_min),
+      r_nas_id: radius.nas_identifier || '', r_nas_ip: radius.nas_ip || '', r_nas_ip6: radius.nas_ipv6 || '',
+      r_service: String(radius.service_type), r_port_type: String(radius.nas_port_type), r_priv: String(radius.min_privilege),
+      r_required: radius.required || '', r_require_ma: radius.require_message_authenticator !== false,
+      web_local: web.local !== false, web_radius: !!web.radius, web_fallback: web.local_fallback !== false,
+      totp_local: !!web.totp_local, totp_radius: !!web.totp_radius, totp_enroll: !!web.totp_enroll
+    });
   }
 
   // PTP settings with a number (inputs and selects): name, lowest, highest, label of the error message
@@ -519,8 +552,19 @@
       status: 'Status of IPv4 and IPv6 (IPv4: OK/N/A, IPv6: GUA/ULA/LLA/N/A)', none: 'Empty (privacy)' },
     gnss_protocol: { nmea: 'NMEA Standard Protocol (needs RMC sentence)', ubx: 'U-Blox UBX Protocol' },
     led_type: { none: 'None', ky016: 'KY-016', ws2812: 'WS2812' },
-    mqtt_qos: { 0: '0 (at most once)', 1: '1 (at least once)', 2: '2 (exactly once)' }
+    mqtt_qos: { 0: '0 (at most once)', 1: '1 (at least once)', 2: '2 (exactly once)' },
+    r_service: { 1: 'Login (1)', 6: 'Administrative (6)', 7: 'NAS-Prompt (7)', 0: 'not sent' },
+    r_port_type: { 5: 'Virtual (5)', 0: 'Async (0)', '-1': 'not sent' }
   };
+
+  // The shared secret fields: whether one is stored (the page never gets it)
+  function renderRadiusSecrets() {
+    const servers = (state && state.settings.radius && state.settings.radius.servers) || [];
+    for (const n of [1, 2]) {
+      const set = !!(servers[n - 1] || {}).secret_set;
+      f['r' + n + '_secret'].placeholder = set ? t('set – empty keeps it') : t('not set');
+    }
+  }
 
   function fillForm(s) {
     const values = formValues(s);
@@ -536,6 +580,7 @@
     ntpKeys.set(s.ntp_keys);
     ptpKeys.set(s.ptp_keys);
     $('mqtt-password-state').textContent = s.mqtt_password_set ? t('A password is set.') : t('No password is set.');
+    renderRadiusSecrets();
     updateDependent();
     markDefaults();
     formDirty = false;
@@ -660,6 +705,10 @@
     ntpKeys.updateAdd();
     ptpKeys.updateAdd();
     f.button_pin.disabled = !f.button_enabled.checked;
+    // The login methods of the page (Security)
+    $('web-auth-error').hidden = f.web_local.checked || f.web_radius.checked;
+    f.web_fallback.disabled = !(f.web_local.checked && f.web_radius.checked);
+    f.totp_enroll.disabled = !f.totp_radius.checked;
     syncPasswordEyes();
     if (state) {
       $('ptp-chip-warning').hidden = state.status.ptp_loopback_supported || f.ptp_loopback_pin.value.trim() === '';
@@ -897,7 +946,41 @@
     body.mac_address = mac === state.status.mac_hardware ? '' : mac;
     body.dns = f.dns.value.split(/\r?\n/).map((s) => s.trim()).filter((s) => s !== '');
     if (body.dns.length > 3) throw fieldError('dns', t('At most 3 DNS servers'));
+    // Logins (Security)
+    if (!f.web_local.checked && !f.web_radius.checked) throw fieldError('web_local', t('At least one login method must stay on.'));
+    body.radius = collectRadius();
+    body.web_login = {
+      local: f.web_local.checked, radius: f.web_radius.checked, local_fallback: f.web_fallback.checked,
+      totp_local: f.totp_local.checked, totp_radius: f.totp_radius.checked, totp_enroll: f.totp_enroll.checked
+    };
     return body;
+  }
+
+  // The RADIUS fields of the form ("radius" of the settings): the ranges of main/auth/auth_config.cpp (the device checks
+  // them again); a secret only when one was typed (an empty one keeps the stored secret)
+  function collectRadius() {
+    const number = (name, min, max, text) => {
+      const v = currentValue(name);
+      if (!/^-?\d{1,5}$/.test(v) || Number(v) < min || Number(v) > max) throw fieldError(name, text);
+      return Number(v);
+    };
+    const servers = [1, 2].map((n) => {
+      const server = { host: currentValue('r' + n + '_host') };
+      server.port = number('r' + n + '_port', 1, 65535, t('RADIUS server {n}: UDP port 1 to 65535', { n: n }));
+      const secret = f['r' + n + '_secret'].value;
+      if (secret !== '') server.secret = secret;
+      return server;
+    });
+    return {
+      servers: servers,
+      timeout_s: number('r_timeout', 1, 30, t('RADIUS timeout: 1 to 30 s')),
+      retries: number('r_retries', 0, 5, t('RADIUS retries: 0 to 5')),
+      dead_time_min: number('r_deadtime', 0, 60, t('RADIUS dead time: 0 to 60 minutes')),
+      nas_identifier: currentValue('r_nas_id'), nas_ip: currentValue('r_nas_ip'), nas_ipv6: currentValue('r_nas_ip6'),
+      service_type: Number(f.r_service.value), nas_port_type: Number(f.r_port_type.value),
+      min_privilege: number('r_priv', 1, 15, t('Privilege level at least: 1 to 15')),
+      required: currentValue('r_required'), require_message_authenticator: f.r_require_ma.checked
+    };
   }
 
   // ---- Status ----
@@ -1038,9 +1121,214 @@
     $('banner-oneshot').hidden = !(state.oneshot_boot && state.unsaved_changes);
     $('banner-unsaved').hidden = state.oneshot_boot || !state.unsaved_changes;
     renderPending(state.network_pending);
+    renderSession();
+    renderRadiusStatus();
+    renderTotp();
     renderOte();
     updateDependent();
   }
+
+  // ---- The login of this session (header and Status; "session" of /api/state) ----
+  function renderSession() {
+    const s = state.session || {};
+    const user = s.user || 'admin';
+    const how = (s.radius ? 'RADIUS' : t('local password')) + (s.totp ? ' + TOTP' : '');
+    $('st-session').textContent = user + ' (' + how + ')';
+    $('hdr-user').textContent = user + ' (' + how + ')';
+    $('hdr-user').hidden = false;
+  }
+
+  // ---- RADIUS in Status ("radius_status" of /api/state) ----
+  function renderRadiusStatus() {
+    const r = state.radius_status;
+    if (!r) return;
+    (r.servers || []).forEach((s, i) => {
+      const el = $('st-radius-' + (i + 1));
+      if (!el) return;
+      const host = s.address && s.address !== s.host ? s.host + ' (' + addressText(s.address) + ')' : s.host;
+      const where = (host.indexOf(':') >= 0 && !host.includes('(') ? '[' + host + ']' : host) + ':' + s.port;
+      if (!s.used) {
+        el.textContent = t('not set');
+        el.className = '';
+      } else if (!r.running) {
+        el.textContent = t('{addr}: not asked yet (RADIUS logins are off)', { addr: where });
+        el.className = '';
+      } else if (s.dead) {
+        el.textContent = t('{addr}: no answer, skipped for {s} s more (dead time)', { addr: where, s: s.dead_for_s });
+        el.className = 'bad';
+      } else if (s.last_answer_s >= 0) {
+        el.textContent = t('{addr}: answers, the last answer {age} ago after {ms} ms', { addr: where, age: duration(s.last_answer_s), ms: s.rtt_ms });
+        el.className = 'good';
+      } else {
+        el.textContent = t('{addr}: not asked yet', { addr: where }) + (s.timeouts > 0 ? ', ' + t('{n} logins without an answer', { n: s.timeouts }) : '');
+        el.className = s.timeouts > 0 ? 'bad' : '';
+      }
+      if (s.used && s.dropped > 0) el.textContent += ', ' + t('{n} invalid answers dropped', { n: s.dropped });
+    });
+    $('st-radius-count').textContent = t('{a} accepted, {r} rejected, {n} refused by the privilege level or the required attribute, {t} without an answer, {b} refused as busy',
+      { a: r.accepted, r: r.rejected, n: r.refused, t: r.no_answer, b: r.busy });
+  }
+
+  // ---- TOTP tokens (Security; "totp" of /api/state) ----
+  function dateText(unix) {
+    if (!unix) return '–';
+    const d = new Date(unix * 1000);
+    const two = (v) => String(v).padStart(2, '0');
+    return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+  }
+  function renderTotp() {
+    const totp = state.totp;
+    if (!totp) return;
+    const tokens = totp.tokens || [];
+    $('st-totp').textContent = t('{n} of {max}', { n: tokens.length, max: totp.max }) +
+      (totp.time_ok ? '' : '; ' + t('the clock is not set: only the recovery codes work'));
+    $('st-totp').className = totp.time_ok ? '' : 'bad';
+    $('totp-time').hidden = totp.time_ok;
+    const body = $('totp-users');
+    body.replaceChildren();
+    for (const token of tokens) {
+      const row = document.createElement('tr');
+      for (const text of [token.user, token.user === 'admin' ? t('local') : 'RADIUS', dateText(token.created), dateText(token.last_used),
+        String(token.recovery_left)]) {
+        const td = document.createElement('td');
+        td.textContent = text;
+        row.appendChild(td);
+      }
+      const td = document.createElement('td');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = t('Delete');
+      button.addEventListener('click', async () => {
+        if (!window.confirm(t('Delete the token of {user}? Its logins then need a new one.', { user: token.user }))) return;
+        const r = await api('/api/totp/delete', { user: token.user });
+        show(r.status === 200 ? ts(r.data.message) : (ts(r.data.error) || t('Request failed ({status})', { status: r.status })), r.status === 200 ? 'ok' : 'error');
+        await loadState(false);
+      });
+      td.appendChild(button);
+      row.appendChild(td);
+      body.appendChild(row);
+    }
+    if (tokens.length === 0) {
+      const row = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 6;
+      td.textContent = t('No tokens.');
+      row.appendChild(td);
+      body.appendChild(row);
+    }
+  }
+
+  // The QR code of a new token ("qr" of the device: one hex string per row, the left module the highest bit)
+  function drawQr(svg, qr) {
+    const size = qr.size;
+    const quiet = 2;
+    svg.setAttribute('viewBox', [-quiet, -quiet, size + 2 * quiet, size + 2 * quiet].join(' '));
+    let d = '';
+    qr.rows.forEach((row, y) => {
+      for (let x = 0; x < size; x++) {
+        const nibble = parseInt(row[x >> 2], 16);
+        if ((nibble >> (3 - (x & 3))) & 1) d += 'M' + x + ' ' + y + 'h1v1h-1z';
+      }
+    });
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    svg.replaceChildren(path);
+  }
+  function fillRecovery(list, codes) {
+    list.replaceChildren();
+    for (const code of codes) {
+      const li = document.createElement('li');
+      li.textContent = code;
+      list.appendChild(li);
+    }
+  }
+
+  let enrolling = '';
+  $('totp-new').addEventListener('click', async () => {
+    const user = $('totp-new-user').value.trim();
+    if (user === '') {
+      show(t('Enter a user name.'), 'error');
+      return;
+    }
+    const r = await api('/api/totp/enroll', { user: user });
+    if (r.status !== 200) {
+      show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
+      return;
+    }
+    enrolling = r.data.user;
+    drawQr($('totp-qr'), r.data.qr);
+    $('totp-secret').textContent = r.data.secret;
+    $('totp-enroll-for').textContent = r.data.replaces ? t('A new token for {user}: it replaces the one in use once it is confirmed.', { user: r.data.user })
+      : t('A new token for {user}.', { user: r.data.user });
+    $('totp-confirm-code').value = '';
+    $('totp-enroll-box').hidden = false;
+    $('totp-recovery').hidden = true;
+    $('totp-confirm-code').focus();
+  });
+  $('totp-confirm').addEventListener('click', async () => {
+    const code = $('totp-confirm-code').value.trim();
+    if (!/^\d{6}$/.test(code)) {
+      show(t('Enter the 6 digits shown by the app.'), 'error');
+      return;
+    }
+    const r = await api('/api/totp/confirm', { user: enrolling, code: code });
+    if (r.status !== 200) {
+      show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
+      return;
+    }
+    $('totp-enroll-box').hidden = true;
+    $('totp-secret').textContent = '';
+    $('totp-qr').replaceChildren();
+    $('totp-recovery-for').textContent = t('Recovery codes for {user}: each works once instead of a code; shown only now, keep them safe.', { user: r.data.user });
+    fillRecovery($('totp-recovery-list'), r.data.recovery_codes || []);
+    $('totp-recovery').hidden = false;
+    show(t('The token of {user} is stored.', { user: r.data.user }), 'ok');
+    await loadState(false);
+  });
+
+  // ---- The test of the RADIUS settings of the form ----
+  $('r-test').addEventListener('click', async () => {
+    const out = $('r-test-result');
+    let radius;
+    try {
+      radius = collectRadius();
+    } catch (err) {
+      if (err.field) revealField(err.field);
+      show(err.message, 'error');
+      return;
+    }
+    const user = $('r-test-user').value.trim();
+    if (user === '') {
+      show(t('Enter a user name.'), 'error');
+      return;
+    }
+    out.hidden = false;
+    out.className = 'note';
+    out.textContent = t('Testing…');
+    $('r-test').disabled = true;
+    const r = await api('/api/radius/test', { user: user, password: $('r-test-pw').value, radius: radius });
+    $('r-test').disabled = false;
+    $('r-test-pw').value = '';
+    syncPasswordEyes();
+    if (r.status !== 200) {
+      out.textContent = ts(r.data.error) || t('Request failed ({status})', { status: r.status });
+      out.className = 'note bad';
+      return;
+    }
+    const d = r.data;
+    const from = d.server ? t('from server {n} after {ms} ms', { n: d.server, ms: d.rtt_ms }) : '';
+    const texts = {
+      accept: t('Access-Accept {from}: privilege level {p}, the login would be accepted.', { from: from, p: d.privilege }),
+      low_privilege: t('Access-Accept {from}: privilege level {p} is below the setting, the login would be refused.', { from: from, p: d.privilege }),
+      missing_attribute: t('Access-Accept {from} without the required attribute: the login would be refused.', { from: from }),
+      reject: d.challenge ? t('Access-Challenge {from}: not supported, the login would be refused.', { from: from })
+        : t('Access-Reject {from}.', { from: from }),
+      no_answer: t('No RADIUS server answered.'),
+      busy: t('Too many RADIUS logins at once: try again.')
+    };
+    out.textContent = (texts[d.result] || d.text) + (d.summary ? ' ' + d.summary : '');
+    out.className = d.result === 'accept' ? 'note good' : 'note bad';
+  });
 
   // ---- Diagnostics (review 4.5): loaded only while the panel is open ----
   // Number with a fixed count of decimals (decimal comma in German)
@@ -1220,6 +1508,14 @@
       stacks.appendChild(li);
     }
     diagRow('dg-stacks', tasks.length > 0);
+    // NVS entries of 32 bytes: a new TOTP token needs about 12 and is only stored while one more settings set fits
+    const nvs = d.nvs;
+    if (nvs) {
+      $('dg-nvs').textContent = t('{used} of {total} entries used, {free} available; a settings set needs {set}, a TOTP token about 12',
+        { used: nvs.used, total: nvs.total, free: nvs.available, set: nvs.settings });
+      $('dg-nvs').className = nvs.available < nvs.settings + 16 ? 'bad' : '';
+    }
+    diagRow('dg-nvs', !!nvs);
 
     // Core dump of the last crash (review E-07)
     const crash = d.crash || {};
@@ -1467,6 +1763,8 @@
     state = r.data;
     csrf = state.csrf;
     $('login-card').hidden = true;
+    $('totp-card').hidden = true;
+    $('recovery-card').hidden = true;
     $('app').hidden = false;
     $('logout').hidden = false;
     renderStatus();
@@ -1497,24 +1795,85 @@
   }
 
   // ---- Actions ----
-  $('login-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    setBusy(true);
-    const r = await api('/api/login', { password: $('login-password').value });
-    setBusy(false);
-    $('login-password').value = '';
-    syncPasswordEyes();
+  // The answer of a login (both steps): the session, the second factor, or the error
+  let pendingLogin = '';
+  async function loginDone(r) {
+    if (r.status === 200 && r.data.pending) {
+      // The password was right: the second factor (a new token with the first login: its QR code)
+      pendingLogin = r.data.pending;
+      $('login-card').hidden = true;
+      $('totp-card').hidden = false;
+      $('totp-for').textContent = t('The password of {user} is right.', { user: r.data.user });
+      $('totp-login-enroll').hidden = !r.data.totp_enroll;
+      if (r.data.totp_enroll) {
+        drawQr($('totp-login-qr'), r.data.qr);
+        $('totp-login-secret').textContent = r.data.secret;
+      }
+      $('totp-code').value = '';
+      $('totp-code').focus();
+      show('', '');
+      return;
+    }
     if (r.status === 200) {
       csrf = r.data.csrf;
+      pendingLogin = '';
+      $('totp-card').hidden = true;
+      $('totp-login-qr').replaceChildren();
+      $('totp-login-secret').textContent = '';
       show('', '');
+      if (r.data.recovery_codes) {
+        // A token set up with this login: its recovery codes first
+        fillRecovery($('recovery-list'), r.data.recovery_codes);
+        $('login-card').hidden = true;
+        $('recovery-card').hidden = false;
+        return;
+      }
       if (await loadState(true)) startRefresh();
-    } else if (r.status === 429) {
+      return;
+    }
+    if (r.status === 401 && pendingLogin && /log in again|expired/.test(r.data.error || '')) {
+      pendingLogin = '';
+      $('totp-card').hidden = true;
+      $('login-card').hidden = false;
+    }
+    if (r.status === 429) {
       const wait = Number(r.data.retry_after) || 0;
       show(wait >= 120 ? t('Too many failed logins. Try again in {m} min.', { m: Math.ceil(wait / 60) })
         : t('Too many failed logins. Try again in {s} s.', { s: wait }), 'error');
     } else {
       show(ts(r.data.error) || t('Login failed'), 'error');
     }
+  }
+
+  $('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    const body = { password: $('login-password').value };
+    if (!$('login-user-row').hidden) body.user = $('login-user').value.trim();
+    const r = await api('/api/login', body);
+    setBusy(false);
+    $('login-password').value = '';
+    syncPasswordEyes();
+    await loginDone(r);
+  });
+  $('totp-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    const r = await api('/api/login/totp', { pending: pendingLogin, code: $('totp-code').value.trim() });
+    setBusy(false);
+    $('totp-code').value = '';
+    await loginDone(r);
+  });
+  $('totp-cancel').addEventListener('click', () => {
+    pendingLogin = '';
+    $('totp-card').hidden = true;
+    $('login-card').hidden = false;
+    $('login-password').focus();
+  });
+  $('recovery-done').addEventListener('click', async () => {
+    $('recovery-list').replaceChildren();
+    $('recovery-card').hidden = true;
+    if (await loadState(true)) startRefresh();
   });
 
   $('logout').addEventListener('click', async () => {
@@ -1529,6 +1888,9 @@
   // do not bubble through the form
   $('ote-card').addEventListener('input', () => { formDirty = true; updateDependent(); markDefaults(); });
   $('ote-card').addEventListener('change', () => { formDirty = true; updateDependent(); markDefaults(); });
+  // The login settings of Security are fields of the settings form as well (form="settings-form")
+  $('login-methods').addEventListener('input', () => { formDirty = true; updateDependent(); markDefaults(); });
+  $('login-methods').addEventListener('change', () => { formDirty = true; updateDependent(); markDefaults(); });
 
   async function submitSettings(path) {
     let body;

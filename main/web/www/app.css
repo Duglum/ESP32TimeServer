@@ -364,3 +364,25 @@ input[type="radio"] { width: 1.05rem; height: 1.05rem; accent-color: var(--accen
 .footer a { color: inherit; }
 .footer a:hover { color: var(--accent); }
 [hidden] { display: none !important; }
+
+/* Logins: the RADIUS servers, the test row, the QR code of a new TOTP token, the recovery codes (from ESP32-ConsoleServer) */
+fieldset.radius-server { border: 1px solid var(--border); border-radius: .5rem; padding: .75rem 1rem 1rem; margin: 0; min-width: 0; }
+fieldset.radius-server legend { font-weight: 600; padding: 0 .35rem; }
+#login-methods { min-width: 0; } /* a grid item: its tables scroll in their .table-wrap */
+#login-methods h3 { margin-top: 1.25rem; }
+#login-methods h3:first-child { margin-top: 0; }
+.radius-test-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: .6rem; }
+.totp-enroll { display: grid; grid-template-columns: auto 1fr; gap: 1.25rem; align-items: start; }
+.totp-qr { width: 196px; height: 196px; background: #fff; padding: 8px; border-radius: .4rem; }
+.totp-qr path { fill: #000; }
+.recovery-list { columns: 2; margin: .5rem 0 1rem 1.25rem; padding: 0; }
+.hdr-user { font-size: .85rem; color: var(--muted); align-self: center; }
+.table-wrap { overflow-x: auto; max-width: 100%; margin: .5rem 0 .75rem; }
+table.data { border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+table.data th, table.data td { text-align: left; padding: 4px 12px 4px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.data th { color: var(--muted); font-weight: 600; }
+table.data button { padding: .15rem .55rem; font-size: .78rem; }
+@media (max-width: 640px) {
+  .radius-test-row, .totp-enroll, #login-methods .grid.three { grid-template-columns: 1fr; }
+  .hdr-user { display: none; }
+}

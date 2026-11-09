@@ -24,6 +24,7 @@
   <div class="actions">
     <button type="button" class="ghost lang-toggle" id="lang-toggle"><span class="flag" id="lang-flag" aria-hidden="true"></span></button>
     <button type="button" class="ghost theme-toggle" id="theme-toggle"></button>
+    <span class="hdr-user" id="hdr-user" hidden></span>
     <button type="button" class="ghost" id="logout" hidden>Log out</button>
   </div>
 </header>
@@ -53,13 +54,46 @@
   <section id="login-card" class="card narrow" hidden>
     <h2>Log in</h2>
     <form id="login-form" class="stack" autocomplete="on">
-      <input type="text" name="username" value="admin" autocomplete="username" hidden>
+      <input type="text" name="username" value="admin" autocomplete="username" id="login-user-fixed" hidden>
+      <label id="login-user-row" hidden><span class="lt">User name</span>
+        <input type="text" id="login-user" autocomplete="username" maxlength="64" spellcheck="false" autocapitalize="off">
+        <small class="note">Your RADIUS user name; empty = the local user <code>admin</code> with the local password of this page.</small>
+      </label>
       <label><span class="lt">Password</span>
         <input type="password" id="login-password" autocomplete="current-password" maxlength="128" required>
       </label>
       <button type="submit" class="primary">Log in</button>
     </form>
     <p class="hint">Default: <code>password</code></p>
+  </section>
+
+  <!-- The second factor of a login (TOTP): the code, or a new token set up with the first login -->
+  <section id="totp-card" class="card narrow" hidden>
+    <h2>Second factor</h2>
+    <form id="totp-form" class="stack" autocomplete="off">
+      <p class="note" id="totp-for"></p>
+      <div id="totp-login-enroll" class="totp-enroll" hidden>
+        <svg id="totp-login-qr" class="totp-qr" role="img" aria-label="QR code"></svg>
+        <div class="stack">
+          <p class="note">Your first login with a second factor: scan the QR code with an authenticator app, or enter the key by hand, then type the code it shows.</p>
+          <p class="mono" id="totp-login-secret"></p>
+        </div>
+      </div>
+      <label><span class="lt">Code from the authenticator app</span>
+        <input type="text" id="totp-code" inputmode="numeric" autocomplete="one-time-code" maxlength="11" spellcheck="false">
+        <small class="note">6 digits, or one of the recovery codes (<code>xxxxx-xxxxx</code>). Within 2 minutes, else log in again.</small>
+      </label>
+      <button type="submit" class="primary">Confirm</button>
+      <button type="button" class="ghost" id="totp-cancel">Cancel</button>
+    </form>
+  </section>
+
+  <!-- Recovery codes of a new token: shown once -->
+  <section id="recovery-card" class="card narrow" hidden>
+    <h2>Recovery codes</h2>
+    <p>Each code works once instead of a TOTP code, also when the phone is lost. They are shown only now: write them down or store them in a password manager.</p>
+    <ol class="mono recovery-list" id="recovery-list"></ol>
+    <button type="button" class="primary" id="recovery-done">I have stored them</button>
   </section>
 
   <div id="app" hidden>
@@ -92,6 +126,12 @@
           <dt>DNS received (DHCPv4)</dt><dd><ul id="st-dns-v4" class="plain"></ul></dd>
           <dt>DNS received (IPv6 RA)</dt><dd><ul id="st-dns-v6" class="plain"></ul></dd>
           <dt>Your address</dt><dd id="st-client" class="addr"></dd>
+          <dt class="group">Login</dt><dd class="group"></dd>
+          <dt>This session</dt><dd id="st-session"></dd>
+          <dt>RADIUS server 1</dt><dd id="st-radius-1"></dd>
+          <dt>RADIUS server 2</dt><dd id="st-radius-2"></dd>
+          <dt>RADIUS logins</dt><dd id="st-radius-count"></dd>
+          <dt>TOTP tokens</dt><dd id="st-totp"></dd>
         </dl>
       </div>
     </section>
@@ -123,6 +163,7 @@
             <dt class="group">Device</dt><dd class="group"></dd>
             <dt>Heap</dt><dd id="dg-heap"></dd>
             <dt>Task stacks</dt><dd><ul id="dg-stacks" class="plain"></ul></dd>
+            <dt>NVS</dt><dd id="dg-nvs"></dd>
             <dt>Last crash</dt><dd><span id="dg-crash"></span>
               <span id="dg-crash-actions" hidden> <a id="dg-crash-download" href="/api/coredump" download="coredump.bin">Download</a> &middot; <button type="button" id="dg-crash-erase" class="link">Delete</button></span></dd>
           </dl>
@@ -610,13 +651,13 @@
           <button type="button" id="btn-reboot" title="Restart the device">Reboot</button>
           <button type="button" class="danger" id="btn-factory" title="Back to the default settings">Reset to defaults</button>
         </div>
-        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the default settings and the default password (the self-signed TLS certificate is kept, an own one is erased).</p>
+        <p class="hint center"><strong>Apply:</strong> in effect now, not stored. <strong>Save Settings:</strong> the settings are stored in NVS (flash) and loaded at every boot. <strong>Reboot:</strong> restarts with the saved settings. <strong>Reset to defaults:</strong> back to the default settings and the default password (the self-signed TLS certificate is kept, an own one and the TOTP tokens are erased).</p>
       </div>
     </form>
 
     <section class="card" id="factory-card" hidden>
       <h2>Reset to defaults</h2>
-      <p>This erases the saved settings, the web admin password, the allow-list and an own TLS certificate, then restarts the device.</p>
+      <p>This erases the saved settings, the web admin password, the allow-list, an own TLS certificate and the TOTP tokens, then restarts the device.</p>
       <form id="factory-form" class="stack">
         <label><span class="lt">Current password</span><input type="password" id="factory-password" autocomplete="current-password" maxlength="128" required></label>
         <div class="buttons left">
@@ -639,7 +680,7 @@
           <p>Then the image can be sent over HTTPS (TCP 443) in two ways:</p>
           <ol>
             <li><strong>With this page:</strong> choose the image under <em>Upload</em> and press <em>Upload and restart</em>. Your login to this page authorises the upload.</li>
-            <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the default password is in use, the device refuses the script.</li>
+            <li><strong>With the script on a PC:</strong> <code>python tools/ote_upload.py -i &lt;FQDN or IP address&gt; -f build/ESP32TimeServer.bin --fingerprint &lt;certificate SHA-256&gt;</code> (the fingerprint is shown under <em>Status</em>). The script looks the name up in the DNS (A and AAAA records, no mDNS) and authorises the upload with the web admin password, which it takes from the environment variable <code>WEB_ADMIN_PASSWORD</code> or asks for; no login is needed. While the default password is in use, or the local password is switched off (<em>Security</em>), the device refuses the script; while the second factor is required for <code>admin</code>, add <code>--totp</code> (it asks for the code).</li>
           </ol>
           <p><strong>Which file:</strong> <code>ESP32TimeServer.bin</code> from the build folder, built with the profile for this board's chip revision (<span id="ote-chip"></span>), not the merged flash image. The device refuses images of another project or chip revision.</p>
           <p><strong>What happens:</strong> the device writes the image into its spare firmware slot, checks the complete image and only then selects it for the next start; until then the running firmware stays untouched. It restarts 5 s after the upload: reload this page after about a minute. During the upload (at most 5 min) this page pauses its other requests.</p>
@@ -671,8 +712,8 @@
           </div>
         </form>
         <h3 class="sub-heading">Configuration</h3>
-        <p class="hint first"><em>Export configuration</em> saves all settings in use, the allow-list and an own TLS certificate with its key as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page and the key of the self-signed certificate.</p>
-        <p class="callout">The file contains secrets in clear text (MQTT password, NTP and PTP keys, the key of an own TLS certificate): keep it as safe as a password.</p>
+        <p class="hint first"><em>Export configuration</em> saves all settings in use, the allow-list and an own TLS certificate with its key as a JSON file; <em>Import configuration</em> loads such a file and replaces all settings and the allow-list at once. Not in the file: the password of this page, the key of the self-signed certificate and the TOTP tokens.</p>
+        <p class="callout">The file contains secrets in clear text (MQTT password, NTP and PTP keys, the shared secrets of the RADIUS servers, the key of an own TLS certificate): keep it as safe as a password.</p>
         <div class="buttons left">
           <button type="button" id="config-export">Export configuration</button>
         </div>
@@ -714,6 +755,147 @@
             <button type="submit">Store allow-list</button>
             <p class="hint">Takes effect and is stored at once. Connections from other addresses are closed before the TLS handshake. A list that does not contain your own address is refused.</p>
           </form>
+          <!-- Fields of the settings form (form="settings-form"): Apply and Save Settings above include them -->
+          <div class="span2 stack" id="login-methods">
+            <h3>Login to this page</h3>
+            <div class="grid">
+              <div class="stack">
+                <div class="switch-block">
+                  <label class="switch"><input type="checkbox" name="web_local" form="settings-form"> Local password</label>
+                  <small class="note">The user <code>admin</code> with the password of this page (<em>Change the password</em> above).</small>
+                  <small class="def" data-for="web_local"></small>
+                </div>
+                <div class="switch-block">
+                  <label class="switch"><input type="checkbox" name="web_radius" form="settings-form"> RADIUS</label>
+                  <small class="note">User name and password, checked by the RADIUS servers below. The login page then asks for a user name.</small>
+                  <small class="def" data-for="web_radius"></small>
+                </div>
+                <div class="switch-block">
+                  <label class="switch"><input type="checkbox" name="web_fallback" form="settings-form"> Local password only when no RADIUS server answers</label>
+                  <small class="note">Off: <code>admin</code> is checked with the local password only, other names by RADIUS.</small>
+                  <small class="def" data-for="web_fallback"></small>
+                </div>
+                <small class="note bad" id="web-auth-error" hidden>At least one login method must stay on.</small>
+              </div>
+              <p class="callout">The local password can only be switched off in a session that was logged in by RADIUS, so that a wrong RADIUS setting cannot lock you out. <em>Apply</em> without <em>Save Settings</em> is undone by a restart. The firmware upload script (<code>ote_upload.py</code>) always uses the local password and is refused while it is off.</p>
+            </div>
+
+            <h3>RADIUS servers</h3>
+            <div class="grid">
+              <fieldset class="stack radius-server">
+                <legend>Server 1</legend>
+                <label><span class="lt">Address</span><input type="text" name="r1_host" form="settings-form" maxlength="253" spellcheck="false" autocomplete="off"><small class="note">IPv4 or IPv6 address or DNS name; empty = not used.</small></label>
+                <label><span class="lt">UDP port</span><input type="number" name="r1_port" form="settings-form" min="1" max="65535"><small class="def" data-for="r1_port"></small></label>
+                <label><span class="lt">Shared secret</span><input type="password" name="r1_secret" form="settings-form" autocomplete="off" maxlength="64"><small class="note">1 to 64 characters; never shown again. Hides the password in the request and signs every packet.</small></label>
+              </fieldset>
+              <fieldset class="stack radius-server">
+                <legend>Server 2 (when server 1 does not answer)</legend>
+                <label><span class="lt">Address</span><input type="text" name="r2_host" form="settings-form" maxlength="253" spellcheck="false" autocomplete="off"><small class="note">IPv4 or IPv6 address or DNS name; empty = not used.</small></label>
+                <label><span class="lt">UDP port</span><input type="number" name="r2_port" form="settings-form" min="1" max="65535"><small class="def" data-for="r2_port"></small></label>
+                <label><span class="lt">Shared secret</span><input type="password" name="r2_secret" form="settings-form" autocomplete="off" maxlength="64"></label>
+              </fieldset>
+            </div>
+            <div class="grid three">
+              <label><span class="lt">Timeout (s)</span><input type="number" name="r_timeout" form="settings-form" min="1" max="30"><small class="note">1 to 30 s per try.</small><small class="def" data-for="r_timeout"></small></label>
+              <label><span class="lt">Retries</span><input type="number" name="r_retries" form="settings-form" min="0" max="5"><small class="note">0 to 5 more tries per server.</small><small class="def" data-for="r_retries"></small></label>
+              <label><span class="lt">Dead time (minutes)</span><input type="number" name="r_deadtime" form="settings-form" min="0" max="60"><small class="note">A server that did not answer is skipped this long; 0 = never skipped.</small><small class="def" data-for="r_deadtime"></small></label>
+            </div>
+
+            <h3>Access-Request: what the device sends</h3>
+            <div class="grid">
+              <label><span class="lt">NAS-Identifier</span><input type="text" name="r_nas_id" form="settings-form" maxlength="64" spellcheck="false" autocomplete="off"><small class="note">Empty = the host name.</small><small class="def" data-for="r_nas_id"></small></label>
+              <label><span class="lt">NAS-IP-Address</span><input type="text" name="r_nas_ip" form="settings-form" maxlength="15" spellcheck="false" autocomplete="off"><small class="note">Empty = the IPv4 address the request is sent from.</small><small class="def" data-for="r_nas_ip"></small></label>
+              <label><span class="lt">NAS-IPv6-Address</span><input type="text" name="r_nas_ip6" form="settings-form" maxlength="45" spellcheck="false" autocomplete="off"><small class="note">Empty = the IPv6 address the request is sent from (only to an IPv6 server).</small><small class="def" data-for="r_nas_ip6"></small></label>
+              <label><span class="lt">Service-Type</span>
+                <select name="r_service" form="settings-form">
+                  <option value="1">Login (1)</option>
+                  <option value="6">Administrative (6)</option>
+                  <option value="7">NAS-Prompt (7)</option>
+                  <option value="0">not sent</option>
+                </select>
+                <small class="note">What a Cisco switch sends for a login on a line.</small><small class="def" data-for="r_service"></small></label>
+              <label><span class="lt">NAS-Port-Type</span>
+                <select name="r_port_type" form="settings-form">
+                  <option value="5">Virtual (5)</option>
+                  <option value="0">Async (0)</option>
+                  <option value="-1">not sent</option>
+                </select>
+                <small class="def" data-for="r_port_type"></small></label>
+              <p class="note">Also sent: User-Name, User-Password, Message-Authenticator, NAS-Port 0, NAS-Port-Id <code>https</code>, Calling-Station-Id (the address of the client).</p>
+            </div>
+
+            <h3>Access-Accept: what the answer must contain</h3>
+            <div class="grid">
+              <label><span class="lt">Privilege level at least</span><input type="number" name="r_priv" form="settings-form" min="1" max="15">
+                <small class="note">From <code>Cisco-AVPair = "shell:priv-lvl=N"</code>; without it Service-Type Administrative = 15, any other = 1. 1 = every Access-Accept is enough.</small><small class="def" data-for="r_priv"></small></label>
+              <label><span class="lt">Attribute that must also be in the answer (optional)</span><input type="text" name="r_required" form="settings-form" maxlength="141" spellcheck="false" autocomplete="off" placeholder='Cisco-AVPair=shell:roles="timeserver"'>
+                <small class="note"><code>Cisco-AVPair=…</code>, <code>Class=…</code> or <code>Filter-Id=…</code>, compared exactly; empty = none.</small><small class="def" data-for="r_required"></small></label>
+              <div class="switch-block span2">
+                <label class="switch"><input type="checkbox" name="r_require_ma" form="settings-form"> Answers must carry a valid Message-Authenticator</label>
+                <small class="note">Protects against forged answers (BlastRADIUS, CVE-2024-3596). Switch it off only for an old server that does not send it. Requests always carry one.</small>
+                <small class="def" data-for="r_require_ma"></small>
+              </div>
+            </div>
+
+            <h3>Test</h3>
+            <div class="radius-test-row">
+              <input type="text" id="r-test-user" placeholder="User name" maxlength="64" spellcheck="false" autocomplete="off">
+              <input type="password" id="r-test-pw" placeholder="Password" maxlength="128" autocomplete="off">
+              <button type="button" id="r-test">Test login</button>
+            </div>
+            <p class="note" id="r-test-result" hidden></p>
+            <p class="hint">Part of the settings: <em>Apply</em> uses them now, <em>Save Settings</em> stores them. The test uses the values in the form, also before <em>Apply</em> (an empty shared secret: the one in use); it is not counted for the lock-out. The configuration file (export) contains the shared secrets. Failed RADIUS logins count for the login lock-out like wrong passwords.</p>
+
+            <h3>Second factor (TOTP)</h3>
+            <div class="grid">
+              <div class="stack">
+                <div class="switch-block">
+                  <label class="switch"><input type="checkbox" name="totp_local" form="settings-form"> Required for the local user <code>admin</code></label>
+                  <small class="note">Can only be switched on when <code>admin</code> has a token.</small>
+                  <small class="def" data-for="totp_local"></small>
+                </div>
+                <div class="switch-block">
+                  <label class="switch"><input type="checkbox" name="totp_radius" form="settings-form"> Required for RADIUS users</label>
+                  <small class="note">A RADIUS user without a token is refused.</small>
+                  <small class="def" data-for="totp_radius"></small>
+                </div>
+                <div class="switch-block">
+                  <label class="switch"><input type="checkbox" name="totp_enroll" form="settings-form"> RADIUS users without a token set one up at their first login</label>
+                  <small class="note">Until then the RADIUS password alone is enough for that user. Off: an administrator sets the token up here.</small>
+                  <small class="def" data-for="totp_enroll"></small>
+                </div>
+              </div>
+              <p class="callout">TOTP (RFC 6238: SHA-1, 6 digits, 30 s, one step before or after accepted, each code once) needs the time of the device. It comes from GNSS: after a start without a GNSS fix (antenna, no satellites) only the recovery codes work.</p>
+            </div>
+            <small class="note bad device-state" id="totp-time" hidden>The clock of the device is not set (no GNSS time yet): TOTP codes cannot be checked; only the recovery codes work.</small>
+            <div class="table-wrap">
+              <table class="data">
+                <thead><tr><th>User</th><th>Kind</th><th>Set up</th><th>Last used</th><th>Recovery codes left</th><th></th></tr></thead>
+                <tbody id="totp-users"></tbody>
+              </table>
+            </div>
+            <div class="radius-test-row">
+              <input type="text" id="totp-new-user" placeholder="User name (admin or a RADIUS user)" maxlength="64" spellcheck="false" autocomplete="off">
+              <span></span>
+              <button type="button" id="totp-new">Set up a token</button>
+            </div>
+            <div id="totp-enroll-box" class="totp-enroll" hidden>
+              <svg id="totp-qr" class="totp-qr" role="img" aria-label="QR code"></svg>
+              <div class="stack">
+                <p class="note" id="totp-enroll-for"></p>
+                <p class="note">Scan the QR code with an authenticator app (Microsoft or Google Authenticator, FreeOTP, KeePassXC, …), or enter the key by hand:</p>
+                <p class="mono" id="totp-secret"></p>
+                <label><span class="lt">Code shown by the app</span><input type="text" id="totp-confirm-code" inputmode="numeric" maxlength="6" autocomplete="off"></label>
+                <div><button type="button" class="primary" id="totp-confirm">Confirm and store</button></div>
+                <small class="note">The key is made on the device and stored only with a right code (within 10 minutes); it is never shown again.</small>
+              </div>
+            </div>
+            <div id="totp-recovery" class="callout" hidden>
+              <strong id="totp-recovery-for"></strong>
+              <ol class="mono recovery-list" id="totp-recovery-list"></ol>
+            </div>
+            <p class="hint">The tokens and recovery codes are stored at once in NVS (not in the configuration file, erased by <em>Reset to defaults</em>); at most 9 tokens, and only while NVS keeps room for the settings (Diagnostics, NVS). The check boxes are part of the settings (<em>Apply</em>, <em>Save Settings</em>, export). Wrong codes count for the login lock-out like wrong passwords.</p>
+          </div>
           <form id="tls-form" class="span2 stack">
             <h3>TLS certificate of the web admin</h3>
             <div class="radio-row" role="radiogroup">
