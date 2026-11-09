@@ -5,6 +5,10 @@ As a program (the owner's own tries, or a second server for the failover):
 
     python -I testing/board/radius_server.py --secret testing123 [--port 1812] [--mode normal] [--bind 0.0.0.0]
 
+IPv6: --bind with the address the board is told to use (e.g. a stable unique local one), not "::": on a host with
+several IPv6 addresses (temporary ones, unique local and global) a socket bound to "::" may answer from another
+address, and the board drops an answer that does not come from the address it asked.
+
 As a module (radius_logins.py): RadiusTestServer(port, secret) runs in a thread; .mode, .users and .requests (the
 decoded requests) can be changed and read while it runs.
 
@@ -193,6 +197,9 @@ class RadiusTestServer:
             try:
                 packet, source = self.sock.recvfrom(4096)
             except socket.timeout:
+                continue
+            except ConnectionResetError:
+                # Windows reports an ICMP "port unreachable" for an earlier answer here: not the end of the socket
                 continue
             except OSError:
                 break
