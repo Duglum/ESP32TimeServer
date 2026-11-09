@@ -1,4 +1,4 @@
-// ESP32 Time Server v3.0.5-WebIf
+// ESP32 Time Server v4.0.0-WebUI
 // Copyright Rob Latour, 2026
 // License: MIT
 // Website: https://github.com/roblatour/ESP32TimeServer

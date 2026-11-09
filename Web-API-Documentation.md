@@ -79,7 +79,7 @@ Notes on `/api/apply`:
   "timeserver_config": 1,
   "settings": { "fqdn": "ESP32TimeServer", "...": "every field of settings in /api/state, with the secrets" },
   "hostname": "ESP32TimeServer",
-  "firmware": "3.0.5-WebIf",
+  "firmware": "4.0.0-WebUI",
   "exported": "2026-11-01T10:15:00Z",
   "allow_list": ["192.168.8.0/24"],
   "tls": { "mode": "own", "certificate": "-----BEGIN CERTIFICATE-----\n...", "key": "-----BEGIN PRIVATE KEY-----\n..." }
