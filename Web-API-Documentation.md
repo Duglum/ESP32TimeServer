@@ -6,9 +6,11 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
 
 1. **Allow-list.** Each new TCP connection is checked against the allow-list first. A source that is not allowed is closed before the TLS handshake. The allow-list applies to every path, the static files included.
 2. **TLS.** Everything runs over HTTPS with the device's own certificate, TLS 1.3 only: a client that only knows TLS 1.2 (e.g. `curl.exe` of Windows 10, which uses Schannel) is refused; use a browser, Python or a curl built with OpenSSL. By default it is self-signed and created at the first start; an own certificate (e.g. of a public or company CA) can be set with `/api/tls`. Compare the SHA-256 fingerprint of the certificate in use with the one in the *Status* section or on the serial console.
-3. **Login.** `POST /api/login` with `{"password": "..."}` returns:
+3. **Login.** `POST /api/login` with `{"user": "...", "password": "..."}` returns:
    - a session cookie `__Host-sid` (a 256-bit token, `Secure; HttpOnly; SameSite=Strict`);
-   - a CSRF token in the body: `{"csrf": "..."}`. `GET /api/state` returns it again (field `csrf`), so the page has it after a reload.
+   - in the body the CSRF token, the user name and the method: `{"csrf": "...", "user": "admin", "radius": false}`. `GET /api/state` returns the CSRF token again (field `csrf`), so the page has it after a reload.
+
+   `user` `""` or missing = the local user `admin` (the password of the page). Other user names are checked by the RADIUS servers while `settings.web_login.radius` is on, see *Logins with RADIUS* below.
 
    Session limits:
    - at most 4 sessions;
@@ -35,10 +37,10 @@ Request bodies are limited to 4096 bytes; `/api/apply` and `/api/save` take up t
 
 | Endpoint | Method | Authentication | What it does |
 |---|---|---|---|
-| `/api/info` | GET | **none** | Host name and FQDN (for the login page) |
-| `/api/login` | POST | same origin, password in the body | Starts a session: cookie and CSRF token. `401` wrong password, `429` with `Retry-After` while locked out |
+| `/api/info` | GET | **none** | Host name and FQDN, `login_user` (RADIUS logins are on: the login page asks for a user name) |
+| `/api/login` | POST | same origin, user name and password in the body | `{"user": "...", "password": "..."}`. Starts a session: cookie and the reply `{"csrf", "user", "radius"}`. `401` wrong user name or password (the same for both) or `No RADIUS server answered`, `429` with `Retry-After` while locked out (the body has the seconds as `retry_after`), `503` a login from the same address is still being checked by RADIUS |
 | `/api/logout` | POST | cookie + CSRF (without them only the cookie is cleared) | Ends the session |
-| `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, allow-list, `status` (chip: `chip_model` (`ESP32-P4` or `ESP32-S31`), `chip_revision`, `gpio_max` (highest GPIO number: 54 or 61; the pin fields of the settings accept -1 or 0 to this value, ESP32-S31: GPIO 29 and 41 are refused), `ptp_loopback_supported`; network: link state, speed (10, 100 or, ESP32-S31, 1000), duplex and driver restarts in `link_up`, `link_speed_mbps`, `link_full_duplex`, `eth_recoveries`; MQTT: `mqtt_active`, `mqtt_connected`, `mqtt_broker`, `mqtt_port`, `mqtt_tls`, `mqtt_error` with `mqtt_error_age_s`, `mqtt_connected_s`, `mqtt_published`, `mqtt_publish_age_s`, `mqtt_tf_queue`; NTP: `ntp_auth_available`, `ntp_auth_keys_in_use`, `ntp_rate_limited` (requests dropped by the per-client rate limit since the start), `ntp_unsigned_refused` (unsigned requests dropped while `ntp_auth_required` is on, since the start); time, GNSS, PPS, ...), certificate fingerprint, `tls` (see *TLS certificate* below), `radius_status` (see *RADIUS* below), CSRF token. Secrets (passwords, keys, the shared secrets of the RADIUS servers) are not sent back |
+| `/api/state` | GET | cookie | Settings in use (`settings`), `defaults`, `saved`, allow-list, `status` (chip: `chip_model` (`ESP32-P4` or `ESP32-S31`), `chip_revision`, `gpio_max` (highest GPIO number: 54 or 61; the pin fields of the settings accept -1 or 0 to this value, ESP32-S31: GPIO 29 and 41 are refused), `ptp_loopback_supported`; network: link state, speed (10, 100 or, ESP32-S31, 1000), duplex and driver restarts in `link_up`, `link_speed_mbps`, `link_full_duplex`, `eth_recoveries`; MQTT: `mqtt_active`, `mqtt_connected`, `mqtt_broker`, `mqtt_port`, `mqtt_tls`, `mqtt_error` with `mqtt_error_age_s`, `mqtt_connected_s`, `mqtt_published`, `mqtt_publish_age_s`, `mqtt_tf_queue`; NTP: `ntp_auth_available`, `ntp_auth_keys_in_use`, `ntp_rate_limited` (requests dropped by the per-client rate limit since the start), `ntp_unsigned_refused` (unsigned requests dropped while `ntp_auth_required` is on, since the start); time, GNSS, PPS, ...), certificate fingerprint, `tls` (see *TLS certificate* below), `radius_status` (see *RADIUS* below), `session` (the login of this session: `user`, `radius`, `totp`), CSRF token. Secrets (passwords, keys, the shared secrets of the RADIUS servers) are not sent back |
 | `/api/diag` | GET | cookie | Diagnostics: servo, ADEV/TDEV, ISR histogram, NTP paths, basic mode TX delay, load shedding, receive rests of the NTP tasks under a flood (`receive_rests`), RMC phase, UBX details |
 | `/api/ptp` | GET | cookie | PTP master: state per transport, counters since the start and the current followers. See *PTP* below |
 | `/api/coredump` | GET | cookie | Downloads the stored core dump (`404` if there is none) |
@@ -98,6 +100,12 @@ Fields of `web_login` (defaults in brackets):
 | `local_fallback` | bool | With both: every user name is checked by RADIUS first, the local password of `admin` only when no RADIUS server answers. false: `admin` is checked with the local password only, other names by RADIUS (true) |
 | `totp_local`, `totp_radius` | bool | A TOTP code is required after the password of the local user / of a RADIUS user (false) |
 | `totp_enroll` | bool | A RADIUS user without a TOTP token sets one up at the first login; false: a user without a token is refused while `totp_radius` is on (false) |
+
+- `web_login.local` can only be switched off (also by `/api/save` and the import) in a session that RADIUS logged in (`400` otherwise): a wrong RADIUS setting cannot lock you out.
+
+## Logins with RADIUS
+
+The local user `admin` logs in with the password of the page while `settings.web_login.local` is on; any other user name (and `admin` too while the local password is off or `local_fallback` is on) is checked by the RADIUS servers while `web_login.radius` is on. With both and `local_fallback` (default) every name is asked from RADIUS first and the local password of `admin` is checked only when no RADIUS server answers (like `aaa authentication login default group radius local` of a Cisco switch); without it `admin` is checked with the local password only. An Access-Accept below `radius.min_privilege` (default 15) or without `radius.required` is refused. Every refusal counts for the lock-out of the source, also "No RADIUS server answered"; a user name that no method takes is refused after the same PBKDF2 check as a wrong password. A login waiting for RADIUS (up to servers × (1 + retries) × timeout) does not hold up the other requests; one per source address at a time (`503` for a second one). The requests carry User-Name, User-Password (PAP), Message-Authenticator (first), NAS-Identifier, NAS-IP-Address or NAS-IPv6-Address, NAS-Port 0, NAS-Port-Id `https`, NAS-Port-Type, Service-Type and Calling-Station-Id (the address of the client).
 
 **Static files** need no login; only the allow-list applies: `/`, `/app.js`, `/app.css`, `/i18n.js`, `/favicon.ico`.
 
@@ -209,7 +217,7 @@ Read by the page every 10 s while the PTP panel is open. The PTP master serves o
 
 `tools/ote_upload.py` uses this path. The request carries `Authorization: Basic base64(<any user name>:<web admin password>)` inside the TLS connection. It needs no cookie, CSRF token or `Origin`.
 
-- The upload is refused with `403` while the default password is in use.
+- The upload is refused with `403` while the default password is in use, and while the local password is switched off (`web_login.local`): use the page then.
 - A wrong password counts for the throttling like a failed login: `401`, and later `429`.
 - On a refusal the device answers as soon as it has the headers and the first byte of the body. It then closes the connection without reading the image. The script therefore sends the headers with the first byte and waits up to 2 s for an answer before it sends the rest. Otherwise Windows can lose the answer to a connection reset.
 

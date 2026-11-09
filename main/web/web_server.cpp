@@ -1120,11 +1120,19 @@ namespace
         enum class kind_t : uint8_t
         {
             test,
+            login,
         };
         kind_t kind = kind_t::test;
         httpd_req_t *req = nullptr; // the async copy of the request
         radius_outcome_t outcome{};
+        // A login: what it needs after the answer
+        struct sockaddr_storage peer{};
+        char user[RADIUS_USER_MAX + 1] = "";
+        char password[RADIUS_PASSWORD_MAX + 1] = ""; // for the local password when no RADIUS server answers
+        bool local_fallback = false; // the user is the local one and the local password may be checked without an answer
     };
+
+    void radius_login_finish(radius_wait_t &w);
 
     // The settings in use for the radius task: started once a login method uses RADIUS (or start: the test of the
     // page), then every change is handed to it
@@ -1165,8 +1173,12 @@ namespace
         case radius_wait_t::kind_t::test:
             radius_test_finish(*w);
             break;
+        case radius_wait_t::kind_t::login:
+            radius_login_finish(*w);
+            break;
         }
         httpd_req_async_handler_complete(w->req);
+        mbedtls_platform_zeroize(w->password, sizeof(w->password));
         delete w;
     }
 
@@ -1179,6 +1191,7 @@ namespace
         {
             ESP_LOGW(TAG, "RADIUS: the answer could not be handed to the web server");
             httpd_req_async_handler_complete(w->req);
+            mbedtls_platform_zeroize(w->password, sizeof(w->password));
             delete w;
         }
     }
@@ -1199,6 +1212,7 @@ namespace
         {
             send_error(copy, "503 Service Unavailable", "A login from your address is still being checked, or too many at once: try again");
             httpd_req_async_handler_complete(copy);
+            mbedtls_platform_zeroize(w->password, sizeof(w->password));
             delete w;
         }
         return ESP_OK;
@@ -1320,6 +1334,89 @@ namespace
         cJSON_AddNumberToObject(object, "active", st.active);
     }
 
+    // The local password of the page can only be switched off in a session that RADIUS logged in: a wrong RADIUS
+    // setting cannot lock the administrator out (Apply without Save is undone by a restart as well)
+    bool login_change_allowed(const char *token, const web_settings_t &running, const web_settings_t &candidate, char *err, size_t err_size)
+    {
+        bool radius = false;
+        bool totp = false;
+        if (running.web_login.local && !candidate.web_login.local && !(web_auth_session_login(token, nullptr, 0, radius, totp) && radius))
+        {
+            snprintf(err, err_size, "The local password can only be switched off in a session that was logged in by RADIUS.");
+            return false;
+        }
+        return true;
+    }
+
+    // The login is complete: the session (the throttling forgets the failures of the source)
+    esp_err_t login_open_session(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius, bool totp)
+    {
+        web_auth_record_success(peer);
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        char csrf[WEB_CSRF_TOKEN_HEX_LEN + 1];
+        if (!web_auth_create_session(token, csrf, user, radius, totp))
+            return send_error(req, "500 Internal Server Error", "Session could not be created");
+        char cookie[WEB_SESSION_TOKEN_HEX_LEN + 80];
+        snprintf(cookie, sizeof(cookie), "%s=%s; Path=/; Secure; HttpOnly; SameSite=Strict", SESSION_COOKIE, token);
+        httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddStringToObject(reply, "csrf", csrf);
+        cJSON_AddStringToObject(reply, "user", user);
+        cJSON_AddBoolToObject(reply, "radius", radius);
+        const esp_err_t err = send_json(req, "200 OK", reply);
+        memset(token, 0, sizeof(token));
+        memset(cookie, 0, sizeof(cookie));
+        return err;
+    }
+
+    // A login that passed its check (the password)
+    esp_err_t login_succeeded(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius)
+    {
+        return login_open_session(req, peer, user, radius, false);
+    }
+
+    // A refused login (the throttling has counted it): the same answer for a wrong user name and a wrong password
+    esp_err_t login_refused(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, const char *why, const char *message)
+    {
+        char address[INET6_ADDRSTRLEN];
+        format_address(peer, address, sizeof(address));
+        ESP_LOGW(TAG, "Web admin: failed login from %s (user '%s': %s)", address, user, why);
+        return send_error(req, "401 Unauthorized", message);
+    }
+
+    // The answer of RADIUS for a login (server task)
+    void radius_login_finish(radius_wait_t &w)
+    {
+        const radius_outcome_t &o = w.outcome;
+        if (o.result == radius_result_t::accept)
+        {
+            login_succeeded(w.req, w.peer, w.user, true);
+            return;
+        }
+        if (o.result == radius_result_t::no_answer && w.local_fallback)
+        {
+            // No server answered: the local password of the local user (as "group radius local" of a Cisco switch)
+            const bool ok = web_auth_check_password(w.peer, w.password, strlen(w.password));
+            if (ok)
+                login_succeeded(w.req, w.peer, AUTH_WEB_LOCAL_USER, false);
+            else
+                login_refused(w.req, w.peer, w.user, "no RADIUS answer, wrong local password", "Wrong user name or password");
+            return;
+        }
+        web_auth_record_failed_check(w.peer);
+        if (o.result == radius_result_t::no_answer)
+            login_refused(w.req, w.peer, w.user, "no RADIUS server answered", "No RADIUS server answered");
+        else
+            login_refused(w.req, w.peer, w.user, radius_result_text(o.result), "Wrong user name or password");
+    }
+
+    // The login of the page (as in ESP32-ConsoleServer, owner decision 2026-11-09, like a Cisco switch):
+    //  - the local user "admin" (also an empty user name) with the password of the page; any other name with RADIUS;
+    //  - with both and "local_fallback" (the default, "aaa authentication login default group radius local"): every
+    //    name is asked from RADIUS first, the local password of admin only when no RADIUS server answers; without
+    //    it ("local group radius"): admin is checked with the local password only;
+    //  - every refusal counts for the throttling of the source, also "no RADIUS server answered"; a user name that
+    //    no method takes fails like a wrong password, after the same PBKDF2 check.
     esp_err_t handle_login(httpd_req_t *req)
     {
         struct sockaddr_storage peer{};
@@ -1341,34 +1438,71 @@ namespace
         cJSON *root = read_json(req);
         if (root == nullptr)
             return ESP_OK;
+        radius_wait_t *w = new (std::nothrow) radius_wait_t{};
+        web_settings_t *running = new (std::nothrow) web_settings_t{}; // about 7 kB: not on the server task stack
+        if (w == nullptr || running == nullptr)
+        {
+            delete w;
+            delete running;
+            cJSON_Delete(root);
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        }
+        web_settings_get_running(*running);
+        const web_login_settings_t methods = running->web_login;
+        const bool radius_on = methods.radius && radius_any_server(running->radius) && radius_task_running();
+        delete running;
+
         cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
+        const cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
         const bool valid_type = cJSON_IsString(password) && password->valuestring != nullptr;
         const size_t length = valid_type ? strlen(password->valuestring) : 0;
-        const bool ok = valid_type && length <= WEB_PASSWORD_MAX_LEN && web_auth_check_password(peer, password->valuestring, length);
+        const char *name = cJSON_IsString(user) && user->valuestring != nullptr && user->valuestring[0] != '\0' ? user->valuestring
+                                                                                                                   : AUTH_WEB_LOCAL_USER;
+        const bool name_ok = user == nullptr || cJSON_IsString(user) ? radius_user_valid(name, strlen(name)) : false;
+        snprintf(w->user, sizeof(w->user), "%s", name_ok ? name : "?");
+        w->peer = peer;
+        if (valid_type && length <= WEB_PASSWORD_MAX_LEN)
+            snprintf(w->password, sizeof(w->password), "%s", password->valuestring);
         if (valid_type)
-            memset(password->valuestring, 0, length);
+            mbedtls_platform_zeroize(password->valuestring, length);
         cJSON_Delete(root);
-        if (!ok)
-        {
-            char address[INET6_ADDRSTRLEN];
-            format_address(peer, address, sizeof(address));
-            ESP_LOGW(TAG, "Web admin: failed login from %s", address);
-            return send_error(req, "401 Unauthorized", "Wrong password");
-        }
 
-        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
-        char csrf[WEB_CSRF_TOKEN_HEX_LEN + 1];
-        if (!web_auth_create_session(token, csrf))
-            return send_error(req, "500 Internal Server Error", "Session could not be created");
-        char cookie[WEB_SESSION_TOKEN_HEX_LEN + 80];
-        snprintf(cookie, sizeof(cookie), "%s=%s; Path=/; Secure; HttpOnly; SameSite=Strict", SESSION_COOKIE, token);
-        httpd_resp_set_hdr(req, "Set-Cookie", cookie);
-        cJSON *reply = cJSON_CreateObject();
-        cJSON_AddStringToObject(reply, "csrf", csrf);
-        const esp_err_t err = send_json(req, "200 OK", reply);
-        memset(token, 0, sizeof(token));
-        memset(cookie, 0, sizeof(cookie));
-        return err;
+        const bool local_user = name_ok && strcmp(w->user, AUTH_WEB_LOCAL_USER) == 0;
+        const bool password_ok = valid_type && length > 0 && length <= WEB_PASSWORD_MAX_LEN;
+        esp_err_t result = ESP_OK;
+        if (password_ok && local_user && methods.local && (!radius_on || !methods.local_fallback))
+        {
+            // The local password decides
+            if (web_auth_check_password(peer, w->password, strlen(w->password)))
+                result = login_succeeded(req, peer, AUTH_WEB_LOCAL_USER, false);
+            else
+                result = login_refused(req, peer, w->user, "wrong password", "Wrong user name or password");
+        }
+        else if (password_ok && name_ok && radius_on)
+        {
+            radius_login_t login{};
+            snprintf(login.user, sizeof(login.user), "%s", w->user);
+            snprintf(login.password, sizeof(login.password), "%s", w->password);
+            to_mapped(peer, login.source);
+            snprintf(login.nas_port_id, sizeof(login.nas_port_id), "https");
+            w->kind = radius_wait_t::kind_t::login;
+            w->local_fallback = local_user && methods.local && methods.local_fallback;
+            if (!w->local_fallback)
+                mbedtls_platform_zeroize(w->password, sizeof(w->password));
+            return radius_begin(req, w, login); // owns w now
+        }
+        else
+        {
+            // No method takes this name (or the password is malformed): the same PBKDF2 check as a wrong password,
+            // and a refusal whatever its result
+            if (web_auth_verify_current_password(peer, w->password, strlen(w->password)))
+                web_auth_record_failed_check(peer);
+            result = login_refused(req, peer, w->user, name_ok ? "no login method for this user" : "user name not valid",
+                                   "Wrong user name or password");
+        }
+        mbedtls_platform_zeroize(w->password, sizeof(w->password));
+        delete w;
+        return result;
     }
 
     esp_err_t handle_logout(httpd_req_t *req)
@@ -1466,6 +1600,16 @@ namespace
         cJSON_AddBoolToObject(root, "unsaved_changes", !web_settings_equal(sets->running, saved ? sets->saved : sets->defaults));
         add_confirm_info(root);
         add_radius(cJSON_AddObjectToObject(root, "radius_status"));
+        {
+            char user[WEB_SESSION_USER_SIZE] = "";
+            bool radius = false;
+            bool totp = false;
+            web_auth_session_login(token, user, sizeof(user), radius, totp);
+            cJSON *session = cJSON_AddObjectToObject(root, "session");
+            cJSON_AddStringToObject(session, "user", user);
+            cJSON_AddBoolToObject(session, "radius", radius);
+            cJSON_AddBoolToObject(session, "totp", totp);
+        }
 
         cJSON *allow = cJSON_AddArrayToObject(root, "allow_list");
         web_allow_entry_t entries[WEB_ALLOW_LIST_MAX];
@@ -1592,10 +1736,11 @@ namespace
             return send_error(req, "503 Service Unavailable", "Out of memory");
         }
         web_settings_get_running(sets->running);
-        char err[128] = "";
+        char err[160] = "";
         const bool parsed = settings_from_json(root, sets->running, sets->candidate, err, sizeof(err));
         cJSON_Delete(root);
-        if (!parsed || !settings_valid(sets->candidate, err, sizeof(err)))
+        if (!parsed || !settings_valid(sets->candidate, err, sizeof(err)) ||
+            !login_change_allowed(token, sets->running, sets->candidate, err, sizeof(err)))
         {
             delete sets;
             return send_error(req, "400 Bad Request", err);
@@ -1682,10 +1827,11 @@ namespace
             return send_error(req, "503 Service Unavailable", "Out of memory");
         }
         web_settings_get_running(sets->running);
-        char err[128] = "";
+        char err[160] = "";
         const bool parsed = settings_from_json(root, sets->running, sets->candidate, err, sizeof(err));
         cJSON_Delete(root);
-        if (!parsed || !settings_valid(sets->candidate, err, sizeof(err)))
+        if (!parsed || !settings_valid(sets->candidate, err, sizeof(err)) ||
+            !login_change_allowed(token, sets->running, sets->candidate, err, sizeof(err)))
         {
             delete sets;
             return send_error(req, "400 Bad Request", err);
@@ -1849,6 +1995,16 @@ namespace
             {
                 send_error(req, "403 Forbidden", "Scripted uploads are refused while the web admin password is the default");
                 return ESP_FAIL; // closes the connection (the body is not read)
+            }
+            {
+                web_settings_t *running = new (std::nothrow) web_settings_t{};
+                const bool local = running != nullptr && (web_settings_get_running(*running), running->web_login.local);
+                delete running;
+                if (!local)
+                {
+                    send_error(req, "403 Forbidden", "Scripted uploads use the local password, which is switched off: use the page");
+                    return ESP_FAIL;
+                }
             }
             const uint32_t wait_s = web_auth_login_wait_seconds(peer);
             if (wait_s > 0)
@@ -2333,6 +2489,12 @@ namespace
         cJSON *root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "hostname", hostname);
         cJSON_AddStringToObject(root, "fqdn", boot.fqdn);
+        // The login page asks for a user name while RADIUS logins are on (the settings in use)
+        web_settings_t *running = new (std::nothrow) web_settings_t{};
+        if (running != nullptr)
+            web_settings_get_running(*running);
+        cJSON_AddBoolToObject(root, "login_user", running != nullptr && running->web_login.radius);
+        delete running;
         return send_json(req, "200 OK", root);
     }
 
@@ -2647,6 +2809,7 @@ namespace
         }
         // The certificate is checked with the rest, before anything is applied
         if (!ok || !settings_valid(sets->candidate, err, sizeof(err)) ||
+            !login_change_allowed(token, sets->running, sets->candidate, err, sizeof(err)) ||
             (tls_own && !web_tls_check_own(tls_cert, tls_key, *tls_info, err, sizeof(err))))
         {
             delete tls_info;

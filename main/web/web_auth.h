@@ -23,6 +23,7 @@ static constexpr size_t WEB_PASSWORD_MAX_LEN = 128;
 static constexpr size_t WEB_ALLOW_LIST_MAX = 8;
 static constexpr int64_t WEB_SESSION_IDLE_TIMEOUT_US = 15LL * 60LL * 1000000LL;
 static constexpr int64_t WEB_SESSION_MAX_AGE_US = 12LL * 3600LL * 1000000LL;
+static constexpr size_t WEB_SESSION_USER_SIZE = 65; // the user name of the login (the local user or a RADIUS user)
 
 struct web_allow_entry_t
 {
@@ -45,20 +46,28 @@ bool web_auth_check_password(const sockaddr_storage &source, const char *passwor
 // Verifies the password without touching the throttling state of a successful login (used for the
 // password change and the reset to defaults; failures still count)
 bool web_auth_verify_current_password(const sockaddr_storage &source, const char *password, size_t length);
-// Records a failed check without a password to verify (unreadable credentials of a scripted firmware upload)
+// Records a failed check without a password to verify (unreadable credentials of a scripted firmware upload, a login
+// refused by RADIUS, a wrong TOTP code)
 void web_auth_record_failed_check(const sockaddr_storage &source);
+// Records a successful check made elsewhere (a login accepted by RADIUS, the second factor): the failures of the
+// source are forgotten
+void web_auth_record_success(const sockaddr_storage &source);
 
 // ---- Password change: stored immediately, all other sessions are closed ----
 esp_err_t web_auth_set_password(const char *password, size_t length, const char *keep_session_token);
 
 // ---- Sessions ----
-// Creates a session; token and csrf receive hex strings (WEB_*_HEX_LEN + 1 bytes)
-bool web_auth_create_session(char *token, char *csrf);
+// Creates a session; token and csrf receive hex strings (WEB_*_HEX_LEN + 1 bytes). user: the user name of the login
+// (nullptr: the local user "admin"), radius: RADIUS accepted it, totp: it passed the second factor as well.
+bool web_auth_create_session(char *token, char *csrf, const char *user = nullptr, bool radius = false, bool totp = false);
 // Looks up a session by its cookie token and refreshes its idle timer. csrf (optional) receives the CSRF token.
 bool web_auth_session_valid(const char *token, char *csrf);
 // Checks the CSRF token of a session (constant time)
 bool web_auth_csrf_valid(const char *token, const char *csrf);
 void web_auth_end_session(const char *token);
+// The login of the session of token (user name, by RADIUS, with the second factor); false if there is none. The idle
+// timer is not refreshed.
+bool web_auth_session_login(const char *token, char *user, size_t user_size, bool &radius, bool &totp);
 void web_auth_end_all_sessions();
 
 // ---- Allow-list ----

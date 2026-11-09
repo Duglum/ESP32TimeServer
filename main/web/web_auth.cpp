@@ -63,6 +63,9 @@ namespace
         char csrf[WEB_CSRF_TOKEN_HEX_LEN + 1];
         int64_t created_us;
         int64_t last_used_us;
+        char user[WEB_SESSION_USER_SIZE]; // "admin" or the RADIUS user name
+        bool radius;                      // logged in by RADIUS (else with the local password)
+        bool totp;                        // the login passed the second factor
     };
 
     struct throttle_entry_t
@@ -410,6 +413,11 @@ void web_auth_record_failed_check(const sockaddr_storage &source)
     record_failure(source);
 }
 
+void web_auth_record_success(const sockaddr_storage &source)
+{
+    record_success(source);
+}
+
 esp_err_t web_auth_set_password(const char *password, size_t length, const char *keep_session_token)
 {
     if (length < WEB_PASSWORD_MIN_LEN || length > WEB_PASSWORD_MAX_LEN)
@@ -450,7 +458,7 @@ esp_err_t web_auth_set_password(const char *password, size_t length, const char 
     return ESP_OK;
 }
 
-bool web_auth_create_session(char *token, char *csrf)
+bool web_auth_create_session(char *token, char *csrf, const char *user, bool radius, bool totp)
 {
     const int64_t now_us = esp_timer_get_time();
     session_t *slot = nullptr;
@@ -480,7 +488,22 @@ bool web_auth_create_session(char *token, char *csrf)
     snprintf(csrf, WEB_CSRF_TOKEN_HEX_LEN + 1, "%s", slot->csrf);
     slot->created_us = now_us;
     slot->last_used_us = now_us;
+    snprintf(slot->user, sizeof(slot->user), "%s", user != nullptr ? user : "admin");
+    slot->radius = radius;
+    slot->totp = totp;
     slot->used = true;
+    return true;
+}
+
+bool web_auth_session_login(const char *token, char *user, size_t user_size, bool &radius, bool &totp)
+{
+    const session_t *session = find_session(token);
+    if (session == nullptr)
+        return false;
+    if (user != nullptr && user_size > 0)
+        snprintf(user, user_size, "%s", session->user);
+    radius = session->radius;
+    totp = session->totp;
     return true;
 }
 
