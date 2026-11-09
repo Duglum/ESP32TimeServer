@@ -31,6 +31,10 @@ CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
 
 # allows up to 64 NTP requests to be serviced concurrently
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
+# Sockets: 5 always open (web admin listen and control, 3 NTP), up to 4 of the web admin clients (3 plus one being
+# accepted while the LRU purge closes another), one per RADIUS login being asked (2), the start-up health check.
+# The default of 10 left no socket for a second RADIUS login at the same time.
+CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_ETH_TRANSMIT_MUTEX=y
 CONFIG_ETH_DMA_RX_BUFFER_NUM=30
 CONFIG_ETH_DMA_TX_BUFFER_NUM=30
