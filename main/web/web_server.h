@@ -105,6 +105,18 @@ struct web_diag_t
     uint32_t outliers;
     uint32_t steps;
     uint32_t command_failures;
+    int64_t edge_sec;             // PPS edge of the last servo update (Unix seconds)
+    float measurement_ns;         // measurement of that update (raw - true)
+    float innovation_ns;          // measurement - prediction
+    int32_t clock_ppb;            // crystal against the PPS (PPS task), >0 = fast
+    // EMAC PTP registers read back (ESP32-P4)
+    bool ptp_regs;                // read (the PTP clock is ready and its base addend known)
+    uint32_t ptp_addend;          // addend register
+    uint32_t ptp_base_addend;     // addend before any frequency command
+    uint32_t ptp_expected_addend; // addend of the current command (as the HAL computes it)
+    uint32_t ptp_sub_second_increment;
+    uint32_t ptp_timestamp_ctrl;
+    uint32_t ptp_clock_ctrl;      // HP_SYS_CLKRST peri_clk_ctrl01 (RMII dividers, PTP clock source and gate)
     // PPS holdover: running one, last one ended (duration, time error measured at the re-lock)
     int32_t holdover_running_s;   // seconds of the running holdover (-1 = none)
     uint32_t holdovers;           // ended since the start

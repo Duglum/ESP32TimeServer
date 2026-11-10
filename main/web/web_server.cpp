@@ -2715,6 +2715,20 @@ namespace
         cJSON_AddNumberToObject(root, "outliers", d->outliers);
         cJSON_AddNumberToObject(root, "steps", d->steps);
         cJSON_AddNumberToObject(root, "command_failures", d->command_failures);
+        cJSON_AddNumberToObject(root, "edge_s", static_cast<double>(d->edge_sec));
+        cJSON_AddNumberToObject(root, "measurement_ns", d->measurement_ns);
+        cJSON_AddNumberToObject(root, "innovation_ns", d->innovation_ns);
+        cJSON_AddNumberToObject(root, "clock_ppb", d->clock_ppb);
+        if (d->ptp_regs)
+        {
+            cJSON *regs = cJSON_AddObjectToObject(root, "ptp_regs");
+            cJSON_AddNumberToObject(regs, "addend", d->ptp_addend);
+            cJSON_AddNumberToObject(regs, "base_addend", d->ptp_base_addend);
+            cJSON_AddNumberToObject(regs, "expected_addend", d->ptp_expected_addend);
+            cJSON_AddNumberToObject(regs, "sub_second_increment", d->ptp_sub_second_increment);
+            cJSON_AddNumberToObject(regs, "timestamp_ctrl", d->ptp_timestamp_ctrl);
+            cJSON_AddNumberToObject(regs, "clock_ctrl", d->ptp_clock_ctrl);
+        }
         cJSON_AddNumberToObject(root, "holdover_running_s", d->holdover_running_s);
         cJSON_AddNumberToObject(root, "holdovers", d->holdovers);
         cJSON_AddNumberToObject(root, "last_holdover_end_s", static_cast<double>(d->last_holdover_end_s));

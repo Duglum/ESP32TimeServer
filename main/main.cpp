@@ -110,6 +110,10 @@ extern "C"
 #include "esp_heap_caps.h"
 #include "soc/emac_dma_struct.h"
 #include "soc/emac_mac_struct.h"
+#if CONFIG_IDF_TARGET_ESP32P4
+#include "soc/emac_ptp_struct.h"      // register read-backs for the diagnostics (app_get_diag)
+#include "soc/hp_sys_clkrst_struct.h"
+#endif
 #include "esp_ipc.h"
 #include "mqtt_client.h"
 #include "esp_netif.h"
@@ -1241,6 +1245,18 @@ static bool ptp_clock_rate_plausible(esp_eth_mac_t *mac, int64_t &measured_ns, i
     return false;
 }
 
+// Addend the EMAC PTP block got from esp_eth_mac_ptp_enable() before any frequency command (diagnostics: the HAL
+// computes every command against this value, see app_get_diag). 0 = not known.
+static std::atomic<uint32_t> s_ptp_base_addend{0};
+
+static void ptp_note_base_addend()
+{
+#if CONFIG_IDF_TARGET_ESP32P4
+    if (s_ptp_base_addend.load(std::memory_order_relaxed) == 0)
+        s_ptp_base_addend.store(EMAC_PTP.timestamp_addend.val, std::memory_order_relaxed);
+#endif
+}
+
 // Enables the EMAC PTP clock with the configured source. first = initial setup (the source may still fall back to
 // the crystal); later calls (Ethernet recovery) keep the source chosen at the start.
 static bool ptp_mac_enable(esp_eth_mac_t *mac, bool first)
@@ -1263,6 +1279,8 @@ static bool ptp_mac_enable(esp_eth_mac_t *mac, bool first)
             const eth_mac_ptp_config_t config = ptp_mac_config(true);
             err = esp_eth_mac_ptp_enable(mac, &config);
             enabled = err == ESP_OK;
+            if (enabled)
+                ptp_note_base_addend(); // before the rate check: no command has been applied yet
             if (enabled && ptp_clock_rate_plausible(mac, measured_ns, local_ns))
             {
                 s_ptp_clock_pll.store(true, std::memory_order_release);
@@ -1283,12 +1301,16 @@ static bool ptp_mac_enable(esp_eth_mac_t *mac, bool first)
             ESP_LOGW(TAG, "PTP clock: the 80 MHz PLL source does not run at its rate (%lld ns in %lld ns), using the 40 MHz crystal (40 ns steps)",
                      static_cast<long long>(measured_ns), static_cast<long long>(local_ns));
         s_ptp_clock_pll.store(false, std::memory_order_release);
+        s_ptp_base_addend.store(0, std::memory_order_relaxed); // the crystal source has another base
     }
 #else
     (void)first;
 #endif
     const eth_mac_ptp_config_t config = ptp_mac_config(false);
-    return esp_eth_mac_ptp_enable(mac, &config) == ESP_OK;
+    if (esp_eth_mac_ptp_enable(mac, &config) != ESP_OK)
+        return false;
+    ptp_note_base_addend();
+    return true;
 }
 
 // ---- Model clock: replaces gettimeofday() for NTP time stamps ----
@@ -6851,6 +6873,12 @@ struct ptp_diag_snapshot_t
     uint32_t outliers = 0;
     uint32_t steps = 0;
     uint32_t command_failures = 0;
+    // last update: edge, measurement (raw - true) and innovation, and the crystal estimate of the PPS task at that
+    // moment (the free-running PTP clock runs on the same crystal: a crystal change shows in both)
+    int64_t edge_sec = 0;
+    float measurement_ns = 0.0f;
+    float innovation_ns = 0.0f;
+    int32_t clock_ppb = 0;
     int8_t qerr_sign = 0;
     uint32_t qerr_samples = 0;
     float qerr_sd_ns = 0.0f;      // standard deviation of qErr (exponential window)
@@ -6885,6 +6913,10 @@ static void ptp_diag_publish()
     d.outliers = st.outliers;
     d.steps = st.steps;
     d.command_failures = st.command_failures;
+    d.edge_sec = st.last_edge_sec;
+    d.measurement_ns = static_cast<float>(st.last_measurement_ns);
+    d.innovation_ns = static_cast<float>(st.last_innovation_ns);
+    d.clock_ppb = s_clock_ppb.load(std::memory_order_relaxed);
     d.qerr_sign = st.qerr_sign;
     d.qerr_samples = st.qerr_samples;
     d.qerr_sd_ns = static_cast<float>(sqrt(std::max(0.0, st.qerr_cov_qq)));
@@ -12621,6 +12653,10 @@ void app_get_diag(web_diag_t &diag)
         diag.outliers = d.outliers;
         diag.steps = d.steps;
         diag.command_failures = d.command_failures;
+        diag.edge_sec = d.edge_sec;
+        diag.measurement_ns = d.measurement_ns;
+        diag.innovation_ns = d.innovation_ns;
+        diag.clock_ppb = d.clock_ppb;
         diag.qerr_sign = d.qerr_sign;
         diag.qerr_samples = d.qerr_samples;
         diag.qerr_sd_ns = d.qerr_sd_ns;
@@ -12632,6 +12668,22 @@ void app_get_diag(web_diag_t &diag)
         diag.last_holdover_error_ns = d.last_holdover_error_ns;
         diag.last_holdover_stepped = d.last_holdover_stepped;
     }
+#if CONFIG_IDF_TARGET_ESP32P4
+    // EMAC PTP registers as read back now (link-loss investigation, CHANGELOG section 12): the addend should equal the
+    // one the HAL computes from the command (emac_hal_ptp_adj_inc: base * 10^9 / (10^9 - command), limited like there)
+    const uint32_t base_addend = s_ptp_base_addend.load(std::memory_order_relaxed);
+    if (s_ptp_clock_ready.load(std::memory_order_acquire) && base_addend != 0)
+    {
+        diag.ptp_regs = true;
+        diag.ptp_addend = EMAC_PTP.timestamp_addend.val;
+        diag.ptp_base_addend = base_addend;
+        const int64_t cmd = std::clamp<int64_t>(diag.cmd_ppb, -5120000, 5120000);
+        diag.ptp_expected_addend = static_cast<uint32_t>(static_cast<int64_t>(base_addend) * 1000000000LL / (1000000000LL - cmd));
+        diag.ptp_sub_second_increment = EMAC_PTP.sub_sec_incre.val;
+        diag.ptp_timestamp_ctrl = EMAC_PTP.timestamp_ctrl.val;
+        diag.ptp_clock_ctrl = HP_SYS_CLKRST.peri_clk_ctrl01.val;
+    }
+#endif
 #endif
     time_diag_innovation_t innovation{};
     time_diag_innovation(&innovation);
