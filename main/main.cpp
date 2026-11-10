@@ -6554,9 +6554,13 @@ static void ptp_servo_update(int64_t edge_sec, const local_instant_t &edge_local
     const uint32_t epoch = s_ptp_epoch.load(std::memory_order_acquire);
     if (s_ptp_addend_reset.exchange(false, std::memory_order_acq_rel))
     {
-        // The PTP block was initialised again (Ethernet recovery): the hardware runs without frequency command
+        // The PTP block was initialised again (Ethernet recovery): the hardware runs without frequency command.
+        // The rate starts again from the crystal estimate of the PPS task: the estimate of the filter lags a crystal
+        // change (a link loss makes the crystal run up to about 90 ppb fast for minutes, CHANGELOG 4.116) and was
+        // carried into the new epoch, which left an offset of about -45 ns for minutes after a recovery.
         st.cmd_ppb = 0;
         st.prev_cmd_ppb = 0;
+        st.have_rate = false;
     }
     if (epoch != st.epoch)
     {
