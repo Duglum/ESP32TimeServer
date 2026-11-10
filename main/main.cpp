@@ -3242,16 +3242,20 @@ static ntp_reply_status_t get_ntp_reply_status()
         const int64_t pps_age_us = now_us - last_pps_us;
         if (last_pps_us > 0 && !pps_active && pps_age_us >= 0 && s_time_has_been_set.load(std::memory_order_acquire))
         {
-            // Coasting is possible: the GNSS was valid when the PPS was lost (the server was at stratum 1; the GNSS may
-            // be lost as well, e.g. antenna fault), the model clock (learned rate) and, with hardware time stamps, the
-            // free-running PTP clock are valid. The root dispersion grows by the ppm of the settings (default 15 ppm)
+            // Coasting is possible: the GNSS was valid when the PPS was lost, the model clock (learned rate) and, with
+            // hardware time stamps, the free-running PTP clock are valid. "Valid when the PPS was lost": a valid GNSS
+            // time came after the last pulse (its label), so the server was at stratum 1 until the PPS counted as lost
+            // (gnss_recent above holds Gnss_Validity_Timeout_Us after it). The GNSS may be lost after that as well (e.g.
+            // antenna fault). When the GNSS went first (GT-U16: the fix is gone about 2 s before the last pulse), the
+            // server is already at stratum 16 then, and the holdover must not bring stratum 1 back for its 2 s
+            // (board test 2026-11-10: 16 -> 1 -> 16). The root dispersion grows by the ppm of the settings (default 15 ppm)
             // of the time since the last pulse, up to Ntp_Root_Dispersion_Max_S1616 (1 s).
             // The age is capped at the longest coasting time (one hour): the product stays far below the int64 limit
             // however long the PPS is lost and whatever the serving time after it (3600e6 us * 10000 ppm * 65536 =
             // 2.4e18 < 9.2e18). The stratum 16 replies keep NTP_ROOT_DISPERSION.
             const bool can_coast = !s_time_setting_in_progress.load(std::memory_order_acquire) &&
                                    s_gnss_fix_qualified.load(std::memory_order_acquire) &&
-                                   last_gnss_valid_us > 0 && last_pps_us - last_gnss_valid_us <= Gnss_Validity_Timeout_Us &&
+                                   last_gnss_valid_us > 0 && last_gnss_valid_us >= last_pps_us &&
                                    !faults.sanity_mismatch &&
                                    s_model_valid.load(std::memory_order_acquire) &&
                                    s_ntp_reference_valid.load(std::memory_order_acquire) &&
@@ -3356,6 +3360,7 @@ static constexpr int64_t ETHERNET_RECOVERY_INTERVAL_US = 60000000LL;      // min
 static constexpr int64_t ETHERNET_RECOVERY_MAX_INTERVAL_US = 900000000LL; // longest back-off for address, link state and time stamp failures
 static constexpr uint32_t ETHERNET_RECOVERY_TIMESTAMP_ATTEMPTS = 3;       // recoveries per boot for hardware TX time stamp errors
 static constexpr int64_t NTP_TRANSPORT_STALL_TIMEOUT_US = 35000000LL;
+static constexpr int64_t ETHERNET_PHY_LINK_CONFIRM_US = 5000000LL; // second PHY read before a missed link-up counts (driver polls every 2 s)
 static constexpr int64_t ETHERNET_RX_HANG_QUIET_US = 10000000LL; // no frame for this long before the EMAC state is checked
 static constexpr uint32_t ETHERNET_RX_HANG_CHECKS = 5;           // checks in a row (1 s apart) with the read controller busy
 
@@ -4518,6 +4523,7 @@ static void ethernet_transport_recovery_task(void *parameter)
     int64_t address_missing_since_us = 0;
     int64_t link_missing_since_us = 0;
     int64_t last_phy_check_us = 0;
+    int64_t phy_link_seen_us = 0; // the PHY reported a link while the driver did not (to be confirmed)
     int64_t last_not_serving_us = 0;
     int64_t persistent_interval_us = ETHERNET_RECOVERY_INTERVAL_US; // grows while the failures below persist
     uint32_t timestamp_recoveries = 0;
@@ -4619,11 +4625,27 @@ static void ethernet_transport_recovery_task(void *parameter)
         if (!address_failure && !link_down_long && !timestamp_failure)
             persistent_interval_us = ETHERNET_RECOVERY_INTERVAL_US;
         const bool persistent_due = last_recovery_attempt_us == 0 || now_us - last_recovery_attempt_us >= persistent_interval_us;
+        // Cable out: the PHY every 10 s. A link there counts as missed by the driver only if a second read 5 s later
+        // still shows it while the driver still reports none: a cable plugged in just before a read has a link in the
+        // PHY up to one poll period (2 s) before the driver reports it, and must not restart the driver (board test
+        // 2026-11-10: a needless recovery with a PTP clock step after a 45 s pull).
         bool link_state_failure = false;
-        if (link_down_long && persistent_due && now_us - last_phy_check_us >= 10000000LL) // cable out: the PHY every 10 s
+        if (!link_down_long)
+            phy_link_seen_us = 0;
+        else if (persistent_due && phy_link_seen_us > 0)
+        {
+            if (now_us - phy_link_seen_us >= ETHERNET_PHY_LINK_CONFIRM_US)
+            {
+                phy_link_seen_us = 0;
+                last_phy_check_us = now_us;
+                link_state_failure = physical_ethernet_link_status() == physical_link_status_t::up;
+            }
+        }
+        else if (persistent_due && now_us - last_phy_check_us >= 10000000LL)
         {
             last_phy_check_us = now_us;
-            link_state_failure = physical_ethernet_link_status() == physical_link_status_t::up;
+            if (physical_ethernet_link_status() == physical_link_status_t::up)
+                phy_link_seen_us = now_us;
         }
         const bool persistent_trigger = persistent_due && (address_failure || link_state_failure || timestamp_failure);
 
