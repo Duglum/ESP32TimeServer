@@ -781,6 +781,35 @@ namespace
             CHECK(signed_request_length == 14 + (v6 ? 40U : 20U) + 8 + 70);
             CHECK(ptp_l3_udp::decode(frame, signed_request_length, 7, nullptr, datagram, parsed, true) ==
                   ptp::MessageKind::DelayRequest);
+
+            // Octets after the message (linuxptp over UDP/IPv6: two octets after an event message, payload 46 for
+            // messageLength 44): decoded, the datagram is the message only
+            uint8_t padded[ptp::ANNOUNCE_SIZE + ptp::AUTH_TLV_SIZE]{};
+            std::memcpy(padded, request.data() + 14, 44);
+            const size_t padded_length = ptp_l3_udp::encapsulate(frame, sizeof(frame), mac, v6 ? ipv6 : ipv4, v6, padded, 46);
+            CHECK(padded_length == 14 + (v6 ? 40U : 20U) + 8 + 46);
+            CHECK(ptp_l3_udp::decode(frame, padded_length, 7, nullptr, datagram, parsed) == ptp::MessageKind::DelayRequest);
+            CHECK(datagram.length == 44 && datagram.message == frame + 14 + (v6 ? 40 : 20) + 8);
+            CHECK(parsed.sequence_id == 0x4567);
+            std::memcpy(padded, signed_request, sizeof(signed_request));
+            CHECK(ptp_l3_udp::encapsulate(frame, sizeof(frame), mac, v6 ? ipv6 : ipv4, v6, padded, 72) ==
+                  14 + (v6 ? 40U : 20U) + 8 + 72);
+            CHECK(ptp_l3_udp::decode(frame, 14 + (v6 ? 40U : 20U) + 8 + 72, 7, nullptr, datagram, parsed, true) ==
+                  ptp::MessageKind::DelayRequest);
+            CHECK(datagram.length == 70);
+            std::memcpy(padded, message, 64);
+            CHECK(ptp_l3_udp::encapsulate(frame, sizeof(frame), mac, v6 ? ipv6 : ipv4, v6, padded, 66) ==
+                  14 + (v6 ? 40U : 20U) + 8 + 66);
+            CHECK(ptp_l3_udp::decode(frame, 14 + (v6 ? 40U : 20U) + 8 + 66, 7, nullptr, datagram, parsed) ==
+                  ptp::MessageKind::Announce);
+            CHECK(datagram.length == 64);
+            // messageLength longer than the payload: Invalid
+            std::memcpy(padded, request.data() + 14, 44);
+            padded[3] = 46;
+            CHECK(ptp_l3_udp::encapsulate(frame, sizeof(frame), mac, v6 ? ipv6 : ipv4, v6, padded, 44) ==
+                  14 + (v6 ? 40U : 20U) + 8 + 44);
+            CHECK(ptp_l3_udp::decode(frame, 14 + (v6 ? 40U : 20U) + 8 + 44, 7, nullptr, datagram, parsed) ==
+                  ptp::MessageKind::Invalid);
         }
     }
 

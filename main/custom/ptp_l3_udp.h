@@ -74,7 +74,13 @@ inline ptp::MessageKind decode(const uint8_t *frame, size_t length, uint8_t doma
          net_packet::fold(net_packet::udp_sum(ip + (ipv6 ? 8 : 12), ip + (ipv6 ? 24 : 16),
                                              ipv6 ? 16 : 4, udp, udp_length)) != 0xffff))
         return ptp::MessageKind::Invalid;
-    datagram = {udp + 8, udp_length - 8, ipv6, port};
+    // The PTP message is the first messageLength octets of the UDP payload. Octets after it are allowed and not part
+    // of the message (fork fix): IEEE 1588 UDP/IPv6 reserves two octets after an event message for a checksum
+    // correction, and linuxptp sends them (payload 46 for a Delay_Req of 44)
+    const size_t payload_length = udp_length - 8;
+    if (payload_length < 34 || ptp::detail::read_u16(udp + 8 + 2) > payload_length)
+        return ptp::MessageKind::Invalid;
+    datagram = {udp + 8, ptp::detail::read_u16(udp + 8 + 2), ipv6, port};
     const auto kind = ptp::parse_message(datagram.message, datagram.length, domain, identity, parsed, allow_authentication);
     if ((kind == ptp::MessageKind::DelayRequest && port != EVENT_PORT) ||
         (kind == ptp::MessageKind::Announce && port != GENERAL_PORT))
