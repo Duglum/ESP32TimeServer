@@ -2783,6 +2783,7 @@ namespace
         cJSON_AddNumberToObject(root, "sw_interleaved", d->sw_interleaved);
         cJSON_AddNumberToObject(root, "shed", d->shed);
         cJSON_AddNumberToObject(root, "receive_rests", d->receive_rests);
+        cJSON_AddNumberToObject(root, "eth_receive_rests", d->eth_receive_rests);
         cJSON_AddNumberToObject(root, "lookup_record_hits", d->lookup_record_hits);
         cJSON_AddNumberToObject(root, "lookup_map_hits", d->lookup_map_hits);
         cJSON_AddNumberToObject(root, "lookup_misses", d->lookup_misses);

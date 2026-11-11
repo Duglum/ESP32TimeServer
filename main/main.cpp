@@ -759,6 +759,20 @@ static constexpr int64_t NTP_RECEIVE_BUSY_LIMIT_US = 20000;
 // A select() that took longer than this waited for a datagram (the core was free meanwhile)
 static constexpr int64_t NTP_SOCKET_WAITED_US = 100;
 static std::atomic<uint32_t> s_diag_ntp_receive_rests{0};
+// Flood guard of the Ethernet receive task (ESP-IDF emac_rx, priority 15, no core affinity; it calls
+// ntp_ethernet_input() for every frame and loops without waiting while frames are left in the receive DMA). Under a
+// flood above what it can take (an NTP flood of 15000/s together with a Delay_Req flood of 3000/s in the 24 h soak test
+// 2026-11-10/11) it kept core 0 to itself for seconds: task watchdog (IDLE0), the GNSS UART reader (10) and the PPS task
+// (14) got no time, the GNSS time ran invalid and PTP stopped. When frames came without a gap for this long, the task
+// rests for one tick: at most 1 ms in 10 ms of receiving. Normal traffic never gets there (it needs about 50 frames in
+// a row, each within ETH_RECEIVE_GAP_US of the previous). Timing: the receive time stamps (NTP T2, PTP T4) are taken by
+// the EMAC before the frame reaches this task and T3 is taken at the transmit, so a frame that waits during a rest loses
+// no accuracy; it is answered up to 1 ms later. During the rest the frames wait in the receive descriptors and the Rx
+// FIFO (DFF, keep_received_frames_without_descriptor()), the excess is dropped there as before.
+static constexpr int64_t ETH_RECEIVE_BUSY_LIMIT_US = 10000;
+// A longer gap between two frames: the receive task waited for a frame (it is not saturated)
+static constexpr int64_t ETH_RECEIVE_GAP_US = 200;
+static std::atomic<uint32_t> s_diag_eth_receive_rests{0};
 static constexpr EventBits_t ETH_CONNECTED_BIT = BIT0;
 static constexpr EventBits_t ETH_GOT_IP_BIT = BIT1;
 static constexpr EventBits_t ETH_GOT_IP6_BIT = BIT2;
@@ -4185,8 +4199,27 @@ static uint64_t read_ntp_timestamp(const uint8_t *packet, size_t offset)
 // PTP master (Ethernet now, UDP later): settings, receive hook, service task
 #include "custom/ptp_service.h"
 
+// Called by the Ethernet receive task only (no lock of the driver is held there), see ETH_RECEIVE_BUSY_LIMIT_US
+static void ethernet_receive_flood_guard()
+{
+    static int64_t busy_since_us = 0;
+    static int64_t last_frame_us = 0;
+    int64_t now_us = esp_timer_get_time();
+    if (now_us - last_frame_us > ETH_RECEIVE_GAP_US)
+        busy_since_us = now_us;
+    else if (now_us - busy_since_us >= ETH_RECEIVE_BUSY_LIMIT_US)
+    {
+        s_diag_eth_receive_rests.fetch_add(1, std::memory_order_relaxed);
+        vTaskDelay(1);
+        now_us = esp_timer_get_time();
+        busy_since_us = now_us;
+    }
+    last_frame_us = now_us;
+}
+
 static esp_err_t ntp_ethernet_input(esp_eth_handle_t handle, uint8_t *frame, uint32_t length, void *netif, void *info)
 {
+    ethernet_receive_flood_guard();
     s_ethernet_rx_frames.fetch_add(1, std::memory_order_relaxed);
     if (s_ethernet_recovery_rx_probe_active.load(std::memory_order_relaxed))
         s_ethernet_recovery_rx_probe_frames.fetch_add(1, std::memory_order_relaxed);
@@ -12727,6 +12760,7 @@ void app_get_diag(web_diag_t &diag)
     diag.sw_interleaved = s_diag_ntp_sw_interleaved.load(std::memory_order_relaxed);
     diag.shed = s_diag_ntp_shed.load(std::memory_order_relaxed);
     diag.receive_rests = s_diag_ntp_receive_rests.load(std::memory_order_relaxed);
+    diag.eth_receive_rests = s_diag_eth_receive_rests.load(std::memory_order_relaxed);
     ntp_cache_stats_t cache{};
     ntp_cache_get_stats(&cache);
     diag.lookup_record_hits = cache.record_hits;

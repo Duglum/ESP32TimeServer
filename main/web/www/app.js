@@ -1456,8 +1456,10 @@
     });
     fillList('dg-txdelay', txDelay, '', false);
     $('dg-shed').textContent = t('{n} requests dropped since the start', { n: d.shed });
-    // A receive task got no empty queue for 20 ms (a flood) and rested for 1 ms, so the other tasks of its core get time
-    $('dg-rests').textContent = t('{n} rests of 1 ms since the start (an NTP receive task was busy for 20 ms without a pause)', { n: d.receive_rests || 0 });
+    // A receive task got no empty queue for 20 ms (a flood) and rested for 1 ms, so the other tasks of its core get time;
+    // the Ethernet receive task rests after 10 ms of frames without a gap
+    $('dg-rests').textContent = t('{n} rests of 1 ms since the start (an NTP receive task was busy for 20 ms without a pause)', { n: d.receive_rests || 0 }) +
+      '; ' + t('Ethernet receive task: {n} (10 ms of frames without a gap)', { n: d.eth_receive_rests || 0 });
 
     // GNSS receiver
     const gnss = [];
