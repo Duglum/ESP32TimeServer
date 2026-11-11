@@ -1036,6 +1036,13 @@
     }
   }
 
+  // oneshot_boot: this start uses the one-shot set; the firmware ends it when Save Settings stores exactly the settings
+  // in use (the next restart loads the same values). The check of unsaved_changes stays as a second guard.
+  function renderBanners() {
+    $('banner-oneshot').hidden = !(state.oneshot_boot && state.unsaved_changes);
+    $('banner-unsaved').hidden = state.oneshot_boot || !state.unsaved_changes;
+  }
+
   function renderStatus() {
     const st = state.status;
     setHost(state.settings.fqdn);
@@ -1117,10 +1124,7 @@
     $('st-client').textContent = addressText(st.client);
 
     $('banner-default-pw').hidden = !state.default_password;
-    // oneshot_boot describes how this start began; once Save Settings has stored the settings in use, the next
-    // restart loads the same values and neither banner applies
-    $('banner-oneshot').hidden = !(state.oneshot_boot && state.unsaved_changes);
-    $('banner-unsaved').hidden = state.oneshot_boot || !state.unsaved_changes;
+    renderBanners();
     renderPending(state.network_pending);
     renderSession();
     renderRadiusStatus();
@@ -1923,6 +1927,13 @@
       if (r.data.network_pending) renderPending(r.data.network_pending);
     } else {
       show(ts(r.data.message) || t('Saved.'), 'ok');
+      // The banners follow the save at once (the firmware ended a one-shot start when the saved settings equal the
+      // ones in use); the /api/state below says the same
+      if (state && typeof r.data.unsaved_changes === 'boolean') {
+        state.oneshot_boot = !!r.data.oneshot_boot;
+        state.unsaved_changes = r.data.unsaved_changes;
+        renderBanners();
+      }
     }
     await loadState(true);
   }

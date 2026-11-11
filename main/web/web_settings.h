@@ -290,6 +290,10 @@ const web_settings_t &web_settings_boot();
 // confirmed from the new address (otherwise the web admin restarts the device, which returns to the saved state)
 bool web_settings_boot_was_oneshot(bool *network_confirm_required);
 
+// Save Settings stored exactly the settings in use: the next restart loads them, so this start no longer counts as
+// a one-shot start (web_settings_boot_was_oneshot() returns false from now on). Thread safe.
+void web_settings_end_oneshot();
+
 // Settings currently in use (live settings may have been changed by "Apply" since the boot). Thread safe.
 void web_settings_get_running(web_settings_t &out);
 void web_settings_set_running(const web_settings_t &in);

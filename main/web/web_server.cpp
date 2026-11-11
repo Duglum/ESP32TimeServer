@@ -2352,8 +2352,19 @@ namespace
         if (save_err != ESP_OK)
             return send_error(req, "500 Internal Server Error", "Settings could not be written to NVS");
         ESP_LOGI(TAG, "Web admin: settings saved to NVS");
-        return send_ok(req, equal ? "Settings saved. They are loaded at every start."
-                                  : "Settings saved. Some saved values differ from the values in use: they take effect after Apply or a restart.");
+        // The next restart loads exactly the settings in use: a one-shot start (Apply with a restart field, or Restart
+        // with updates enabled) is over
+        if (equal)
+            web_settings_end_oneshot();
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddStringToObject(reply, "message",
+                                equal ? "Settings saved. They are loaded at every start."
+                                      : "Settings saved. Some saved values differ from the values in use: they take effect after Apply or a restart.");
+        // The banners of the page at once, without waiting for the next /api/state
+        cJSON_AddBoolToObject(reply, "oneshot_boot", web_settings_boot_was_oneshot(nullptr));
+        cJSON_AddBoolToObject(reply, "unsaved_changes", !equal);
+        return send_json(req, "200 OK", reply);
     }
 
     esp_err_t handle_factory_reset(httpd_req_t *req)
@@ -3430,6 +3441,8 @@ namespace
             radius_use_settings(sets->candidate, false);
             if (network_changed)
                 app_network_settings_changed();
+            else
+                web_settings_end_oneshot(); // saved and in use: the next restart loads the same values
         }
         memset(sets, 0, sizeof(sets_t)); // no secrets left on the heap (no temporary on the stack)
         delete sets;

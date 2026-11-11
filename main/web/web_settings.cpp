@@ -1084,9 +1084,27 @@ const web_settings_t &web_settings_boot()
 
 bool web_settings_boot_was_oneshot(bool *network_confirm_required)
 {
+    if (s_mutex != nullptr)
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+    const bool oneshot = s_boot_oneshot;
     if (network_confirm_required != nullptr)
         *network_confirm_required = s_boot_network_confirm;
-    return s_boot_oneshot;
+    if (s_mutex != nullptr)
+        xSemaphoreGive(s_mutex);
+    return oneshot;
+}
+
+void web_settings_end_oneshot()
+{
+    if (s_mutex != nullptr)
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+    const bool was = s_boot_oneshot;
+    s_boot_oneshot = false;
+    s_boot_network_confirm = false;
+    if (s_mutex != nullptr)
+        xSemaphoreGive(s_mutex);
+    if (was)
+        ESP_LOGI(TAG, "One-shot start ended: the settings in use are saved now");
 }
 
 void web_settings_get_running(web_settings_t &out)
