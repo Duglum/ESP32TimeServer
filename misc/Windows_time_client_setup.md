@@ -64,10 +64,29 @@ administrators and SYSTEM) are written into the current directory; keep them, th
   that adapter must already be *Private*; the script does not change it. `-set NTP` removes these rules again.
 - After a `Y` to *Restart the Windows Time service now?* it restarts the service and watches for up to 3 minutes for a
   synchronisation from the expected source; for PTP it also reports the adapter Windows chose (event 513 of the
-  PTP-Operational log) and watches 2 minutes for rejected samples (event 34).
+  PTP-Operational log) and watches 2 minutes for rejected samples (event 34). On a Windows in another language than
+  English, `w32tm` writes translated labels (German: `Letzte erfolgr. Synchronisierungszeit:`); the script then takes
+  a synchronisation event of the Windows Time service since the restart that names the source (System log, event 35
+  or 37) as the fresh synchronisation, and for PTP also the reference ID `0x4D505450`.
 
 The wall clock, the time zone and other network settings are not changed. `-restore <file>` puts the saved values, the
 service start mode and state and the script's firewall rules back (only on the computer that made the backup).
+
+## Checking the synchronisation
+
+```powershell
+w32tm /query /status /verbose     # source the time server, reference ID 0x4D505450 for PTP, last sync error 0
+w32tm /query /source
+Get-WinEvent -LogName 'Microsoft-Windows-Time-Service-PTP-Provider/PTP-Operational' -MaxEvents 10   # 512 / 513: master chosen
+Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Time-Service'; StartTime=(Get-Date).AddHours(-1)}
+```
+
+`w32tm /stripchart` cannot be used against the time server: it sends NTP version 1 requests, and the time server
+answers only NTP versions 3 and 4 (the stripchart shows error 0x800705B4, a timeout).
+
+Tested 2026-11-15 on Windows 11 Pro (build 26300, German) with a USB 2.5GbE adapter without hardware time stamps:
+W32Time synchronised to the time server over PTP (phase offset about -250 us, no event 34), and `-restore` brought
+the previous NTP settings back.
 
 ## PTP samples rejected
 

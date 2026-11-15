@@ -876,6 +876,57 @@ try {
     $passed++
     Write-Output 'PASS: rejected W32Time samples (event 34) are detected after PTP activation'
 
+    # Fork: a German Windows (w32tm and event texts in German; the owner's laptop, 2026-11-15). Umlauts left out:
+    # Windows PowerShell 5.1 reads this file without a BOM as ANSI.
+    $script:rejectedEvents = @(
+        [pscustomobject]@{ Message = 'Der Zeitdienst hat festgestellt, dass die Systemzeit um -896959682 Sekunden geaendert werden muss. Der Zeitdienst aendert die Systemzeit nicht um mehr als 54000 Sekunden.' }
+    )
+    function Get-WinEvent($FilterHashtable) {
+        if ($FilterHashtable.Id -ne 34 -or $FilterHashtable.LogName -ne 'System') { throw 'unexpected event query' }
+        return $script:rejectedEvents
+    }
+    $rejected = Get-RejectedTimeSamples ([DateTime]::UtcNow)
+    if ($null -eq $rejected -or $rejected.Count -ne 1 -or $rejected.Seconds -ne '-896959682') { throw "German event 34 seconds were not read: $($rejected.Seconds)" }
+    Remove-Item Function:\Get-WinEvent
+
+    $germanStatus = @(
+        'Sprungindikator: 0(keine Warnung)', 'Stratum: 3 (Sekundaerreferenz - synchr. ueber (S)NTP)',
+        'Praezision: -23 (119.209ns pro Tick)', 'Stammverzoegerung: 0.0016742s', 'Stammabweichung: 0.0100020s',
+        'Referenz-ID: 0x4D505450 (Quell-IP:  77.80.84.80)', 'Letzte erfolgr. Synchronisierungszeit: 15.11.2026 23:09:56',
+        'Quelle: 192.168.8.123', 'Abrufintervall: 6 (64s)', '', 'Phasendifferenz: -0.0003769s',
+        'Statuscomputer: 2 (Sync)', 'Letzter Synchronierungsfehler: 0 (Der Befehl wurde erfolgreich ausgefuehrt.)'
+    ) -join "`r`n"
+    if (-not (Test-PtpReferenceId $germanStatus)) { throw 'the PTP reference ID was not found in German w32tm output' }
+    if (-not (Test-PtpReferenceId "Leap Indicator: 0(no warning)`r`nReferenceId: 0x4D505450 (source IP:  77.80.84.80)")) { throw 'the PTP reference ID was not found in English w32tm output' }
+    if (Test-PtpReferenceId ($germanStatus -replace '0x4D505450', '0x00000000')) { throw 'another reference ID was taken for PTP' }
+
+    $script:syncEvents = @(
+        [pscustomobject]@{ Message = 'Der Zeitdienst synchronisiert jetzt die Systemzeit mit der Zeitquelle 192.168.8.123 mit der Referenz-ID 1347702861. Die aktuelle lokale Stratumnummer ist 3.' }
+        [pscustomobject]@{ Message = 'Der Zeitanbieter "NtpClient" empfaengt derzeit gueltige Zeitdaten von de.pool.ntp.org,0x9 (ntp.m|0x9|0.0.0.0:123->77.37.65.181:123).' }
+    )
+    $script:syncQueries = 0
+    function Get-WinEvent($FilterHashtable) {
+        $script:syncQueries++
+        if ($FilterHashtable.LogName -ne 'System' -or $FilterHashtable.ProviderName -ne 'Microsoft-Windows-Time-Service' -or
+            (@($FilterHashtable.Id) -join ',') -ne '35,37' -or $null -eq $FilterHashtable.StartTime) { throw 'unexpected event query' }
+        if ($script:syncEvents.Count -lt 1) { throw 'No events were found that match the specified selection criteria.' }
+        return $script:syncEvents
+    }
+    $since = [DateTime]::UtcNow
+    if (-not (Test-TimeServiceSyncEvent $since @('192.168.8.123'))) { throw 'German event 35 naming the PTP master was not found' }
+    if (-not (Test-TimeServiceSyncEvent $since @('de.pool.ntp.org'))) { throw 'German event 37 naming the NTP peer was not found' }
+    if (Test-TimeServiceSyncEvent $since @('192.168.8.12')) { throw 'a prefix of the source address was taken as the source' }
+    if (Test-TimeServiceSyncEvent $since @('92.168.8.123')) { throw 'a suffix of the source address was taken as the source' }
+    if (Test-TimeServiceSyncEvent $since @('77.37.65.18')) { throw 'part of an address in the event was taken as the source' }
+    $before = $script:syncQueries
+    if (Test-TimeServiceSyncEvent $since @('', $null)) { throw 'an empty source list was verified' }
+    if ($script:syncQueries -ne $before) { throw 'events were read for an empty source list' }
+    $script:syncEvents = @()
+    if (Test-TimeServiceSyncEvent $since @('192.168.8.123')) { throw 'a missing synchronization event was verified' }
+    Remove-Item Function:\Get-WinEvent
+    $passed++
+    Write-Output 'PASS: fresh synchronization is checked without English w32tm labels (German Windows: reference ID, events 35 / 37, event 34 seconds)'
+
     function Stop-Config([int]$Code, [string]$Message) { throw "STOP ${Code}: $Message" }
     function Test-Administrator { return $true }
     function Enter-MachineLock { }

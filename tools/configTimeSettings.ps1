@@ -5,7 +5,9 @@
 #
 # Taken from upstream release 4.0 into the fork (CHANGELOG 4.108). Fork changes: the time server prerequisites name the
 # web settings of the fork (PTP over UDP/IPv4, PTP and NTP authentication) instead of compiled switches, and the
-# notes point to misc/Windows_time_client_setup.md. Everything that changes this computer is unchanged.
+# notes point to misc/Windows_time_client_setup.md. Everything that changes this computer is unchanged. The check of a
+# fresh synchronization after the restart also works on a Windows in another language than English (w32tm labels are
+# translated there): event 35 / 37 of the Windows Time service naming the source and the reference ID 0x4D505450.
 
 $ErrorActionPreference = 'Stop'
 $script:Version = '1.1'
@@ -2142,9 +2144,39 @@ function Get-RejectedTimeSamples([DateTime]$SinceUtc) {
         } -ErrorAction Stop)
     } catch { return $null }
     if ($events.Count -lt 1) { return $null }
+    # The message is in the language of Windows (fork): the requested correction is its first number.
     $match = [regex]::Match([string]$events[0].Message, '(-?\d+)\s+seconds')
+    if (-not $match.Success) { $match = [regex]::Match([string]$events[0].Message, '(?<![\w.,])(-?\d+)(?![\w.,])') }
     $seconds = if ($match.Success) { $match.Groups[1].Value } else { 'unknown' }
     return [pscustomobject]@{ Count = $events.Count; Seconds = $seconds }
+}
+
+# Fork: checks of a fresh synchronization that do not depend on the language of Windows. w32tm writes its labels in
+# that language (German: "Letzte erfolgr. Synchronisierungszeit:", "Referenz-ID:"), so the English labels are not
+# found there; event IDs, addresses and the hexadecimal reference ID are the same in every language.
+function Test-PtpReferenceId([string]$StatusText) {
+    # Reference ID 0x4D505450 ("PTPM") is what W32Time shows while the PTP provider is its source.
+    return $StatusText -match '(?im)^[^:\r\n]+:\s*0x4D505450\b'
+}
+
+function Test-TimeServiceSyncEvent([DateTime]$SinceUtc, [string[]]$Sources) {
+    # Event 35 (the time service now synchronizes with a source) or 37 (NtpClient receives valid time data from a
+    # source) of the Windows Time service since $SinceUtc, naming one of $Sources.
+    $sourcesToFind = @($Sources | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($sourcesToFind.Count -lt 1) { return $false }
+    try {
+        $events = @(Get-WinEvent -FilterHashtable @{
+            LogName = 'System'; ProviderName = 'Microsoft-Windows-Time-Service'; Id = @(35, 37)
+            StartTime = $SinceUtc.ToLocalTime()
+        } -ErrorAction Stop)
+    } catch { return $false }
+    foreach ($event in $events) {
+        foreach ($source in $sourcesToFind) {
+            $pattern = '(?<![\w.:])' + [regex]::Escape([string]$source) + '(?![\w.:]*\w)'
+            if ([string]$event.Message -match $pattern) { return $true }
+        }
+    }
+    return $false
 }
 
 function Confirm-Restart([string]$BackupPath) {
@@ -2193,17 +2225,24 @@ function Confirm-Restart([string]$BackupPath) {
                     $resultLine = [regex]::Match($status.Output, '(?im)^Last Sync Result:\s*(0x[0-9a-f]+)')
                     $goodResult = ($errorLine.Success -and $errorLine.Groups[1].Value -eq '0') -or
                         ($resultLine.Success -and $resultLine.Groups[1].Value -match '^0x0+$')
-                    if ($syncLine.Success -and [DateTime]::TryParse(
+                    $freshSync = $syncLine.Success -and [DateTime]::TryParse(
                         $syncLine.Groups[1].Value.Trim(), [Globalization.CultureInfo]::CurrentCulture,
                         [Globalization.DateTimeStyles]::AssumeLocal, [ref]$syncTime) -and
-                        $syncTime.ToUniversalTime() -ge $activationTime -and $goodResult) {
+                        $syncTime.ToUniversalTime() -ge $activationTime -and $goodResult
+                    if (-not $freshSync -and -not $syncLine.Success) {
+                        # Fork: w32tm in another language than English (no English labels): a synchronization
+                        # event of the Windows Time service since the restart that names the expected source.
+                        $expectedSources = if ($script:ExpectedPtpMaster) { @($script:ExpectedPtpMaster) } else { @($script:ExpectedNtpPeers) }
+                        $freshSync = Test-TimeServiceSyncEvent $activationTime $expectedSources
+                    }
+                    if ($freshSync) {
                         $remaining = [int][Math]::Floor(180 - $watch.Elapsed.TotalSeconds)
                         if ($remaining -lt 1) { break }
                         $source = Invoke-External "$env:SystemRoot\System32\w32tm.exe" @('/query','/source') ([Math]::Min(30, $remaining))
                         if ($script:ExpectedPtpMaster) {
                             $masterPattern = '(?<![\d.])' + [regex]::Escape($script:ExpectedPtpMaster) + '(?![\d.])'
                             if (($source.ExitCode -eq 0 -and $source.Output -match $masterPattern) -or
-                                $status.Output -match '(?im)^ReferenceId:\s*0x4D505450\b') {
+                                (Test-PtpReferenceId $status.Output)) {
                                 $verified = $true
                             }
                         } elseif ($source.ExitCode -eq 0) {

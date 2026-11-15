@@ -1,7 +1,7 @@
 # configTimeSettings Tests
 
-Upstream release 4.0, taken into the fork with `tools/configTimeSettings.ps1` (CHANGELOG 4.108); the fork changes only
-texts of the script, and the test accepts a positive local UTC offset without a sign (`01:00:00` in CET; upstream expected `+` or `-`, so the backup test failed east of UTC) and RTTs written with a decimal comma (`1,500 ms` in German; upstream expected `1.500`). Usage and what the script changes: `misc/Windows_time_client_setup.md`.
+Upstream release 4.0, taken into the fork with `tools/configTimeSettings.ps1` (CHANGELOG 4.108); the fork changes
+texts of the script and the synchronisation check of a Windows in another language than English (CHANGELOG 4.120), and the test accepts a positive local UTC offset without a sign (`01:00:00` in CET; upstream expected `+` or `-`, so the backup test failed east of UTC) and RTTs written with a decimal comma (`1,500 ms` in German; upstream expected `1.500`). One fork test checks the synchronisation check of a German Windows (reference ID in the German `w32tm` output, events 35 / 37 naming the source, the seconds of a German event 34). Usage and what the script changes: `misc/Windows_time_client_setup.md`.
 
 Run the host-side checks from the repository root in 64-bit Windows PowerShell
 5.1:
