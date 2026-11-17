@@ -57,6 +57,7 @@
 
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
+#include "bootloader_random.h"
 #include "esp_ota_ops.h"
 #include "web/web_net.h"
 #include "web/web_server.h"
@@ -13029,6 +13030,13 @@ void write_open_for_business_messages_to_the_console()
 
 extern "C" void app_main()
 {
+    // Entropy source of the hardware RNG on before anything draws random numbers (review S-4): the bootloader
+    // switches it off before it starts the application (bootloader_utility.c: bootloader_random_disable()), on
+    // the ESP32-P4 rev >= 3.0 the SAR ADC noise and the TRNG ring oscillator, and without Wi-Fi or Bluetooth
+    // nothing switches it on again; the IDF then counts the output of esp_random() as pseudo-random only
+    // (random.rst), and the TLS key, salts, session IDs, TOTP secrets and lwIP draw from it. It stays on: the
+    // firmware uses neither the ADC nor I2S, which need it off (bootloader_random.h).
+    bootloader_random_enable();
 
     // The settings of this boot (compiled defaults, NVS, one-shot set of the web admin) are needed by everything
     // below, the PPS pin included
