@@ -1078,6 +1078,8 @@ struct seqlock_i64_t
 // The rates are in milli-ppb (1e-12). The reference point is the instant of the last frequency update, so the two
 // segments are the offset rates before and after that update and the mapping is continuous.
 static std::atomic<uint32_t> s_ptpmap_seq{0};
+// Taken by the writer around the sequence and the stores (see model_publish)
+static portMUX_TYPE s_ptpmap_writer_lock = portMUX_INITIALIZER_UNLOCKED;
 static seqlock_i64_t s_ptpmap_ref_raw_ns;
 static seqlock_i64_t s_ptpmap_ref_offset_ns;
 static seqlock_i64_t s_ptpmap_rate_old_mppb;
@@ -1101,6 +1103,7 @@ static void ptp_map_publish(int64_t ref_raw_ns, int64_t ref_offset_ns, int64_t r
 {
     rate_old_mppb = std::clamp(rate_old_mppb, -ptpmap_max_rate_mppb, ptpmap_max_rate_mppb);
     rate_new_mppb = std::clamp(rate_new_mppb, -ptpmap_max_rate_mppb, ptpmap_max_rate_mppb);
+    taskENTER_CRITICAL(&s_ptpmap_writer_lock);
     const uint32_t s = s_ptpmap_seq.load(std::memory_order_relaxed);
     s_ptpmap_seq.store(s + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
@@ -1109,6 +1112,7 @@ static void ptp_map_publish(int64_t ref_raw_ns, int64_t ref_offset_ns, int64_t r
     s_ptpmap_rate_old_mppb.store(rate_old_mppb);
     s_ptpmap_rate_new_mppb.store(rate_new_mppb);
     s_ptpmap_seq.store(s + 2, std::memory_order_release);
+    taskEXIT_CRITICAL(&s_ptpmap_writer_lock);
 }
 
 // Offset of the PTP clock (raw - true, ns) at the raw PTP time raw_ns. Returns false if raw_ns is too far from the
@@ -1335,9 +1339,15 @@ static seqlock_i64_t s_model_sec;     // Unix second of the last PPS edge
 static seqlock_i64_t s_model_edge_ns; // local time of that edge in ns (local_now_ns scale)
 static std::atomic<int32_t> s_model_ppb{0};     // >0 = local clock runs fast
 
-// The PPS task is the only writer (seqlock, so readers never see mixed values)
+static portMUX_TYPE s_model_writer_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// The PPS task is the only writer (seqlock, so readers never see mixed values). The readers wait without a limit while
+// the sequence is odd, so the write runs in a critical section like shared64_t::store(): the PPS task cannot be
+// preempted between the two sequence stores (a reader of higher priority on its core, e.g. the NTP server task, would
+// otherwise spin and keep it from finishing), and a reader on the other core waits only for these few stores.
 static void model_publish(int64_t unix_sec, int64_t edge_ns, int32_t ppb)
 {
+    taskENTER_CRITICAL(&s_model_writer_lock);
     const uint32_t s = s_model_seq.load(std::memory_order_relaxed);
     s_model_seq.store(s + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
@@ -1346,6 +1356,7 @@ static void model_publish(int64_t unix_sec, int64_t edge_ns, int32_t ppb)
     s_model_ppb.store(ppb, std::memory_order_relaxed);
     s_model_seq.store(s + 2, std::memory_order_release);
     s_model_valid.store(true, std::memory_order_release);
+    taskEXIT_CRITICAL(&s_model_writer_lock);
 }
 
 static void model_invalidate()
@@ -2017,6 +2028,8 @@ struct sync_candidate_t
 static sync_state_t s_sync_state{};
 static sync_state_t get_sync_state_snapshot();
 static std::atomic<uint32_t> s_ntp_sync_state_sequence{0};
+// Taken by publish_ntp_sync_state_locked() around the sequence and the stores (see model_publish)
+static portMUX_TYPE s_ntp_sync_state_writer_lock = portMUX_INITIALIZER_UNLOCKED;
 static shared64_t<int64_t> s_ntp_last_successful_sync_us;
 static shared64_t<int64_t> s_ntp_last_gnss_valid_us;
 static shared64_t<int64_t> s_ntp_last_pps_us;
@@ -2114,7 +2127,13 @@ static void refresh_sync_state_locked(sync_state_t *state, int64_t now_us)
 
 static void publish_ntp_sync_state_locked(const sync_state_t &state)
 {
-    // seqlock writer (always called with s_sync_state_mutex held): odd sequence while the values change
+    // seqlock writer (always called with s_sync_state_mutex held): odd sequence while the values change. The mutex
+    // does not keep the writer from being preempted, so the write runs in a critical section (see model_publish):
+    // get_ntp_reply_status() then never finds a write in progress on its own core and waits only a few stores on
+    // the other one. The shared64_t stores take their own spinlocks inside it: the FreeRTOS critical sections of
+    // the IDF nest (per-core count, the interrupt level is restored by the last exit), and those locks are never
+    // held while this one is taken.
+    taskENTER_CRITICAL(&s_ntp_sync_state_writer_lock);
     s_ntp_sync_state_sequence.fetch_add(1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release); // the data stores must not move before the odd sequence
     s_ntp_last_successful_sync_us.store(state.last_successful_sync_us);
@@ -2127,6 +2146,7 @@ static void publish_ntp_sync_state_locked(const sync_state_t &state)
     s_ntp_sanity_mismatch.store(state.faults.sanity_mismatch, std::memory_order_relaxed);
     s_ntp_sync_stale.store(state.faults.sync_stale, std::memory_order_relaxed);
     s_ntp_sync_state_sequence.fetch_add(1, std::memory_order_release);
+    taskEXIT_CRITICAL(&s_ntp_sync_state_writer_lock);
 }
 
 static void sync_state_note_attempt()
@@ -2341,14 +2361,22 @@ static void sync_state_note_success(time_t update_delta)
     }
 }
 
+// Refreshed copy of the sync state. The published state is written only when the refresh changed a fault flag: every
+// other change of s_sync_state is published where it is made, so the published values stay the same as before, without
+// a write every 50 ms from the LED/LCD task. The NTP path does not need it (get_ntp_reply_status() computes the
+// time-dependent tests itself), the MQTT report reads the published fault flags directly.
 static sync_state_t get_sync_state_snapshot()
 {
     sync_state_t snapshot{};
 
     if (xSemaphoreTake(s_sync_state_mutex, portMAX_DELAY) == pdTRUE)
     {
+        const sync_faults_t before = s_sync_state.faults;
         refresh_sync_state_locked(&s_sync_state, esp_timer_get_time());
-        publish_ntp_sync_state_locked(s_sync_state);
+        const sync_faults_t &after = s_sync_state.faults;
+        if (before.pps_missing != after.pps_missing || before.gnss_invalid != after.gnss_invalid ||
+            before.sanity_mismatch != after.sanity_mismatch || before.sync_stale != after.sync_stale)
+            publish_ntp_sync_state_locked(s_sync_state);
         snapshot = s_sync_state;
         xSemaphoreGive(s_sync_state_mutex);
     }
@@ -3225,9 +3253,13 @@ struct ntp_reply_status_t
     bool serve = true;                              // false: the request is not answered (PPS lost, after the holdover)
 };
 
+// Reads the published sync state until the read is consistent. Retrying without a limit is safe: the writer
+// (publish_ntp_sync_state_locked) runs in a critical section, so it cannot be preempted with an odd sequence, and a
+// reader on the other core waits only for its few stores. Before, the reply gave up after 3 reads and answered
+// "unsynchronised" (stratum 16, PTP not served) while the writer was preempted.
 static ntp_reply_status_t get_ntp_reply_status()
 {
-    for (size_t attempt = 0; attempt < 3; ++attempt)
+    for (;;)
     {
         uint32_t sequence_before = s_ntp_sync_state_sequence.load(std::memory_order_acquire);
         if ((sequence_before & 1U) != 0)
@@ -3329,15 +3361,14 @@ static ntp_reply_status_t get_ntp_reply_status()
         }
         return {3, 16, "INIT", false, gnss_synchronized, pps_active};
     }
-
-    return {};
 }
 
 // The GNSS time was valid within Gnss_Validity_Timeout_Us before now_us: the same test as gnss_synchronized in
-// get_ntp_reply_status (published sync state). Used by the PPS task (review Z-05).
+// get_ntp_reply_status (published sync state). Used by the PPS task (review Z-05). Retries until the read is
+// consistent, for the reason given at get_ntp_reply_status().
 static bool gnss_recently_valid(int64_t now_us)
 {
-    for (int attempt = 0; attempt < 100; ++attempt)
+    for (;;)
     {
         const uint32_t sequence = s_ntp_sync_state_sequence.load(std::memory_order_acquire);
         if ((sequence & 1U) != 0)
@@ -3349,7 +3380,6 @@ static bool gnss_recently_valid(int64_t now_us)
             continue;
         return valid && last_valid_us > 0 && now_us - last_valid_us <= Gnss_Validity_Timeout_Us;
     }
-    return true; // the writer did not finish: no change of the state from this reading
 }
 
 static constexpr uint8_t NTP_REPLY_TEMPLATE[NTP_PACKET_SIZE] = {
