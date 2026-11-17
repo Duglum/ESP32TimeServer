@@ -42,9 +42,16 @@ namespace
     std::atomic<bool> s_gateway_valid{false};
     std::atomic<struct netif *> s_gateway_netif{nullptr};
     uint8_t s_gateway[16] = {};
+    portMUX_TYPE s_gateway_lock = portMUX_INITIALIZER_UNLOCKED; // taken by publish_gateway() around the write
 
+    // The ND6 hook waits without a limit while the sequence is odd, so the write runs in a critical section (like
+    // model_publish in main.cpp): the writer (web admin task, priority 3, or the Ethernet setup task at the start)
+    // cannot be preempted between the two sequence stores by the lwIP thread (priority 18) on its core, which would
+    // otherwise spin and keep it from finishing, and the lwIP thread on the other core waits only for these few
+    // stores. The spinlock also serialises the writers.
     void publish_gateway(struct netif *netif, const uint8_t *gateway)
     {
+        taskENTER_CRITICAL(&s_gateway_lock);
         const uint32_t s = s_gateway_seq.load(std::memory_order_relaxed);
         s_gateway_seq.store(s + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
@@ -53,6 +60,7 @@ namespace
         s_gateway_netif.store(netif, std::memory_order_relaxed);
         s_gateway_valid.store(gateway != nullptr, std::memory_order_relaxed);
         s_gateway_seq.store(s + 2, std::memory_order_release);
+        taskEXIT_CRITICAL(&s_gateway_lock);
     }
 
     struct slaac_request_t

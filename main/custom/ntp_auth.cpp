@@ -11,6 +11,8 @@
 #include <mutex>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "psa/crypto.h"
 
 namespace
@@ -35,6 +37,8 @@ namespace
     static bool s_initialized = false;
     static bool s_crypto_ready = false;
     static std::mutex s_writer_mutex;
+    // Taken by the writer around the sequence and the copy (see ntp_auth_configure), inside s_writer_mutex
+    static portMUX_TYPE s_writer_lock = portMUX_INITIALIZER_UNLOCKED;
 
     static uint32_t read_u32_be(const uint8_t *value)
     {
@@ -172,11 +176,18 @@ bool ntp_auth_configure(bool enabled, bool required, const ntp_auth_key_input_t 
         std::lock_guard<std::mutex> lock(s_writer_mutex);
         // Switch off first, so no request is answered with a key that is half replaced
         s_available.store(false, std::memory_order_release);
+        // find_key() and snapshot() wait without a limit while the sequence is odd, so the write runs in a critical
+        // section (like model_publish in main.cpp): the writer (web admin task, priority 3, or the start) cannot be
+        // preempted between the two sequence stores by a reader of higher priority on its core (NTP server task),
+        // which would otherwise spin and keep it from finishing, and a reader on the other core waits only for the
+        // copy. The mutex still serialises the writers; the critical section is taken inside it.
+        taskENTER_CRITICAL(&s_writer_lock);
         const uint32_t s = s_sequence.load(std::memory_order_relaxed);
         s_sequence.store(s + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
         s_active = next;
         s_sequence.store(s + 2, std::memory_order_release);
+        taskEXIT_CRITICAL(&s_writer_lock);
         s_available.store(available, std::memory_order_release);
     }
     memset(&next, 0, sizeof(next));

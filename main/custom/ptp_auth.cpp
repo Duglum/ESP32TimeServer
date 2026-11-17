@@ -12,6 +12,8 @@
 #include <mutex>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "psa/crypto.h"
 
 namespace
@@ -42,6 +44,8 @@ namespace
     static std::atomic<bool> s_available{false};
     static std::atomic<bool> s_required{false};
     static std::mutex s_writer_mutex;
+    // Taken by the writer around the sequence and the copy (see ptp_auth_configure), inside s_writer_mutex
+    static portMUX_TYPE s_writer_lock = portMUX_INITIALIZER_UNLOCKED;
 
     // What one message needs: the key (the active one, or the one of a received TLV) and the parameters
     struct snapshot_t
@@ -206,11 +210,18 @@ bool ptp_auth_configure(const ptp_auth_config_t &config, const ptp_auth_key_inpu
         // The policy first: switching to required never answers an unsigned request in between
         s_required.store(config.enabled && config.required, std::memory_order_release);
         s_available.store(false, std::memory_order_release);
+        // load() waits without a limit while the sequence is odd, so the write runs in a critical section (like
+        // model_publish in main.cpp): the writer (web admin task, priority 3, or the start) cannot be preempted
+        // between the two sequence stores by the PTP task (priority 12) on its core, which would otherwise spin and
+        // keep it from finishing, and a reader on the other core waits only for the copy. The mutex still serialises
+        // the writers; the critical section is taken inside it.
+        taskENTER_CRITICAL(&s_writer_lock);
         const uint32_t s = s_sequence.load(std::memory_order_relaxed);
         s_sequence.store(s + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
         s_state = next;
         s_sequence.store(s + 2, std::memory_order_release);
+        taskEXIT_CRITICAL(&s_writer_lock);
         s_available.store(available, std::memory_order_release);
     }
     memset(&next, 0, sizeof(next));
