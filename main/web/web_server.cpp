@@ -1822,7 +1822,7 @@ namespace
             right = totp_store_time_ok() && totp_verify(p->secret, sizeof(p->secret), static_cast<int64_t>(now), typed, 0, step);
             if (right)
             {
-                const esp_err_t err = totp_store_add(p->user, p->secret, p->codes);
+                const esp_err_t err = totp_store_add(p->user, p->secret, step, p->codes);
                 if (err != ESP_OK)
                 {
                     wipe(*p);
@@ -1929,7 +1929,7 @@ namespace
         char (*codes)[TOTP_RECOVERY_TEXT_SIZE] = new (std::nothrow) char[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE];
         if (codes == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
-        const esp_err_t err = totp_store_add(slot->user, slot->secret, codes);
+        const esp_err_t err = totp_store_add(slot->user, slot->secret, step, codes);
         char name[TOTP_USER_SIZE];
         snprintf(name, sizeof(name), "%s", slot->user);
         mbedtls_platform_zeroize(slot, sizeof(*slot));

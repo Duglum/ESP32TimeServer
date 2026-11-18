@@ -211,7 +211,8 @@ size_t totp_store_count()
     return n;
 }
 
-esp_err_t totp_store_add(const char *user, const uint8_t secret[TOTP_SECRET_SIZE], char codes[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE])
+esp_err_t totp_store_add(const char *user, const uint8_t secret[TOTP_SECRET_SIZE], uint64_t step,
+                         char codes[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE])
 {
     if (s_lock == nullptr)
         return ESP_ERR_INVALID_STATE;
@@ -246,6 +247,7 @@ esp_err_t totp_store_add(const char *user, const uint8_t secret[TOTP_SECRET_SIZE
         memset(random, 0, sizeof(random));
     }
     r.created_s = now_s();
+    r.last_step = step; // the confirming code is used (the steps of a replaced token belong to its old key)
     const record_t previous = *slot;
     *slot = r;
     memset(&r, 0, sizeof(r));

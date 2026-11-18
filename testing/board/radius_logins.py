@@ -27,11 +27,13 @@ What is tested (numbers for --only):
      --no-throttle: it locks this PC out of the web page for 30 s)
 TOTP of the web page (the device needs the time from GNSS; the codes are computed here like an authenticator app):
  16  a token for admin15 set up on the page (secret, URI, QR code), confirmed with a code: 10 recovery codes, in "totp"
- 17  login of admin15 with the second factor: the pending login, a wrong code, the right one; the same code again is
-     refused (each code once); a recovery code works once; three wrong codes: the password again
+ 17  login of admin15 with the second factor: the pending login, the code that confirmed the token is refused, a wrong
+     code, the right one (the next step); the same code again is refused (each code once); a recovery code works once;
+     three wrong codes: the password again
  18  the local user: "Required for the local user" refused without a token; with one admin needs its code; its token
      cannot be deleted while it is required
- 19  set up at the first login (totp_enroll): adminst gets a new token with the login, the first code stores it
+ 19  set up at the first login (totp_enroll): adminst gets a new token with the login, the first code stores it and is
+     refused at the next login
  20  a right password does not reset the lock-out before the second factor: 3 wrong codes, the password again, 2 wrong
      codes lock the source out (429); the code after the lock-out forgets the failures (needs 16; skipped with
      --no-throttle: it locks this PC out of the web page for 30 s)
@@ -158,6 +160,7 @@ def totp_tests(a, admin, apply, wanted, web_on, srv1, web_password):
         result(False, "16 the clock of the device is set (GNSS): needed for TOTP")
         return
     created = []
+    confirmed_with = {}  # user: the code that confirmed the token (used: refused afterwards)
 
     def enroll(user):
         status, reply = admin.d.request("POST", "/api/totp/enroll", {"user": user})
@@ -167,6 +170,7 @@ def totp_tests(a, admin, apply, wanted, web_on, srv1, web_password):
         status, confirm = admin.d.request("POST", "/api/totp/confirm", {"user": user, "code": code})
         if status == 200:
             created.append(user)
+            confirmed_with[user] = code
         return (reply, confirm) if status == 200 else (None, f"{status} {confirm}"), ""
 
     def web_login(user, password):
@@ -200,9 +204,12 @@ def totp_tests(a, admin, apply, wanted, web_on, srv1, web_password):
             w, status, reply = web_login("admin15", PW)
             pending = reply.get("pending", "")
             result(status == 200 and reply.get("totp") is True and pending and "csrf" not in reply, "17 the password: a pending login", f"{status} {reply}")
+            # within its 90 s: the code of the confirm was used by it (test 16 a few seconds ago)
+            status, reply = second(w, pending, confirmed_with["admin15"])
+            result(status == 401 and reply.get("error") == "Wrong code", "17 the code that confirmed the token is refused", f"{status} {reply}")
             status, reply = second(w, pending, "000000" if totp_code(secret15) != "000000" else "111111")
             result(status == 401 and reply.get("error") == "Wrong code", "17 a wrong code", f"{status} {reply}")
-            code = totp_code(secret15)
+            code = next_step_code(secret15)  # the step of the confirm is used
             status, reply = second(w, pending, code)
             result(status == 200 and reply.get("user") == "admin15" and reply.get("radius") is True, "17 the right code: logged in", f"{status} {reply}")
             w.logout()
@@ -284,13 +291,18 @@ def totp_tests(a, admin, apply, wanted, web_on, srv1, web_password):
             ok = status == 200 and reply.get("totp_enroll") is True and reply.get("secret")
             result(bool(ok), "19 the first login of adminst: a new token with the login", f"{status} {reply.get('error', '')}")
             if ok:
-                status, done = second(w, reply["pending"], totp_code(reply["secret"]))
+                first = totp_code(reply["secret"])
+                status, done = second(w, reply["pending"], first)
                 result(status == 200 and len(done.get("recovery_codes", [])) == 10 and done.get("csrf"), "19 the first code stores it and logs in",
                        f"{status} {done.get('error', '')}")
                 created.append("adminst")
                 w.logout()
                 tokens = {t["user"] for t in admin.d.state()["totp"]["tokens"]}
                 result("adminst" in tokens, "19 adminst has a token now", str(tokens))
+                if status == 200:
+                    w, status, reply = web_login("adminst", PW)
+                    status, reply = second(w, reply.get("pending", ""), first)
+                    result(status == 401 and reply.get("error") == "Wrong code", "19 the first code is refused at the next login", f"{status} {reply}")
             apply(dict(web_on, totp_radius=True, totp_enroll=False))
             w, status, reply = web_login("classed", PW)
             result(status == 401 and "No TOTP token" in reply.get("error", ""), "19 without totp_enroll a user without a token is refused", f"{status} {reply}")
