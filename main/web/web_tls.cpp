@@ -21,6 +21,7 @@ extern "C"
 #include "lwip/sockets.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/platform_util.h"
+#include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
 #include "nvs.h"
 #include "psa/crypto.h"
@@ -164,6 +165,20 @@ namespace
         return ret == 0;
     }
 
+    // The TLS 1.3 Certificate message the web server sends with this chain, as ssl_tls13_write_certificate_body() of
+    // mbedTLS writes it: handshake header 4, certificate_request_context 1 (empty for a server), length of the list 3,
+    // and per certificate a length of 3, its DER and empty extensions of 2. mbedTLS writes the whole message into one
+    // record of at most MBEDTLS_SSL_OUT_CONTENT_LEN bytes (mbedtls_ssl_start_handshake_msg(); the dynamic buffers of
+    // ESP-IDF do not change this) and does not split it: with a larger one every handshake fails (-0x008A, buffer too
+    // small) and the page cannot be opened. esp-tls parses the same PEM with the same function, so the chain is the same.
+    size_t certificate_message_size(const mbedtls_x509_crt &chain)
+    {
+        size_t size = 4 + 1 + 3;
+        for (const mbedtls_x509_crt *c = &chain; c != nullptr && c->raw.len > 0; c = c->next)
+            size += 3 + c->raw.len + 2;
+        return size;
+    }
+
     // Checks a chain and key and fills info; the parsed chain and key are freed again
     bool check(const char *cert_pem, const char *key_pem, web_tls_info_t &info, char *err, size_t err_size)
     {
@@ -202,8 +217,12 @@ namespace
         mbedtls_pk_init(&key);
         bool ok = false;
         int ret = mbedtls_x509_crt_parse(&chain, reinterpret_cast<const unsigned char *>(cert_pem), strlen(cert_pem) + 1);
+        size_t message_size = 0;
         if (ret != 0)
             snprintf(err, err_size, "Certificate: not a valid X.509 certificate chain (mbedTLS -0x%04x)", static_cast<unsigned>(ret < 0 ? -ret : ret));
+        else if ((message_size = certificate_message_size(chain)) > MBEDTLS_SSL_OUT_CONTENT_LEN)
+            snprintf(err, err_size, "Certificate: the chain needs %u bytes in the TLS handshake, at most %u fit; leave out the root certificate",
+                     static_cast<unsigned>(message_size), static_cast<unsigned>(MBEDTLS_SSL_OUT_CONTENT_LEN));
         else if ((ret = mbedtls_pk_parse_key(&key, reinterpret_cast<const unsigned char *>(key_pem), strlen(key_pem) + 1, nullptr, 0)) != 0)
         {
             if (ret == MBEDTLS_ERR_PK_PASSWORD_REQUIRED)

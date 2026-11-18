@@ -1103,6 +1103,7 @@
     ['Certificate: PEM with one or more BEGIN CERTIFICATE / END CERTIFICATE blocks expected, at most %u characters', 'Zertifikat: PEM mit einem oder mehreren Blöcken BEGIN CERTIFICATE / END CERTIFICATE erwartet, höchstens {1} Zeichen'],
     ['Private key: one PEM block BEGIN PRIVATE KEY, EC PRIVATE KEY or RSA PRIVATE KEY expected (not encrypted), at most %u characters', 'Privater Schlüssel: ein PEM-Block BEGIN PRIVATE KEY, EC PRIVATE KEY oder RSA PRIVATE KEY erwartet (unverschlüsselt), höchstens {1} Zeichen'],
     ['Certificate: not a valid X.509 certificate chain (mbedTLS -0x%04x)', 'Zertifikat: keine gültige X.509-Zertifikatskette (mbedTLS -0x{1})'],
+    ['Certificate: the chain needs %u bytes in the TLS handshake, at most %u fit; leave out the root certificate', 'Zertifikat: Die Kette braucht {1} Bytes im TLS-Handshake, höchstens {2} passen; das Wurzelzertifikat weglassen'],
     ['Private key: could not be read (mbedTLS -0x%04x)', 'Privater Schlüssel: nicht lesbar (mbedTLS -0x{1})'],
     ['The certificate could not be stored (NVS: %s)', 'Das Zertifikat konnte nicht gespeichert werden (NVS: {1})'],
     ['DNS server %u is not valid', 'DNS-Server {1} ist ungültig'],

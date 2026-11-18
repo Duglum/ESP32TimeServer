@@ -8,8 +8,9 @@
 //   key never leaves the device and is not part of the firmware. The reset to defaults keeps it. The certificate is
 //   issued again (same key) when the FQDN changes.
 // - own: a certificate chain and its private key in PEM, given by the owner (page, API, configuration file). Checked
-//   with mbedTLS before it is stored: the chain parses, the key is not encrypted, ECDSA P-256/P-384 or RSA 2048 to 4096
-//   bit, and it belongs to the first certificate. The reset to defaults erases it and returns to self-signed.
+//   with mbedTLS before it is stored: the chain parses and its TLS 1.3 Certificate message fits the TLS send buffer
+//   of the build (MBEDTLS_SSL_OUT_CONTENT_LEN), the key is not encrypted, ECDSA P-256/P-384 or RSA 2048 to 4096 bit,
+//   and it belongs to the first certificate. The reset to defaults erases it and returns to self-signed.
 // The self-signed identity is kept while the own one is in use, so switching back gives the same certificate.
 
 #pragma once
