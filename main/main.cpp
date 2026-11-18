@@ -956,12 +956,24 @@ static std::atomic<int32_t> s_pps_isr_latency_ns{static_cast<int32_t>(PPS_ISR_LA
 #define PTP_FREE_RUNNING 1
 
 // ---- PTP clock source ----
-// 1 = the EMAC PTP clock runs from the 80 MHz PLL output (PLL_F80M, derived from the 40 MHz crystal): time stamps in
-//     steps of 13.04 ns instead of 40.05 ns. The rate of the clock is checked after the switch; if it is not right
-//     the 40 MHz crystal is used (warning at the start). Once a source has been used it is kept (the frequency
+// 1 = the EMAC PTP clock runs from the 80 MHz clock PTP_PLL_MOD_CLK (derived from the 40 MHz crystal, see below): time
+//     stamps in steps of 13.04 ns instead of 40.05 ns. The rate of the clock is checked after the switch; if it is not
+//     right the 40 MHz crystal is used (warning at the start). Once a source has been used it is kept (the frequency
 //     command of the servo refers to its base value).
 // 0 = 40 MHz crystal (ESP-IDF default configuration, 40.05 ns steps)
 #define PTP_CLOCK_FROM_PLL 1
+
+// Names of the 80 MHz source. ESP-IDF 6.1.1 renamed it on the ESP32-S31 from PLL_F80M to REF_F80M (no alias for the
+// old names): the EMAC PTP clock select gets the same value 1, and esp_clk_tree_enable_src() switches its clock gate
+// on. In 6.1.1 the clock comes from BBPLL/6 if the BBPLL is on when REF_F80M is first switched on, else from the
+// crystal doubled; 80 MHz either way. The ESP32-P4, and the S31 with ESP-IDF 6.1.0 (BBPLL/6), use PLL_F80M.
+#if CONFIG_IDF_TARGET_ESP32S31 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 1, 1)
+#define PTP_PLL_MOD_CLK SOC_MOD_CLK_REF_F80M
+#define PTP_PLL_EMAC_CLK_SRC EMAC_PTP_CLK_SRC_REF_F80M
+#else
+#define PTP_PLL_MOD_CLK SOC_MOD_CLK_PLL_F80M
+#define PTP_PLL_EMAC_CLK_SRC EMAC_PTP_CLK_SRC_PLL_F80M
+#endif
 
 // ---- PTP write latency: calibrated at run time and stored in NVS ----
 // Latency between the local time reading taken just before clock_settime(CLOCK_PTP_SYSTEM) and the instant the new
@@ -1199,7 +1211,7 @@ static inline int64_t floor_div(int64_t a, int64_t b)
 }
 
 // ---- Configuration of the EMAC PTP clock (see PTP_CLOCK_FROM_PLL) ----
-static std::atomic<bool> s_ptp_clock_pll{false}; // the PTP clock runs from PLL_F80M
+static std::atomic<bool> s_ptp_clock_pll{false}; // the PTP clock runs from PTP_PLL_MOD_CLK (80 MHz)
 
 static eth_mac_ptp_config_t ptp_mac_config(bool pll)
 {
@@ -1207,7 +1219,7 @@ static eth_mac_ptp_config_t ptp_mac_config(bool pll)
 #if PTP_CLOCK_FROM_PLL
     if (pll)
     {
-        config.clk_src = EMAC_PTP_CLK_SRC_PLL_F80M;
+        config.clk_src = PTP_PLL_EMAC_CLK_SRC;
         config.clk_src_period_ns = 12.5f;
         // The HAL sets the sub-second increment to (uint8_t)(13.1 / 0.465) = 28 units of 2^-31 s = 13.04 ns.
         // Addend = 2^32 * 12.5 / 13.04 = 0.959 * 2^32: room for the frequency command (at most +0.5 %).
@@ -1281,13 +1293,13 @@ static void ptp_note_base_addend()
 static bool ptp_mac_enable(esp_eth_mac_t *mac, bool first)
 {
 #if PTP_CLOCK_FROM_PLL
-    static bool pll_requested = false; // the PLL_F80M clock gate is requested once and kept
+    static bool pll_requested = false; // the PTP_PLL_MOD_CLK clock gate is requested once and kept
     if (first || s_ptp_clock_pll.load(std::memory_order_acquire))
     {
         esp_err_t err = ESP_OK;
         if (!pll_requested)
         {
-            err = esp_clk_tree_enable_src(SOC_MOD_CLK_PLL_F80M, true);
+            err = esp_clk_tree_enable_src(PTP_PLL_MOD_CLK, true);
             pll_requested = err == ESP_OK;
         }
         int64_t measured_ns = 0;
