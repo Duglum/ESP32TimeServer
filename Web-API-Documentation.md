@@ -34,6 +34,8 @@ The web admin page of the ESP32 Time Server talks to the device through a small 
 
 Request bodies are limited to 4096 bytes; `/api/apply` and `/api/save` take up to 14336 bytes (the MQTT CA certificate may have 4096 characters, the RADIUS servers DNS names of 253), `/api/tls` up to 13312 bytes, `/api/config` (import) up to 27648 bytes (a complete settings set with the own TLS certificate and its key), the firmware upload more. A JSON body may nest at most 8 levels deep and have at most 512 separators (`,` and `:` outside strings); otherwise, or when it is no JSON object, the answer is `400`. Errors come back as `{"error": "..."}` with a matching HTTP status.
 
+Time limits: the web server has one task and 3 connections. It waits for a client for at most 5 s in total during the TLS handshake and 15 s per request (headers, body, a refused body that it reads and throws away, and the answer); then it closes the connection. The time between requests on a kept connection does not count, nor does the wait for a RADIUS answer. A single wait of 5 s without any data still ends a request with `408` (headers) or a timeout of the handler. An authenticated firmware upload may take up to 300 s (15 s without data at most).
+
 ## Endpoints
 
 | Endpoint | Method | Authentication | What it does |

@@ -57,6 +57,13 @@ python -I testing/flood/flood.py udp <address> --port 123 --seconds 300
 python -I testing/flood/flood.py udp <address> --port 123 --seconds 300 --ntp
 ```
 
+Slow web clients: `slow` keeps one slow client going (`--kind connect`, `tls`, `header`, `login`, `purge` or `read`, see the header of `flood.py`), a new one whenever the device closes the last, and meanwhile asks `GET /api/info` about every second. The web server has one task: the device has to close each slow client after 5 s of waiting in the TLS handshake or 15 s per request, and `/api/info` must not wait much longer than that. `idle` holds TLS connections that send nothing and reports when the device closes them (run a certificate change meanwhile: it has to close them too):
+
+```
+python -I testing/flood/flood.py slow <address> --kind login --seconds 60
+python -I testing/flood/flood.py idle <address> --parallel 1 --seconds 60
+```
+
 ## Quality of Service
 
 ### Jitter

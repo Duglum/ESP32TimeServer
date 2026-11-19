@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,7 +42,9 @@ extern "C"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/net_sockets.h"
 #include "mbedtls/platform_util.h"
+#include "mbedtls/ssl.h"
 #include "mbedtls/ssl_ciphersuites.h"
 #include "mbedtls/x509_crt.h"
 #include "nvs.h"
@@ -80,8 +83,21 @@ namespace
     // Marker and format version of a configuration file (export and import, /api/config)
     constexpr char CONFIG_MARKER[] = "timeserver_config";
     constexpr int CONFIG_FORMAT = 1;
-    constexpr uint32_t HANDSHAKE_TIMEOUT_MS = 5000;
-    constexpr uint16_t IO_TIMEOUT_S = 5;
+    constexpr uint16_t IO_TIMEOUT_S = 5; // one socket wait: then httpd answers 408 or the handler counts a timeout
+    // Time one connection may keep the server task waiting on its socket (the transport counts it, see bio_recv), so
+    // that a client which trickles bytes cannot hold the only server task: the TLS handshake in total, then each
+    // request (headers, body, the discarded rest of a refused body and the answer). The time between requests is
+    // spent in httpd's select() and does not count, nor does the time a handler computes. A real client needs a few
+    // round trips for the handshake and, on the local network, far less than a second for the largest request (a
+    // configuration file of up to CONFIG_BODY_MAX = 27648 bytes) or answer (130 kB of i18n.js, a core dump of up to
+    // 128 kB: a client that takes it in at less than about 9 kB/s is closed); 15 s is 3 socket waits, as read_json()
+    // allows.
+    constexpr int64_t HANDSHAKE_WAIT_US = 5LL * 1000000LL;
+    constexpr int64_t HANDSHAKE_LIMIT_US = 2 * HANDSHAKE_WAIT_US; // guard: a handshake step that returns without waiting
+    constexpr int64_t REQUEST_WAIT_US = 15LL * 1000000LL;
+    // An authenticated firmware upload: web_ote.cpp ends it itself (300 s in total, 15 s without data; a receive that
+    // starts just before the 300 s waits up to 5 s more); the answer then still has the rest
+    constexpr int64_t OTE_WAIT_US = 330LL * 1000000LL;
     constexpr UBaseType_t TASK_PRIORITY = 3;   // below every timing task (PPS 14, GNSS 15, NTP 17/20, recovery 6, MQTT 5)
     constexpr BaseType_t TASK_CORE = 0;        // the hardware NTP task runs on core 1
     constexpr size_t TASK_STACK = 10240;       // TLS handshake, PBKDF2 and JSON run in this task
@@ -118,10 +134,99 @@ namespace
     esp_timer_handle_t s_confirm_timer = nullptr;
 
     // ---- TLS transport ----
+    // The socket I/O of each TLS session goes through bio_send / bio_recv (instead of esp-tls's mbedtls_net_send /
+    // mbedtls_net_recv), which count the time spent waiting on the socket against the budget of the connection's
+    // current account (HANDSHAKE_WAIT_US, REQUEST_WAIT_US). Per socket call alone a client could hold the task for
+    // as long as it likes: mbedTLS loops until a whole record is in or out (mbedtls_ssl_fetch_input,
+    // mbedtls_ssl_flush_output) and httpd's header parser and body purge loop until the request is complete, each
+    // receive waiting up to the socket timeout. Only the server task uses the transports.
     struct transport_t
     {
         esp_tls_t *tls;
+        int fd;
+        int64_t budget_us; // waiting allowed in the current account
+        int64_t waited_us; // waited in the current account
+        bool sent;         // httpd sent on the connection: its next receive starts a new account
+        bool expired;      // the budget was used up: every later read and write fails, httpd closes the connection
     };
+
+    void account_start(transport_t &transport, int64_t budget_us)
+    {
+        transport.budget_us = budget_us;
+        transport.waited_us = 0;
+        transport.sent = false;
+    }
+
+    // Waits until the socket can be read (or written) for at most one socket timeout and the rest of the budget.
+    // 1: ready, 0: the wait ended (the caller returns WANT_READ / WANT_WRITE, httpd sees a timeout as before),
+    // -1: the budget is used up (expired) or select() failed.
+    int wait_socket(transport_t &transport, bool write)
+    {
+        const int64_t rest_us = transport.budget_us - transport.waited_us;
+        if (rest_us <= 0)
+        {
+            transport.expired = true;
+            return -1;
+        }
+        const int64_t wait_us = std::min<int64_t>(rest_us, IO_TIMEOUT_S * 1000000LL);
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(transport.fd, &set);
+        struct timeval timeout{};
+        timeout.tv_sec = static_cast<time_t>(wait_us / 1000000);
+        timeout.tv_usec = static_cast<suseconds_t>(wait_us % 1000000);
+        const int64_t start_us = esp_timer_get_time();
+        const int ready = select(transport.fd + 1, write ? nullptr : &set, write ? &set : nullptr, nullptr, &timeout);
+        transport.waited_us += esp_timer_get_time() - start_us;
+        if (ready > 0)
+            return 1;
+        if (ready < 0 && errno != EINTR)
+            return -1;
+        if (transport.waited_us >= transport.budget_us)
+        {
+            transport.expired = true;
+            return -1;
+        }
+        return 0;
+    }
+
+    int bio_send(void *context, const unsigned char *data, size_t length)
+    {
+        transport_t &transport = *static_cast<transport_t *>(context);
+        while (!transport.expired)
+        {
+            const int sent = send(transport.fd, data, length, MSG_DONTWAIT);
+            if (sent >= 0)
+                return sent;
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                return errno == EPIPE || errno == ECONNRESET ? MBEDTLS_ERR_NET_CONN_RESET : MBEDTLS_ERR_NET_SEND_FAILED;
+            const int ready = wait_socket(transport, true);
+            if (ready == 0)
+                return MBEDTLS_ERR_SSL_WANT_WRITE;
+            if (ready < 0 && !transport.expired)
+                return MBEDTLS_ERR_NET_SEND_FAILED;
+        }
+        return MBEDTLS_ERR_SSL_TIMEOUT; // fatal for mbedTLS: its loops end
+    }
+
+    int bio_recv(void *context, unsigned char *data, size_t length)
+    {
+        transport_t &transport = *static_cast<transport_t *>(context);
+        while (!transport.expired)
+        {
+            const int received = recv(transport.fd, data, length, MSG_DONTWAIT);
+            if (received >= 0)
+                return received; // 0: the client closed the connection
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                return errno == EPIPE || errno == ECONNRESET ? MBEDTLS_ERR_NET_CONN_RESET : MBEDTLS_ERR_NET_RECV_FAILED;
+            const int ready = wait_socket(transport, false);
+            if (ready == 0)
+                return MBEDTLS_ERR_SSL_WANT_READ;
+            if (ready < 0 && !transport.expired)
+                return MBEDTLS_ERR_NET_RECV_FAILED;
+        }
+        return MBEDTLS_ERR_SSL_TIMEOUT;
+    }
 
     void transport_close(void *context)
     {
@@ -139,6 +244,7 @@ namespace
         transport_t *transport = static_cast<transport_t *>(httpd_sess_get_transport_ctx(server, sockfd));
         if (transport == nullptr)
             return HTTPD_SOCK_ERR_FAIL;
+        transport->sent = true;
         const ssize_t ret = esp_tls_conn_write(transport->tls, buf, length);
         if (ret == ESP_TLS_ERR_SSL_WANT_WRITE || ret == ESP_TLS_ERR_SSL_WANT_READ)
             return HTTPD_SOCK_ERR_TIMEOUT;
@@ -151,6 +257,11 @@ namespace
         transport_t *transport = static_cast<transport_t *>(httpd_sess_get_transport_ctx(server, sockfd));
         if (transport == nullptr)
             return HTTPD_SOCK_ERR_FAIL;
+        // A receive after a send is the next request, or the rest of a refused request's body that httpd reads and
+        // throws away after the answer (httpd_req_delete()): a new account. So a refused request gets two budgets
+        // at most. An answer sent later from a work item (RADIUS) belongs to the account of its request.
+        if (transport->sent)
+            account_start(*transport, REQUEST_WAIT_US);
         const ssize_t ret = esp_tls_conn_read(transport->tls, buf, length);
         if (ret == ESP_TLS_ERR_SSL_WANT_READ || ret == ESP_TLS_ERR_SSL_WANT_WRITE)
             return HTTPD_SOCK_ERR_TIMEOUT;
@@ -164,6 +275,15 @@ namespace
             return 0;
         const ssize_t ret = esp_tls_get_bytes_avail(transport->tls);
         return ret < 0 ? 0 : static_cast<int>(ret);
+    }
+
+    // The current request of req may keep the server task waiting for up to budget_us in total (an authenticated
+    // firmware upload); the next request on the connection gets REQUEST_WAIT_US again
+    void transport_set_request_budget(httpd_req_t *req, int64_t budget_us)
+    {
+        transport_t *transport = static_cast<transport_t *>(httpd_sess_get_transport_ctx(req->handle, httpd_req_to_sockfd(req)));
+        if (transport != nullptr && !transport->expired)
+            transport->budget_us = budget_us;
     }
 
     // Connections that end before a request: esp-tls and httpd logged three lines for each (a browser that does not
@@ -210,29 +330,50 @@ namespace
             return ESP_FAIL;
         }
 
-        esp_tls_t *tls = esp_tls_init();
-        if (tls == nullptr)
+        transport_t *transport = static_cast<transport_t *>(calloc(1, sizeof(transport_t)));
+        if (transport == nullptr)
             return ESP_ERR_NO_MEM;
-        if (esp_tls_server_session_create(&s_tls_config, sockfd, tls) != 0)
+        transport->tls = esp_tls_init();
+        if (transport->tls == nullptr)
+        {
+            free(transport);
+            return ESP_ERR_NO_MEM;
+        }
+        transport->fd = sockfd;
+        account_start(*transport, HANDSHAKE_WAIT_US);
+        // The handshake steps of esp_tls_server_session_create() with the own BIO set in between (the session's ssl
+        // context reads and writes only through it; the dynamic buffers too) and without its timeout, which is only
+        // checked between steps and so never while mbedTLS waits for the rest of a record
+        int ret = esp_tls_server_session_init(&s_tls_config, sockfd, transport->tls);
+        if (ret == ESP_OK)
+        {
+            mbedtls_ssl_set_bio(static_cast<mbedtls_ssl_context *>(esp_tls_get_ssl_context(transport->tls)), transport, bio_send, bio_recv, nullptr);
+            const int64_t start_us = esp_timer_get_time();
+            do
+                ret = esp_tls_server_session_continue_async(transport->tls);
+            while ((ret == ESP_TLS_ERR_SSL_WANT_READ || ret == ESP_TLS_ERR_SSL_WANT_WRITE) &&
+                   esp_timer_get_time() - start_us < HANDSHAKE_LIMIT_US);
+        }
+        if (ret != 0)
         {
             int tls_code = 0;
             int tls_flags = 0;
             esp_tls_error_handle_t error_handle = nullptr;
-            if (esp_tls_get_error_handle(tls, &error_handle) == ESP_OK && error_handle != nullptr)
+            if (!transport->expired && esp_tls_get_error_handle(transport->tls, &error_handle) == ESP_OK && error_handle != nullptr)
                 esp_tls_get_and_clear_last_error(error_handle, &tls_code, &tls_flags);
-            esp_tls_server_session_delete(tls);
+            transport_close(transport);
             ++s_connection_report.handshakes_failed;
-            s_connection_report.last_tls_error = tls_code;
+            s_connection_report.last_tls_error = tls_code; // 0 for a timeout, as the report says
             report_connections();
             return ESP_FAIL;
         }
-        transport_t *transport = static_cast<transport_t *>(calloc(1, sizeof(transport_t)));
-        if (transport == nullptr)
-        {
-            esp_tls_server_session_delete(tls);
-            return ESP_ERR_NO_MEM;
-        }
-        transport->tls = tls;
+        esp_tls_set_conn_state(transport->tls, ESP_TLS_DONE); // as esp_tls_server_session_create() does
+        account_start(*transport, REQUEST_WAIT_US);
+        // httpd ignores httpd_sess_trigger_close() for a session with LRU counter 0 (httpd_sess_close() in
+        // httpd_sess.c), which a connection opened while no other is open keeps until its first request: without
+        // this, close_sessions_work() could not close it after a certificate change (httpd's own LRU purge marks its
+        // victim and is not affected)
+        httpd_sess_update_lru_counter(server, sockfd);
         httpd_sess_set_transport_ctx(server, sockfd, transport, transport_close);
         httpd_sess_set_send_override(server, sockfd, transport_send);
         httpd_sess_set_recv_override(server, sockfd, transport_recv);
@@ -2610,6 +2751,7 @@ namespace
             return ESP_FAIL;
         }
 
+        transport_set_request_budget(req, OTE_WAIT_US); // authenticated: web_ote.cpp's limits apply (a slow link)
         const web_ote_result_t result = web_ote_receive(req);
         if (result.accepted)
             return send_ok(req, result.message);
@@ -3542,7 +3684,6 @@ namespace
 
         s_tls_config = esp_tls_cfg_server_t{};
         use_identity(s_identity);
-        s_tls_config.tls_handshake_timeout_ms = HANDSHAKE_TIMEOUT_MS;
         s_tls_config.tls_version = ESP_TLS_VER_TLS_1_3; // see s_ciphersuites
         // esp-tls logs "Setting server TLS version" at info level for every TLS 1.3 connection, and every failed
         // handshake as an error: report_connections() instead
