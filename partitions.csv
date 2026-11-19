@@ -1,8 +1,13 @@
 # Name,   Type, SubType, Offset,   Size
-nvs,      data, nvs,     0x9000,   0x6000
+# 0x9000 to 0xEFFF: unused. The nvs partition (24 kB) was there until 2026-11; it is now behind coredump. A board keeps
+# the table it was flashed with until it is flashed over USB with this one (README, "Partition table and NVS").
 otadata,  data, ota,     0xF000,   0x2000
 phy_init, data, phy,     0x11000,  0x1000
 factory,  app,  factory, 0x20000,  0x400000
 ota_0,    app,  ota_0,   0x420000, 0x400000
 ota_1,    app,  ota_1,   0x820000, 0x400000
 coredump, data, coredump, 0xC20000, 0x20000
+# 256 kB (64 pages of 4 kB, 63 usable): the most the firmware stores is about 823 entries of 32 bytes (6.5 pages),
+# about 1270 while a changed item is written next to its old copy. Listed last: the partition tool wants the offsets
+# in rising order. Ends at 12.5 MB: fits the 16 MB flash of the ESP32-S31 profile and the 32 MB of the ESP32-P4.
+nvs,      data, nvs,     0xC40000, 0x40000

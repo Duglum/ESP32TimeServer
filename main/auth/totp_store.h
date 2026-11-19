@@ -6,8 +6,9 @@
 // on the device), the time step last used (each code once) and 10 recovery codes (salted hashes; each once). Not in
 // the configuration file; erased by Reset to defaults. Thread safe.
 //
-// The time server has 24 kB of NVS, and its settings blob (about 7 kB) is written again by every Save and Apply with a
-// restart: a new token is only stored while NVS keeps room for that (totp_store_init's reserve).
+// The settings blob (about 7 kB) is written again by every Save and Apply with a restart: a new token is only stored
+// while NVS keeps room for that (totp_store_init's reserve). The nvs partition has 256 kB; a board that still has the
+// partition table before 2026-11 has 24 kB (README, "Partition table and NVS"), where this reserve limits the tokens.
 #pragma once
 
 #include <cstddef>

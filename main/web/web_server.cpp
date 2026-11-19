@@ -2948,7 +2948,8 @@ namespace
         cJSON_AddNumberToObject(root, "heap_free", d->heap_free);
         cJSON_AddNumberToObject(root, "heap_min_free", d->heap_min_free);
         cJSON_AddNumberToObject(root, "heap_largest_block", d->heap_largest_block);
-        // NVS (24 kB, entries of 32 bytes): the settings, the password, the certificates, the TOTP tokens
+        // NVS (256 kB, or 24 kB with the partition table before 2026-11; entries of 32 bytes): the settings, the password,
+        // the certificates, the TOTP tokens
         nvs_stats_t nvs{};
         if (nvs_get_stats(nullptr, &nvs) == ESP_OK)
         {
