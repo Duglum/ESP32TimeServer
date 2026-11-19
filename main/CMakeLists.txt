@@ -26,6 +26,7 @@ set(MAIN_SOURCES
         "web/web_server.cpp"
         "web/web_settings.cpp"
         "web/web_tls.cpp"
+        "web/web_tls_pair.cpp"
 )
 
 set(MAIN_REQUIRES

@@ -1106,6 +1106,7 @@
     ['Certificate: the chain needs %u bytes in the TLS handshake, at most %u fit; leave out the root certificate', 'Zertifikat: Die Kette braucht {1} Bytes im TLS-Handshake, höchstens {2} passen; das Wurzelzertifikat weglassen'],
     ['Private key: could not be read (mbedTLS -0x%04x)', 'Privater Schlüssel: nicht lesbar (mbedTLS -0x{1})'],
     ['The certificate could not be stored (NVS: %s)', 'Das Zertifikat konnte nicht gespeichert werden (NVS: {1})'],
+    ['The certificate could not be stored: NVS has %u free entries, %u are needed (the certificate and key, and room for writing the settings again)', 'Das Zertifikat konnte nicht gespeichert werden: NVS hat {1} freie Einträge, {2} werden gebraucht (Zertifikat und Schlüssel sowie Platz, um die Einstellungen erneut zu schreiben)'],
     ['DNS server %u is not valid', 'DNS-Server {1} ist ungültig'],
     ['DNS server %u is not an IPv4 or IPv6 address', 'DNS-Server {1} ist keine IPv4- oder IPv6-Adresse'],
     ['DNS server %u: not a unicast address', 'DNS-Server {1}: keine Unicast-Adresse'],

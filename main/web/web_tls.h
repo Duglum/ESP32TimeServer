@@ -10,7 +10,9 @@
 // - own: a certificate chain and its private key in PEM, given by the owner (page, API, configuration file). Checked
 //   with mbedTLS before it is stored: the chain parses and its TLS 1.3 Certificate message fits the TLS send buffer
 //   of the build (MBEDTLS_SSL_OUT_CONTENT_LEN), the key is not encrypted, ECDSA P-256/P-384 or RSA 2048 to 4096 bit,
-//   and it belongs to the first certificate. The reset to defaults erases it and returns to self-signed.
+//   and it belongs to the first certificate. The reset to defaults erases it and returns to self-signed. Chain and key
+//   are stored as one NVS blob, so a failed or interrupted store keeps the old pair or stores the new one, never a
+//   chain with another key; a store is refused before anything is written when NVS lacks the room (web_tls_pair.h).
 // The self-signed identity is kept while the own one is in use, so switching back gives the same certificate.
 
 #pragma once

@@ -5,10 +5,12 @@
 //
 
 #include "web_tls.h"
+#include "web_tls_pair.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <new>
 
 #include "web_settings.h"
@@ -36,8 +38,13 @@ namespace
     constexpr char NVS_KEY_CERT[] = "crt";     // self-signed certificate, DER
     constexpr char NVS_KEY_NAME[] = "name";    // FQDN the self-signed certificate was issued for
     constexpr char NVS_KEY_MODE[] = "mode";    // 1: the own certificate is in use
-    constexpr char NVS_KEY_OWN_CERT[] = "ocrt"; // own certificate chain, PEM with its NUL
-    constexpr char NVS_KEY_OWN_KEY[] = "okey";  // own private key, PEM with its NUL
+    constexpr char NVS_KEY_OWN_PAIR[] = "opair"; // own chain and key in one blob (web_tls_pair.h)
+    // Before 2026-11: chain and key as two blobs, each PEM with its NUL, written one after the other (a failed or
+    // interrupted second write left the new chain with the old key). Read when "opair" is missing, erased once it is
+    // stored.
+    constexpr char NVS_KEY_OWN_CERT[] = "ocrt";
+    constexpr char NVS_KEY_OWN_KEY[] = "okey";
+    constexpr size_t OWN_PAIR_MAX = web_tls_pair_size(WEB_TLS_CERT_PEM_MAX, WEB_TLS_KEY_PEM_MAX);
     constexpr size_t MAX_DER = 1024;
 
     // Fixed validity: the time may not be known yet when the certificate is created
@@ -112,6 +119,110 @@ namespace
             return nullptr;
         }
         return reinterpret_cast<char *>(data);
+    }
+
+    void free_data_secret(uint8_t *&data, size_t length)
+    {
+        if (data != nullptr)
+        {
+            mbedtls_platform_zeroize(data, length);
+            free(data);
+        }
+        data = nullptr;
+    }
+
+    // Erases the two blobs of the firmware before 2026-11 (missing ones are fine). False when one could not be erased.
+    bool erase_legacy_own(nvs_handle_t handle)
+    {
+        bool ok = true;
+        for (const char *key : {NVS_KEY_OWN_CERT, NVS_KEY_OWN_KEY})
+        {
+            const esp_err_t err = nvs_erase_key(handle, key);
+            if (err == ESP_OK)
+                ESP_LOGI(TAG, "Own certificate: the NVS item %s of the former layout is erased", key);
+            else if (err != ESP_ERR_NVS_NOT_FOUND)
+            {
+                ESP_LOGW(TAG, "Own certificate: the NVS item %s of the former layout could not be erased (%s)", key, esp_err_to_name(err));
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    // The stored own chain and key into s_own_cert and s_own_key (not checked here): "opair", or the two blobs of the
+    // firmware before 2026-11 while "opair" is missing
+    void load_own(nvs_handle_t handle)
+    {
+        size_t length = 0;
+        if (nvs_get_blob(handle, NVS_KEY_OWN_PAIR, nullptr, &length) != ESP_OK)
+        {
+            s_own_cert = read_pem(handle, NVS_KEY_OWN_CERT, WEB_TLS_CERT_PEM_MAX);
+            s_own_key = read_pem(handle, NVS_KEY_OWN_KEY, WEB_TLS_KEY_PEM_MAX);
+            return;
+        }
+        uint8_t *data = nullptr;
+        const char *cert = nullptr;
+        const char *key = nullptr;
+        if (read_blob(handle, NVS_KEY_OWN_PAIR, data, length, OWN_PAIR_MAX) && web_tls_pair_split(data, length, cert, key))
+        {
+            s_own_cert = copy_text(cert);
+            s_own_key = copy_text(key);
+            if (s_own_cert == nullptr || s_own_key == nullptr)
+            {
+                ESP_LOGE(TAG, "Own certificate not used: out of memory");
+                free_secret(s_own_cert);
+                free_secret(s_own_key);
+            }
+        }
+        else
+            ESP_LOGW(TAG, "Own certificate not used: the stored certificate and key cannot be read");
+        free_data_secret(data, length);
+        // The old two blobs are left when the device was cut off between storing "opair" and erasing them
+        if (erase_legacy_own(handle))
+            nvs_commit(handle);
+    }
+
+    // NVS entries the stored own data frees at least once a new pair is stored (all three items are erased then)
+    size_t own_entries_min(nvs_handle_t handle)
+    {
+        size_t entries = 0;
+        for (const char *key : {NVS_KEY_OWN_PAIR, NVS_KEY_OWN_CERT, NVS_KEY_OWN_KEY})
+        {
+            size_t length = 0;
+            if (nvs_get_blob(handle, key, nullptr, &length) == ESP_OK)
+                entries += web_tls_nvs_entries_min(length);
+        }
+        return entries;
+    }
+
+    // Before anything is written: room for the new pair next to the stored data, and afterwards still room for writing
+    // the settings again (Save writes the new set before it erases the old one), as for a new TOTP token
+    bool room_for_pair(nvs_handle_t handle, size_t size, char *err, size_t err_size)
+    {
+        nvs_stats_t stats{};
+        if (nvs_get_stats(nullptr, &stats) != ESP_OK)
+            return true; // unknown: nvs_set_blob tells, and it stores all or nothing
+        size_t needed = 0;
+        if (web_tls_nvs_room(stats.available_entries, size, own_entries_min(handle), web_tls_nvs_entries_max(web_settings_stored_size()), needed))
+            return true;
+        snprintf(err, err_size, "The certificate could not be stored: NVS has %u free entries, %u are needed (the certificate and key, and room for writing the settings again)",
+                 static_cast<unsigned>(stats.available_entries), static_cast<unsigned>(needed));
+        ESP_LOGW(TAG, "%s", err);
+        return false;
+    }
+
+    // Stores chain and key as one blob, then erases the two blobs of the former layout
+    esp_err_t store_pair(nvs_handle_t handle, const char *cert, const char *key)
+    {
+        const size_t size = web_tls_pair_size(strlen(cert), strlen(key));
+        uint8_t *data = static_cast<uint8_t *>(alloc_prefer_psram(size));
+        if (data == nullptr)
+            return ESP_ERR_NO_MEM;
+        esp_err_t err = web_tls_pair_pack(cert, key, data, size) == size ? nvs_set_blob(handle, NVS_KEY_OWN_PAIR, data, size) : ESP_ERR_INVALID_ARG;
+        free_data_secret(data, size);
+        if (err == ESP_OK)
+            erase_legacy_own(handle); // one left over is erased at the next start
+        return err;
     }
 
     bool fingerprint(const uint8_t *der, size_t length, char out[96])
@@ -466,8 +577,7 @@ bool web_tls_load_or_create(const char *fqdn, web_tls_identity_t &identity)
     // The own identity, checked again: a stored one that does not pass is not used
     uint8_t mode = 0;
     nvs_get_u8(handle, NVS_KEY_MODE, &mode);
-    s_own_cert = read_pem(handle, NVS_KEY_OWN_CERT, WEB_TLS_CERT_PEM_MAX);
-    s_own_key = read_pem(handle, NVS_KEY_OWN_KEY, WEB_TLS_KEY_PEM_MAX);
+    load_own(handle);
     nvs_close(handle);
     if (s_own_cert != nullptr)
     {
@@ -508,6 +618,7 @@ bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_id
     esp_err_t result = ESP_OK;
     char *new_cert = nullptr;
     char *new_key = nullptr;
+    bool pair_stored = false;
     web_tls_info_t *info = own ? new (std::nothrow) web_tls_info_t{} : nullptr; // about 1 kB: not on the task stack
     if (own && info == nullptr)
     {
@@ -525,13 +636,25 @@ bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_id
             nvs_close(handle);
             return false;
         }
+        // The stored pair again (a switch back to it, or the same texts once more): nothing is written
+        const bool changed = s_own_cert == nullptr || s_own_key == nullptr || strcmp(cert, s_own_cert) != 0 || strcmp(key, s_own_key) != 0;
         new_cert = copy_text(cert);
         new_key = copy_text(key);
         result = new_cert == nullptr || new_key == nullptr ? ESP_ERR_NO_MEM : ESP_OK;
-        if (result == ESP_OK)
-            result = nvs_set_blob(handle, NVS_KEY_OWN_CERT, new_cert, strlen(new_cert) + 1);
-        if (result == ESP_OK)
-            result = nvs_set_blob(handle, NVS_KEY_OWN_KEY, new_key, strlen(new_key) + 1);
+        // Refused for lack of room before anything is written: NVS stays as it is
+        if (result == ESP_OK && changed && !room_for_pair(handle, web_tls_pair_size(strlen(new_cert), strlen(new_key)), err, err_size))
+        {
+            delete info;
+            free_secret(new_cert);
+            free_secret(new_key);
+            nvs_close(handle);
+            return false;
+        }
+        if (result == ESP_OK && changed)
+        {
+            result = store_pair(handle, new_cert, new_key);
+            pair_stored = result == ESP_OK;
+        }
     }
     if (result == ESP_OK)
         result = nvs_set_u8(handle, NVS_KEY_MODE, own ? 1 : 0);
@@ -540,6 +663,9 @@ bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_id
     nvs_close(handle);
     if (result != ESP_OK)
     {
+        // The buffers in use stay (new connections still get them); the stored pair is complete either way
+        if (pair_stored)
+            ESP_LOGW(TAG, "The new own certificate is stored, the mode is not (%s): the next start uses it with the mode stored before", esp_err_to_name(result));
         delete info;
         free_secret(new_cert);
         free_secret(new_key);
@@ -586,6 +712,7 @@ void web_tls_clear_own()
     nvs_handle_t handle = 0;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
         return;
+    nvs_erase_key(handle, NVS_KEY_OWN_PAIR);
     nvs_erase_key(handle, NVS_KEY_OWN_CERT);
     nvs_erase_key(handle, NVS_KEY_OWN_KEY);
     nvs_erase_key(handle, NVS_KEY_MODE);

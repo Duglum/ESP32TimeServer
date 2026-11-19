@@ -77,6 +77,8 @@ $targets = [ordered]@{
     totp_test      = @("$here\totp_test.cpp", "$main\auth\totp.cpp", "$main\third_party\qrcodegen\qrcodegen.c")
     auth_config_test = @("$here\auth_config_test.cpp", "$main\auth\auth_config.cpp", "$main\auth\radius_proto.cpp",
         "$main\net\ip_text.cpp", "$cjson\cJSON.c")
+    # The stored form of the own web certificate and the NVS room check
+    web_tls_pair_test = @("$here\web_tls_pair_test.cpp", "$main\web\web_tls_pair.cpp")
 }
 # Test programs without a fuzz target
 $no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test')
