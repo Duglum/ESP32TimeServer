@@ -79,6 +79,8 @@ $targets = [ordered]@{
         "$main\net\ip_text.cpp", "$cjson\cJSON.c")
     # The stored form of the own web certificate and the NVS room check
     web_tls_pair_test = @("$here\web_tls_pair_test.cpp", "$main\web\web_tls_pair.cpp")
+    # An NVS blob written only when its bytes changed (ESP-IDF 6.1.1 compares a blob of several chunks wrongly)
+    nvs_blob_test  = @("$here\nvs_blob_test.cpp", "$main\custom\nvs_blob.cpp")
 }
 # Test programs without a fuzz target
 $no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test')

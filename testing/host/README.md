@@ -19,6 +19,7 @@ the few ESP-IDF and FreeRTOS functions they call (single-threaded, with a simula
 | `totp_test` | `main/auth/totp.cpp`, `main/third_party/qrcodegen` | the second factor: base32 (RFC 4648 vectors, lower case, padding, refused characters, buffers one byte too small), HOTP (RFC 4226 appendix D), TOTP with SHA-1 (RFC 6238 appendix B), the check of a code (the step of now, one before and one after, not two; each code once; spaces; wrong lengths and characters; no time yet), the otpauth URI byte by byte (percent-encoding, too small a buffer), the QR code of the longest URI (version 15 at most, error correction M, the finder patterns), the recovery codes (text of 50 bits, normalising, the salted hashes, a used code, another salt) |
 | `auth_config_test` | `main/auth/auth_config.cpp` (with `radius_proto.cpp`, `ip_text.cpp`, cJSON) | the login settings: defaults (local password only, RADIUS timeout 3 s, 2 retries, dead time 2 min, privilege level 15, Message-Authenticator required), every refused field of `radius` and `web_login` with its message (servers, hosts, ports, secrets, timing, NAS attributes, Service-Type, NAS-Port-Type, privilege level, required attribute, types), the longest DNS name, missing fields keep their value; the shared secrets: never in the API form, an empty or missing one keeps the stored one, a server without a host loses it, the stored form reads back unchanged |
 | `web_tls_pair_test` | `main/web/web_tls_pair.cpp` | the own web certificate in NVS: chain and key packed into one blob and split again (the largest pair of 8192 and 4096 characters, a buffer one byte too small, empty texts, blobs without the last NUL, without a key or with a third text); the NVS entries of a blob against sizes measured on the board (upper and lower bound) and for every size up to 20000 bytes; the room check (fix 8's case of 6000 and 4096 characters on the old table refused with 437 entries needed, the largest pair refused there and accepted on the 256 kB table, a pair that does not grow the data needs no reserve) |
+| `nvs_blob_test` | `main/custom/nvs_blob.cpp` | an NVS blob is written only when its bytes changed (the workaround for ESP-IDF 6.1.1, which compares a blob of more than one chunk wrongly and writes it again), against a fake NVS that writes every `nvs_set_blob()` next to the old version as 6.1.1 does: a new key is written, the same bytes three times are not (also from another buffer, `written` nullptr, per key), one changed byte at the start, in each chunk of the board layout and at the end is written, other sizes and size 0 are written, a failing size query or read and other bytes read back fall back to `nvs_set_blob()`; NVS with room for one settings set only: the same set gives `ESP_OK` without a write, a changed one `ESP_ERR_NVS_NOT_ENOUGH_SPACE` with the stored set kept |
 
 Fuzz targets (`-DHOST_FUZZ`, libFuzzer):
 
@@ -32,6 +33,7 @@ Fuzz targets (`-DHOST_FUZZ`, libFuzzer):
 - `totp_fuzz`: the input as base32 (a decoded text encodes and decodes to the same bytes), as a TOTP code (an accepted one matched a step of the window), as a recovery code and as the user name of an otpauth URI (an accepted URI fits its buffer).
 - `auth_config_fuzz`: the input as the JSON of a request and of a configuration file: texts stay terminated, an accepted and valid set has no secret in its API form and reads back unchanged from its stored form.
 - `web_tls_pair_fuzz`: the input as a stored blob of the own web certificate: a blob that splits gives two non-empty texts that pack to the same bytes.
+- `nvs_blob_fuzz`: the input as a stored blob and a new one (the first byte says where to cut): written exactly when they differ, and NVS holds the new bytes afterwards.
 
 The login modules and their tests (`ip_text`, `radius`, `totp`, `check.h`, the seeds in `seeds/`) come from ESP32-ConsoleServer. The RADIUS vectors in `radius_vectors.h` come from `gen_radius_vectors.py` (Python standard library only: `hashlib`, `hmac`); run `python -I gen_radius_vectors.py > radius_vectors.h` only to change them.
 
@@ -51,6 +53,10 @@ default `C:\esp\v6.1\esp-idf`) and its CMake and Ninja: the first run builds TF-
 `gnss_test.exe --seeds <folder>` writes seed inputs (valid sentences and frames) for the GNSS fuzzer; the script
 does this before fuzzing. A crash is saved as `build\crash-*` and can be replayed with
 `build\gnss_fuzz.exe build\crash-...`.
+
+## Results (2026-11-19, unchanged settings not written to NVS again)
+
+With CHANGELOG 4.130: all checks pass (the tests as below, nvs_blob_test 53). nvs_blob_fuzz 120 s (11.2 million inputs) without a finding.
 
 ## Results (2026-11-19, own web certificate as one NVS blob)
 

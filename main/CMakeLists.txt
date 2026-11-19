@@ -17,6 +17,7 @@ set(MAIN_SOURCES
         "custom/ntp_auth.cpp"
         "custom/ptp_auth.cpp"
         "custom/ntp_cache.c"
+        "custom/nvs_blob.cpp"
         "custom/time_diag.cpp"
         "net/ip_text.cpp"
         "third_party/qrcodegen/qrcodegen.c"

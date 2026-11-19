@@ -6,6 +6,7 @@
 
 #include "web_settings.h"
 #include "auth/totp_store.h"
+#include "custom/nvs_blob.h"
 
 #include <cctype>
 #include <cstddef>
@@ -444,10 +445,16 @@ namespace
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
         if (err == ESP_OK)
         {
-            err = nvs_set_blob(handle, key, blob, sizeof(settings_blob_t));
+            // The same bytes again (a Save of unchanged settings, the same one-shot set twice): nothing is written.
+            // nvs_set_blob() of ESP-IDF 6.1.1 would write this blob (6996 bytes, 2 or 3 chunks on the board) again and
+            // need room for a second copy, see custom/nvs_blob.h
+            bool written = false;
+            err = nvs_blob_set_if_changed(handle, key, blob, sizeof(settings_blob_t), &written);
             if (err == ESP_OK)
                 err = nvs_commit(handle);
             nvs_close(handle);
+            if (err == ESP_OK && !written)
+                ESP_LOGI(TAG, "Web settings '%s': the same as stored in NVS, nothing written", key);
         }
         memset(blob, 0, sizeof(settings_blob_t)); // contains secrets
         free(blob);

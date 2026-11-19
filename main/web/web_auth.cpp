@@ -6,6 +6,7 @@
 
 #include "web_auth.h"
 #include "web_settings.h"
+#include "custom/nvs_blob.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -55,6 +56,10 @@ namespace
         web_allow_entry_t entries[WEB_ALLOW_LIST_MAX];
         uint32_t crc;
     };
+
+    // One NVS chunk each: nvs_set_blob() of ESP-IDF 6.1.1 recognises an unchanged record (see custom/nvs_blob.h)
+    static_assert(sizeof(password_record_t) <= NVS_BLOB_ONE_CHUNK_MAX, "a larger record needs nvs_blob_set_if_changed()");
+    static_assert(sizeof(allow_record_t) <= NVS_BLOB_ONE_CHUNK_MAX, "a larger record needs nvs_blob_set_if_changed()");
 
     struct session_t
     {

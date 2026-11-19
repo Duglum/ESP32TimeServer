@@ -3,6 +3,7 @@
 //
 
 #include "auth/totp_store.h"
+#include "custom/nvs_blob.h"
 
 #include <cstdio>
 #include <cstring>
@@ -34,6 +35,9 @@ namespace
         uint64_t last_step;
         uint32_t crc;
     };
+
+    // One NVS chunk: nvs_set_blob() of ESP-IDF 6.1.1 recognises an unchanged record (see custom/nvs_blob.h)
+    static_assert(sizeof(record_t) <= NVS_BLOB_ONE_CHUNK_MAX, "a larger record needs nvs_blob_set_if_changed()");
 
     // The tokens (about 2.7 kB, magic 0: free), taken by totp_store_init
     struct table_t
