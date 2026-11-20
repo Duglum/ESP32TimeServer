@@ -59,3 +59,10 @@ totp_check_t totp_store_check(const char *user, const char *typed);
 
 // The clock is set (GNSS): TOTP codes can be checked
 bool totp_store_time_ok();
+
+// The stored token of user was lost (NVS: its presence mark without a valid record, see sys/record_mark.h), found at the
+// start: the user is refused, totp_store_add() refuses a new token for it (ESP_ERR_INVALID_STATE), and its slot is not
+// given to another user. Ends only with an erase of NVS (USB) or Reset to defaults.
+bool totp_store_lost(const char *user);
+// The number of lost tokens (0: none)
+size_t totp_store_lost_count();

@@ -1738,6 +1738,24 @@ namespace
         return err;
     }
 
+    // Stored security data lost (NVS, see sys/record_mark.h): the answer of a refused login, the same for every case.
+    // Not counted by the throttling (no secret is checked).
+    constexpr char LOST_DATA_MESSAGE[] = "Stored security data of the device was lost: logins are refused. Recovery: erase NVS over the USB port (see the README)";
+
+    // Some stored security record was lost (shown without a login in /api/info)
+    bool security_data_lost()
+    {
+        return web_settings_saved_lost() || web_auth_password_lost() || web_auth_allow_list_lost() || totp_store_lost_count() > 0;
+    }
+
+    esp_err_t login_lost(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, const char *what)
+    {
+        char address[INET6_ADDRSTRLEN];
+        format_address(peer, address, sizeof(address));
+        ESP_LOGW(TAG, "Web admin: login from %s (user '%s') refused: %s was lost (NVS)", address, user, what);
+        return send_error(req, "403 Forbidden", LOST_DATA_MESSAGE);
+    }
+
     // A login that passed its first check (the password): the second factor when the settings ask for one, else the
     // session. The throttling forgets the failures of the source only when the whole login is done.
     esp_err_t login_succeeded(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius)
@@ -1748,6 +1766,9 @@ namespace
         web_settings_get_running(*running);
         const web_login_settings_t methods = running->web_login;
         delete running;
+        // Asked after the first factor: whose token was lost is not told to whoever tries a name
+        if (totp_store_lost(user))
+            return login_lost(req, peer, user, "the TOTP token of this user");
         const bool required = radius ? methods.totp_radius : methods.totp_local;
         if (!required)
             return login_open_session(req, peer, user, radius, false);
@@ -1811,8 +1832,10 @@ namespace
         {
             // No server answered: the local password of the local user (as "group radius local" of a Cisco switch);
             // the failures of the source are forgotten only when the session is opened (after a second factor)
-            const bool ok = web_auth_verify_current_password(w.peer, w.password, strlen(w.password));
-            if (ok)
+            const bool ok = !web_auth_password_lost() && web_auth_verify_current_password(w.peer, w.password, strlen(w.password));
+            if (web_auth_password_lost())
+                login_lost(w.req, w.peer, w.user, "the local password");
+            else if (ok)
                 login_succeeded(w.req, w.peer, AUTH_WEB_LOCAL_USER, false);
             else
                 login_refused(w.req, w.peer, w.user, "no RADIUS answer, wrong local password", "Wrong user name or password");
@@ -1885,10 +1908,15 @@ namespace
         const bool local_user = name_ok && strcmp(w->user, AUTH_WEB_LOCAL_USER) == 0;
         const bool password_ok = valid_type && length > 0 && length <= WEB_PASSWORD_MAX_LEN;
         esp_err_t result = ESP_OK;
-        if (password_ok && local_user && methods.local && (!radius_on || !methods.local_fallback))
+        if (web_settings_saved_lost())
+            // The defaults are in use instead of the saved login methods (a second factor, RADIUS only): no login at all
+            result = login_lost(req, peer, w->user, "the saved settings");
+        else if (password_ok && local_user && methods.local && (!radius_on || !methods.local_fallback))
         {
             // The local password decides (the failures of the source are forgotten only when the session is opened)
-            if (web_auth_verify_current_password(peer, w->password, strlen(w->password)))
+            if (web_auth_password_lost())
+                result = login_lost(req, peer, w->user, "the local password");
+            else if (web_auth_verify_current_password(peer, w->password, strlen(w->password)))
                 result = login_succeeded(req, peer, AUTH_WEB_LOCAL_USER, false);
             else
                 result = login_refused(req, peer, w->user, "wrong password", "Wrong user name or password");
@@ -1955,6 +1983,12 @@ namespace
         cJSON_Delete(root);
         if (p == nullptr)
             return send_error(req, "401 Unauthorized", "The login has expired: log in again");
+        if (web_settings_saved_lost() || totp_store_lost(p->user))
+        {
+            const esp_err_t lost_err = login_lost(req, peer, p->user, "stored security data");
+            wipe(*p);
+            return lost_err;
+        }
         bool right = false;
         if (p->enroll)
         {
@@ -2010,6 +2044,8 @@ namespace
         cJSON_Delete(root);
         if (!valid)
             return send_error(req, "400 Bad Request", "User name: 1 to 64 characters, no control characters");
+        if (totp_store_lost(name))
+            return send_error(req, "409 Conflict", "The stored TOTP token of this user was lost: a new one needs an erase of NVS over the USB port");
         if (!totp_store_has(name) && totp_store_count() >= TOTP_TOKENS_MAX)
             return send_error(req, "409 Conflict", "All TOTP tokens are in use: delete one first");
         const uint32_t session = web_auth_session_id(token);
@@ -2666,6 +2702,12 @@ namespace
                     return ESP_FAIL;
                 }
             }
+            if (web_settings_saved_lost() || web_auth_password_lost())
+            {
+                // Logins are refused (the saved login methods or the password were lost): a scripted upload too
+                send_error(req, "403 Forbidden", LOST_DATA_MESSAGE);
+                return ESP_FAIL;
+            }
             const uint32_t wait_s = web_auth_login_wait_seconds(peer);
             if (wait_s > 0)
             {
@@ -3194,6 +3236,9 @@ namespace
             web_settings_get_running(*running);
         cJSON_AddBoolToObject(root, "login_user", running != nullptr && running->web_login.radius);
         delete running;
+        // Only in that state (the answer is as before otherwise): stored security data was lost, logins are refused
+        if (security_data_lost())
+            cJSON_AddBoolToObject(root, "security_data_lost", true);
         return send_json(req, "200 OK", root);
     }
 

@@ -7,7 +7,9 @@
 #include "web_settings.h"
 #include "auth/totp_store.h"
 #include "custom/nvs_blob.h"
+#include "sys/record_mark.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstddef>
 #include <cstdio>
@@ -166,6 +168,10 @@ namespace
     web_settings_t s_running{};
     bool s_boot_oneshot = false;
     bool s_boot_network_confirm = false;
+    // The saved set was lost (its mark without the set, sys/record_mark.h), found at the start: the defaults are in
+    // use with the time service closed (web_settings_load_boot), nothing is saved, no login is accepted. Until NVS is
+    // erased over USB. Read by the NTP task for every request.
+    std::atomic<bool> s_saved_lost{false};
     SemaphoreHandle_t s_mutex = nullptr;
 
     template <size_t N>
@@ -455,6 +461,13 @@ namespace
             nvs_close(handle);
             if (err == ESP_OK && !written)
                 ESP_LOGI(TAG, "Web settings '%s': the same as stored in NVS, nothing written", key);
+            // The saved set has a presence mark, set after the set (sys/record_mark.h); the one-shot set has none
+            if (err == ESP_OK && strcmp(key, NVS_KEY_SAVED) == 0)
+            {
+                const esp_err_t mark_err = record_mark_set(NVS_NAMESPACE, NVS_KEY_SAVED, 1);
+                if (mark_err != ESP_OK)
+                    ESP_LOGW(TAG, "The mark of the saved web settings could not be stored (%s)", esp_err_to_name(mark_err));
+            }
         }
         memset(blob, 0, sizeof(settings_blob_t)); // contains secrets
         free(blob);
@@ -1023,6 +1036,12 @@ void web_settings_load_boot()
 
     nvs_handle_t handle = 0;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    // Lost = the mark without the set (sys/record_mark.h). A set that is there but not usable by this firmware is no
+    // loss: as before, the defaults are used and it is not saved over.
+    size_t saved_size = 0;
+    const bool saved_found = err == ESP_OK && nvs_get_blob(handle, NVS_KEY_SAVED, nullptr, &saved_size) == ESP_OK;
+    if (record_mark_check(NVS_NAMESPACE, NVS_KEY_SAVED, saved_found, 1, nullptr) == record_mark_state_t::lost)
+        s_saved_lost = true;
     if (err == ESP_OK)
     {
         static settings_blob_t blob; // static: about 5.5 kB, the caller (app_main) has a small stack
@@ -1080,8 +1099,31 @@ void web_settings_load_boot()
     else
         ESP_LOGW(TAG, "NVS namespace %s unavailable (%s), the defaults are used", NVS_NAMESPACE, esp_err_to_name(err));
 
+    if (s_saved_lost)
+    {
+        // The owner's settings (NTP keys and required authentication, PTP, MQTT, logins) are gone: the defaults, no
+        // one-shot set, and no time service that a client could take for the owner's: NTP answers as unsynchronised
+        // (main.cpp), PTP, MQTT and OTE are off. Nothing is saved (web_settings_save) and no login is accepted.
+        web_settings_defaults(s_boot);
+        s_boot.ptp_l2_enabled = false;
+        s_boot.ptp_udp4_enabled = false;
+        s_boot.ptp_udp6_enabled = false;
+        s_boot.mqtt_enabled = false;
+        s_boot.ote_enabled = false;
+        s_boot_oneshot = false;
+        s_boot_network_confirm = false;
+        source = "defaults (the saved settings were lost)";
+        ESP_LOGE(TAG, "The saved settings were lost (NVS): the defaults are used with NTP answered as unsynchronised "
+                      "(stratum 16) and PTP, MQTT and OTE off; nothing is saved, no login is accepted. "
+                      "Erase NVS over the USB port to start again with the defaults (README, Lost stored security data)");
+    }
     s_running = s_boot;
     ESP_LOGI(TAG, "Settings: %s", source);
+}
+
+bool web_settings_saved_lost()
+{
+    return s_saved_lost.load(std::memory_order_relaxed);
 }
 
 const web_settings_t &web_settings_boot()
@@ -1148,6 +1190,8 @@ bool web_settings_get_saved(web_settings_t &out)
 
 esp_err_t web_settings_save(const web_settings_t &in)
 {
+    if (web_settings_saved_lost())
+        return ESP_ERR_INVALID_STATE;
     return write_blob(NVS_KEY_SAVED, in, 0);
 }
 
@@ -1158,7 +1202,11 @@ esp_err_t web_settings_save_oneshot(const web_settings_t &in, bool network_confi
 
 esp_err_t web_settings_factory_reset()
 {
-    esp_err_t result = ESP_OK;
+    // The presence marks before the records (sys/record_mark.h): a reset that stops halfway leaves records without
+    // marks, never a mark without its record. Without the marks erased, nothing is erased.
+    esp_err_t result = record_mark_clear_all();
+    if (result != ESP_OK)
+        return result;
     for (const char *ns : {NVS_NAMESPACE, AUTH_NVS_NAMESPACE, TOTP_NVS_NAMESPACE})
     {
         nvs_handle_t handle = 0;

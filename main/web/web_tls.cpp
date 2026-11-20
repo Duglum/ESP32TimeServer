@@ -754,13 +754,21 @@ namespace
             memset(buffer, 0, 2 * MAX_DER);
             free(buffer);
 
-            esp_err_t err = new_key ? nvs_set_blob(handle, NVS_KEY_KEY, s_self_key, s_self_key_length) : ESP_OK;
-            if (err == ESP_OK)
-                err = nvs_set_blob(handle, NVS_KEY_CERT, s_self_cert, s_self_cert_length);
-            if (err == ESP_OK)
-                err = nvs_set_str(handle, NVS_KEY_NAME, fqdn);
-            if (err == ESP_OK)
-                err = nvs_commit(handle);
+            // With the saved settings lost (sys/record_mark.h) the FQDN is the default one: the identity is used, not
+            // stored over the one that is left
+            esp_err_t err = ESP_OK;
+            if (web_settings_saved_lost())
+                ESP_LOGW(TAG, "The saved web settings were lost: the certificate for %s is not stored", fqdn);
+            else
+            {
+                err = new_key ? nvs_set_blob(handle, NVS_KEY_KEY, s_self_key, s_self_key_length) : ESP_OK;
+                if (err == ESP_OK)
+                    err = nvs_set_blob(handle, NVS_KEY_CERT, s_self_cert, s_self_cert_length);
+                if (err == ESP_OK)
+                    err = nvs_set_str(handle, NVS_KEY_NAME, fqdn);
+                if (err == ESP_OK)
+                    err = nvs_commit(handle);
+            }
             if (err != ESP_OK)
                 ESP_LOGW(TAG, "TLS identity could not be stored in NVS (%s): a new one is created at the next start", esp_err_to_name(err));
         }

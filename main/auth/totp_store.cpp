@@ -4,6 +4,7 @@
 
 #include "auth/totp_store.h"
 #include "custom/nvs_blob.h"
+#include "sys/record_mark.h"
 
 #include <cstdio>
 #include <cstring>
@@ -45,6 +46,11 @@ namespace
         record_t token[TOTP_TOKENS_MAX];
     };
     table_t *s_table = nullptr;
+    // Slots whose stored token was lost (its mark without a valid record, sys/record_mark.h), found at the start: the
+    // mark holds record_mark_text_hash() of the user. That user is refused and gets no new token; the slot is not
+    // given to another user. Until NVS is erased over USB.
+    bool s_lost[TOTP_TOKENS_MAX] = {};
+    uint64_t s_lost_user[TOTP_TOKENS_MAX] = {};
     size_t s_nvs_reserve_entries = 0;
 
     // NVS entries of 32 bytes for a blob of n bytes: the data, a header per chunk (a blob may span pages) and its index
@@ -98,6 +104,15 @@ namespace
         return nullptr;
     }
 
+    bool lost(const char *user)
+    {
+        const uint64_t hash = record_mark_text_hash(user);
+        for (size_t i = 0; i < TOTP_TOKENS_MAX; ++i)
+            if (s_lost[i] && s_lost_user[i] == hash)
+                return true;
+        return false;
+    }
+
     esp_err_t save(size_t i)
     {
         record_t &r = s_table->token[i];
@@ -112,17 +127,28 @@ namespace
         if (err == ESP_OK)
             err = nvs_commit(handle);
         nvs_close(handle);
+        // The mark after the record (sys/record_mark.h); written only when it is missing or names another user
+        if (err == ESP_OK)
+        {
+            const esp_err_t mark_err = record_mark_set(TOTP_NVS_NAMESPACE, key, record_mark_text_hash(r.user));
+            if (mark_err != ESP_OK)
+                ESP_LOGW(TAG, "TOTP: the mark of token %u could not be stored (%s)", static_cast<unsigned>(i), esp_err_to_name(mark_err));
+        }
         return err;
     }
 
     esp_err_t erase(size_t i)
     {
-        nvs_handle_t handle = 0;
-        esp_err_t err = nvs_open(TOTP_NVS_NAMESPACE, NVS_READWRITE, &handle);
-        if (err != ESP_OK)
-            return err;
         char key[4];
         key_of(i, key);
+        // The mark before the record (sys/record_mark.h): without it the record stays and is loaded at the next start
+        esp_err_t err = record_mark_clear(TOTP_NVS_NAMESPACE, key);
+        if (err != ESP_OK)
+            return err;
+        nvs_handle_t handle = 0;
+        err = nvs_open(TOTP_NVS_NAMESPACE, NVS_READWRITE, &handle);
+        if (err != ESP_OK)
+            return err;
         err = nvs_erase_key(handle, key);
         if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND)
             err = nvs_commit(handle);
@@ -152,26 +178,56 @@ void totp_store_init(size_t nvs_reserve_bytes)
     esp_fill_random(s_dummy_secret, sizeof(s_dummy_secret));
     esp_fill_random(s_dummy_salt, sizeof(s_dummy_salt));
     nvs_handle_t handle = 0;
-    if (nvs_open(TOTP_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
-        return;
+    const bool opened = nvs_open(TOTP_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK;
     size_t loaded = 0;
+    size_t lost_count = 0;
     for (size_t i = 0; i < TOTP_TOKENS_MAX; ++i)
     {
         char key[4];
         key_of(i, key);
         record_t r{};
         size_t length = sizeof(r);
-        if (nvs_get_blob(handle, key, &r, &length) == ESP_OK && length == sizeof(r) && r.magic == MAGIC && r.crc == crc_of(r) &&
-            memchr(r.user, '\0', sizeof(r.user)) != nullptr && r.user[0] != '\0')
+        const bool valid = opened && nvs_get_blob(handle, key, &r, &length) == ESP_OK && length == sizeof(r) && r.magic == MAGIC &&
+                           r.crc == crc_of(r) && memchr(r.user, '\0', sizeof(r.user)) != nullptr && r.user[0] != '\0';
+        if (valid)
         {
             s_table->token[i] = r;
             ++loaded;
         }
+        // Every slot, also without the namespace: a mark can be all that is left of a token
+        uint64_t user = 0;
+        if (record_mark_check(TOTP_NVS_NAMESPACE, key, valid, valid ? record_mark_text_hash(r.user) : 0, &user) == record_mark_state_t::lost)
+        {
+            s_lost[i] = true;
+            s_lost_user[i] = user;
+            ++lost_count;
+        }
         memset(&r, 0, sizeof(r));
     }
-    nvs_close(handle);
+    if (opened)
+        nvs_close(handle);
     if (loaded > 0)
         ESP_LOGI(TAG, "TOTP: %u tokens", static_cast<unsigned>(loaded));
+    if (lost_count > 0)
+        ESP_LOGE(TAG, "TOTP: %u stored tokens were lost (NVS): their users are refused and cannot set up a new token. "
+                      "Erase NVS over the USB port to start again with the defaults (README, Lost stored security data)",
+                 static_cast<unsigned>(lost_count));
+}
+
+bool totp_store_lost(const char *user)
+{
+    if (s_lock == nullptr || user == nullptr)
+        return false;
+    lock_t lock;
+    return lost(user);
+}
+
+size_t totp_store_lost_count()
+{
+    size_t n = 0;
+    for (const bool l : s_lost)
+        n += l ? 1 : 0;
+    return n;
 }
 
 bool totp_store_has(const char *user)
@@ -223,12 +279,14 @@ esp_err_t totp_store_add(const char *user, const uint8_t secret[TOTP_SECRET_SIZE
     if (user == nullptr || user[0] == '\0' || strlen(user) >= TOTP_USER_SIZE)
         return ESP_ERR_INVALID_ARG;
     lock_t lock;
+    if (lost(user))
+        return ESP_ERR_INVALID_STATE;
     record_t *slot = find(user);
     if (slot == nullptr)
-        for (record_t &r : s_table->token)
-            if (r.magic != MAGIC)
+        for (size_t i = 0; i < TOTP_TOKENS_MAX; ++i)
+            if (s_table->token[i].magic != MAGIC && !s_lost[i]) // the slot of a lost token stays its own
             {
-                slot = &r;
+                slot = &s_table->token[i];
                 break;
             }
     if (slot == nullptr)

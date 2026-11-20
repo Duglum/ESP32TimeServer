@@ -787,6 +787,8 @@
     'Wrong code: log in again': 'Falscher Code: Melden Sie sich neu an',
     'Your own token cannot be deleted while the second factor is required for your login': 'Ihr eigener Token lässt sich nicht löschen, solange der zweite Faktor für Ihren Login Pflicht ist',
     'Wrong user name or password': 'Falscher Benutzername oder falsches Passwort',
+    'Stored security data of the device was lost: logins are refused. Recovery: erase NVS over the USB port (see the README)': 'Gespeicherte Sicherheitsdaten des Geräts sind verloren gegangen: Logins werden abgelehnt. Wiederherstellung: NVS über den USB-Anschluss löschen (siehe README)',
+    'The stored TOTP token of this user was lost: a new one needs an erase of NVS over the USB port': 'Der gespeicherte TOTP-Token dieses Benutzers ist verloren gegangen: Ein neuer braucht ein Löschen des NVS über den USB-Anschluss',
     'No RADIUS server answered': 'Kein RADIUS-Server hat geantwortet',
     'A login from your address is still being checked, or too many at once: try again': 'Ein Login von Ihrer Adresse wird noch geprüft, oder zu viele gleichzeitig: bitte noch einmal versuchen',
     'The TOTP token could not be stored': 'Der TOTP-Token konnte nicht gespeichert werden',

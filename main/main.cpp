@@ -3273,6 +3273,11 @@ struct ntp_reply_status_t
 // "unsynchronised" (stratum 16, PTP not served) while the writer was preempted.
 static ntp_reply_status_t get_ntp_reply_status()
 {
+    // The saved settings were lost (web_settings_saved_lost(), sys/record_mark.h): the defaults are in use instead of
+    // the owner's NTP keys and required authentication. The answer of the unsynchronised server (the last return
+    // below: leap indicator 3, stratum 16), so that clients drop this server (owner, 2026-11-20).
+    if (web_settings_saved_lost())
+        return {3, 16, "INIT", false, false, false};
     for (;;)
     {
         uint32_t sequence_before = s_ntp_sync_state_sequence.load(std::memory_order_acquire);

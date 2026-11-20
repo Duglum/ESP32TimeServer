@@ -9,8 +9,8 @@
 // firmware can write (the namespace entries, every number, string and blob index, and every chunk index NVS can give a
 // data chunk of a blob: 0 to 126 of version 0 and 0x80 to 0xFE of version 1) has a hash of its own.
 //
-// WebTherm's test walks every order (5 or 6 namespaces). This firmware has 8, which makes 40320 orders of about 4900
-// items: too slow under the sanitizers. The test here is the same check without the walk: two items can be on one NVS
+// WebTherm's test walks every order (5 or 6 namespaces). This firmware has 9 with the marks, which makes 362880 orders
+// of about 4900 items: too slow under the sanitizers. The test here is the same check without the walk: two items can be on one NVS
 // together exactly when they are namespace entries, or items of one namespace at the same index, or items of two
 // namespaces at two different indexes (an order exists that gives them these indexes). So every namespace's items are
 // hashed at every index 1 ... N and a pair with equal hash and such a placement fails the test. Item counts of one
@@ -18,11 +18,14 @@
 //
 // The key table below is checked against the firmware sources: every `constexpr char <name with NVS>[] = "..."` in
 // main/ (the convention of every NVS name of the firmware) must be in the table, and every name of the table must be
-// in the sources. A new key or namespace thus fails this test until it is added here.
+// in the sources; every record_mark_set/check/clear() call of main/ must name a record of the marked list, which gives
+// the keys of the mark namespace (sys/record_mark.h). A new key, namespace or mark thus fails this test until it is
+// added here.
 #define TEST_NAME "nvs_hash_test"
 #include "check.h"
 
 #include "auth/totp_store.h"
+#include "sys/record_mark.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -79,6 +82,14 @@ namespace
         std::vector<key_t> keys;
     };
 
+    // The records with a presence mark (sys/record_mark.h): namespace and key ("t*": the token keys)
+    const std::vector<std::pair<std::string, std::string>> MARKED = {
+        {"webauth", "pw"},    // web_auth.cpp
+        {"webauth", "allow"}, // web_auth.cpp
+        {"webcfg", "saved"},  // web_settings.cpp
+        {"totp", "t*"},       // totp_store.cpp
+    };
+
     // Every NVS item of the firmware, by namespace. The source of each line is named.
     std::vector<namespace_t> firmware_items()
     {
@@ -97,13 +108,24 @@ namespace
         // The tokens "t0" ... "t8" (totp_store.cpp, key_of(): "t%u")
         for (size_t i = 0; i < TOTP_TOKENS_MAX; ++i)
             table.back().keys.push_back({"t" + std::to_string(i), kind_t::blob});
+        // The marks: u64 items "<namespace>/<key>" (record_mark_key)
+        namespace_t marks{RECORD_MARK_NVS_NAMESPACE, {}};
+        for (const auto &[ns, key] : MARKED)
+            for (size_t i = 0; i < (key == "t*" ? TOTP_TOKENS_MAX : 1); ++i)
+            {
+                char mark[RECORD_MARK_KEY_SIZE];
+                const std::string record_key = key == "t*" ? "t" + std::to_string(i) : key;
+                CHECK(record_mark_key(ns.c_str(), record_key.c_str(), mark));
+                marks.keys.push_back({mark, kind_t::value});
+            }
+        table.push_back(marks);
         return table;
     }
 
     // The names made at run time, not as constants: checked separately
     bool generated(const std::string &key)
     {
-        return std::regex_match(key, std::regex("t[0-9]+"));
+        return std::regex_match(key, std::regex("t[0-9]+")) || key.find('/') != std::string::npos;
     }
 
     std::string read_file(const std::filesystem::path &path)
@@ -140,6 +162,10 @@ namespace
         CHECK(std::filesystem::is_directory(dir));
         const std::regex constant(R"(constexpr\s+char\s+(\w*NVS\w*)\s*\[\]\s*=\s*"([^"]*)\")");
         std::set<std::string> source_namespaces, source_keys;
+        std::map<std::string, std::map<std::string, std::string>> file_constants; // file -> name -> value
+        std::map<std::string, std::string> constants;                             // name -> value (all files)
+        std::vector<std::pair<std::string, std::string>> mark_calls;               // file, the call's text
+        const std::regex mark_call(R"(record_mark_(?:set|check|clear)\s*\(\s*(\w+)\s*,\s*(\w+))");
         bool totp_pattern = false;
         size_t files = 0;
         for (const auto &entry : std::filesystem::recursive_directory_iterator(dir))
@@ -156,7 +182,12 @@ namespace
                 const std::string value = (*m)[2].str();
                 const bool is_namespace = name.size() >= 9 && name.compare(name.size() - 9, 9, "NAMESPACE") == 0;
                 (is_namespace ? source_namespaces : source_keys).insert(value);
+                file_constants[entry.path().string()][name] = value;
+                constants[name] = value;
             }
+            for (std::sregex_iterator m(text.begin(), text.end(), mark_call), end; m != end; ++m)
+                if (entry.path().filename() != "record_mark.cpp") // its own definitions
+                    mark_calls.push_back({entry.path().string(), (*m)[1].str() + " " + (*m)[2].str()});
             if (entry.path().filename() == "totp_store.cpp")
                 totp_pattern = text.find("\"t%u\"") != std::string::npos;
         }
@@ -187,6 +218,30 @@ namespace
             CHECK(source_namespaces.count(n) == 1);
         for (const std::string &k : table_keys)
             CHECK(source_keys.count(k) == 1);
+
+        // Every record_mark_*() call names a marked record: (namespace constant, key constant), or the token key
+        // variable "key" of totp_store.cpp
+        std::set<std::pair<std::string, std::string>> called;
+        for (const auto &[file, call] : mark_calls)
+        {
+            const std::string ns_name = call.substr(0, call.find(' '));
+            const std::string key_name = call.substr(call.find(' ') + 1);
+            const auto &local = file_constants[file];
+            auto value = [&](const std::string &name) {
+                if (local.count(name))
+                    return local.at(name);
+                return constants.count(name) ? constants.at(name) : std::string();
+            };
+            const std::string ns = value(ns_name);
+            const bool token = key_name == "key" && file.find("totp_store.cpp") != std::string::npos;
+            const std::string key = token ? std::string("t*") : value(key_name);
+            const bool known = std::find(MARKED.begin(), MARKED.end(), std::make_pair(ns, key)) != MARKED.end();
+            if (!known)
+                fprintf(stderr, "record_mark call (%s) in %s: not in the marked list of nvs_hash_test.cpp\n", call.c_str(), file.c_str());
+            CHECK(known);
+            called.insert({ns, key});
+        }
+        CHECK(called.size() == MARKED.size()); // and every marked record is used
     }
 
     struct placed_t

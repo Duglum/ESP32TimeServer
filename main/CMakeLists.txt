@@ -18,6 +18,8 @@ set(MAIN_SOURCES
         "custom/ptp_auth.cpp"
         "custom/ntp_cache.c"
         "custom/nvs_blob.cpp"
+        "sys/record_mark.cpp"
+        "sys/record_mark_core.cpp"
         "custom/time_diag.cpp"
         "net/emac_halt.cpp"
         "net/ip_text.cpp"

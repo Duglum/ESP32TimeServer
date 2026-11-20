@@ -37,6 +37,10 @@ void web_auth_init();
 
 // true while no password was set on the page: the default "password" is in use
 bool web_auth_default_password_active();
+// The stored password or allow-list was lost (NVS; its mark without a valid record, sys/record_mark.h), found at the
+// start: no local password is accepted, or no source address is allowed. Until NVS is erased over USB.
+bool web_auth_password_lost();
+bool web_auth_allow_list_lost();
 
 // ---- Login throttling (per source address and global) ----
 // Returns 0 if a login attempt from this address may be checked now, otherwise the seconds to wait

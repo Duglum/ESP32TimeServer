@@ -300,11 +300,16 @@ void web_settings_set_running(const web_settings_t &in);
 
 // Settings saved in NVS. Returns false if nothing is saved (or the saved data is unusable).
 bool web_settings_get_saved(web_settings_t &out);
+// The saved set was lost (NVS: its presence mark without the set, see sys/record_mark.h), found at the start: the
+// defaults are in use with PTP, MQTT and OTE off and NTP answered as unsynchronised, web_settings_save() refuses
+// (ESP_ERR_INVALID_STATE), and the web page accepts no login. Until NVS is erased over USB.
+bool web_settings_saved_lost();
 esp_err_t web_settings_save(const web_settings_t &in);
 esp_err_t web_settings_save_oneshot(const web_settings_t &in, bool network_confirm_required);
 
 // Erases the saved settings, the one-shot set, the web admin password and allow-list and the TOTP tokens (back to the
 // defaults). The TLS identity and the calibration namespaces are kept.
+// (The presence marks of the records are erased first; nothing is erased when they cannot be.)
 esp_err_t web_settings_factory_reset();
 // Bytes of one stored settings set in NVS (the saved and the one-shot set have this size)
 size_t web_settings_stored_size();

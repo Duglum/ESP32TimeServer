@@ -83,10 +83,14 @@ $targets = [ordered]@{
     nvs_blob_test  = @("$here\nvs_blob_test.cpp", "$main\custom\nvs_blob.cpp")
     # No two NVS items of the firmware with the same 24-bit hash (ESP-IDF 6.1.1 Page::mLoadEntryTable(), corrected by the
     # build); reads the NVS names in main\ to check its key table
-    nvs_hash_test  = @("$here\nvs_hash_test.cpp")
+    nvs_hash_test  = @("$here\nvs_hash_test.cpp", "$main\sys\record_mark_core.cpp")
+    # The presence marks of the security records (from ESP32-WebTherm) and the write order against a fake NVS that
+    # stops at any write; the logging of record_mark.cpp goes to stubs\host_stubs.c
+    record_mark_test = @("$here\record_mark_test.cpp", "$main\sys\record_mark_core.cpp", "$main\sys\record_mark.cpp",
+        "$here\stubs\host_stubs.c")
 }
 # Test programs without a fuzz target
-$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test')
+$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test', 'record_mark_test')
 # Test programs with TF-PSA-Crypto
 $with_psa = @('radius_test', 'totp_test', 'auth_config_test')
 

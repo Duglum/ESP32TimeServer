@@ -7,6 +7,7 @@
 #include "web_auth.h"
 #include "web_settings.h"
 #include "custom/nvs_blob.h"
+#include "sys/record_mark.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -95,6 +96,10 @@ namespace
 
     password_record_t s_password{};
     bool s_password_stored = false;
+    // A stored record that was lost (its mark without a valid record, see sys/record_mark.h): no local password is
+    // accepted, no source is allowed. Set at the start only; ends with an erase of NVS over USB.
+    bool s_password_lost = false;
+    bool s_allow_lost = false;
     session_t s_sessions[MAX_SESSIONS]{};
     throttle_entry_t s_throttle[THROTTLE_ENTRIES]{};
     web_allow_entry_t s_allow[WEB_ALLOW_LIST_MAX]{};
@@ -245,7 +250,7 @@ namespace
 
     bool check_password_hash(const char *password, size_t length)
     {
-        if (length == 0 || length > WEB_PASSWORD_MAX_LEN)
+        if (length == 0 || length > WEB_PASSWORD_MAX_LEN || s_password_lost)
             return false;
         uint8_t hash[HASH_SIZE];
         const bool computed = pbkdf2_sha256(password, length, s_password.salt, SALT_SIZE, s_password.iterations, hash);
@@ -357,8 +362,15 @@ void web_auth_init()
         }
         nvs_close(handle);
     }
+    s_password_lost = record_mark_check(NVS_NAMESPACE, NVS_KEY_PASSWORD, s_password_stored, 1, nullptr) == record_mark_state_t::lost;
 
-    if (!s_password_stored)
+    if (s_password_lost)
+    {
+        ESP_LOGE(TAG, "Web admin: the stored password was lost (NVS): no login with the local password, no scripted upload. "
+                      "Erase NVS over the USB port to start again with the defaults (README, Lost stored security data)");
+        esp_fill_random(s_password.hash, HASH_SIZE); // nothing matches, also without the check of s_password_lost
+    }
+    else if (!s_password_stored)
     {
         // Default password: hashed with a random salt at every boot, so it is checked exactly like a stored one
         s_password.magic = PASSWORD_MAGIC;
@@ -371,7 +383,12 @@ void web_auth_init()
         }
     }
 
-    if (load_allow_list() && s_allow_count > 0)
+    const bool allow_loaded = load_allow_list();
+    s_allow_lost = record_mark_check(NVS_NAMESPACE, NVS_KEY_ALLOW, allow_loaded, 1, nullptr) == record_mark_state_t::lost;
+    if (s_allow_lost)
+        ESP_LOGE(TAG, "Web admin: the stored allow-list was lost (NVS): no source address is allowed (web page). "
+                      "Erase NVS over the USB port to start again with the defaults (README, Lost stored security data)");
+    else if (allow_loaded && s_allow_count > 0)
         ESP_LOGI(TAG, "Web admin: source allow-list with %u entries", static_cast<unsigned>(s_allow_count));
 
     if (web_auth_default_password_active())
@@ -380,7 +397,17 @@ void web_auth_init()
 
 bool web_auth_default_password_active()
 {
-    return !s_password_stored;
+    return !s_password_stored && !s_password_lost;
+}
+
+bool web_auth_password_lost()
+{
+    return s_password_lost;
+}
+
+bool web_auth_allow_list_lost()
+{
+    return s_allow_lost;
 }
 
 uint32_t web_auth_login_wait_seconds(const sockaddr_storage &source)
@@ -441,6 +468,10 @@ esp_err_t web_auth_set_password(const char *password, size_t length, const char 
     }
     if (err != ESP_OK)
         return err;
+    // The mark after the record (sys/record_mark.h). Without it the record is still used; the next start sets it.
+    const esp_err_t mark_err = record_mark_set(NVS_NAMESPACE, NVS_KEY_PASSWORD, 1);
+    if (mark_err != ESP_OK)
+        ESP_LOGW(TAG, "Web admin: the mark of the password could not be stored (%s)", esp_err_to_name(mark_err));
 
     s_password = record;
     s_password_stored = true;
@@ -554,6 +585,8 @@ size_t web_auth_allow_list(web_allow_entry_t *entries, size_t capacity)
 
 bool web_auth_source_allowed(const sockaddr_storage &source)
 {
+    if (s_allow_lost)
+        return false;
     if (s_allow_count == 0)
         return true;
     uint8_t mapped[16];
@@ -568,6 +601,8 @@ esp_err_t web_auth_set_allow_list(const web_allow_entry_t *entries, size_t count
 {
     if (count > WEB_ALLOW_LIST_MAX)
         return ESP_ERR_INVALID_ARG;
+    if (s_allow_lost)
+        return ESP_ERR_INVALID_STATE; // no client reaches the page then; ends with an erase of NVS only
     if (count > 0)
     {
         uint8_t mapped[16];
@@ -596,6 +631,9 @@ esp_err_t web_auth_set_allow_list(const web_allow_entry_t *entries, size_t count
     }
     if (err != ESP_OK)
         return err;
+    const esp_err_t mark_err = record_mark_set(NVS_NAMESPACE, NVS_KEY_ALLOW, 1); // after the record, see sys/record_mark.h
+    if (mark_err != ESP_OK)
+        ESP_LOGW(TAG, "Web admin: the mark of the allow-list could not be stored (%s)", esp_err_to_name(mark_err));
     memcpy(s_allow, record.entries, sizeof(s_allow));
     s_allow_count = count;
     ESP_LOGI(TAG, "Web admin: allow-list changed (%u entries)", static_cast<unsigned>(count));
