@@ -23,3 +23,13 @@ subject to the following conditions:
   liability, whether in an action of contract, tort or otherwise, arising from,
   out of or in connection with the Software or the use or other dealings in the
   Software.
+
+
+---------------------------------------------------------------------------
+
+ESP-IDF (Espressif IoT Development Framework), https://github.com/espressif/esp-idf, Apache License 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). The firmware is built with ESP-IDF and contains its components; no
+ESP-IDF file is in this repository. One component is built in a changed form: nvs_flash, from a copy of ESP-IDF's
+components/nvs_flash that the build makes in its build folder (tools/cmake/nvs_flash_fix.cmake), in which the function
+Page::mLoadEntryTable() of src/nvs_page.cpp is changed in two places (the script names both); every other file of the
+copy is ESP-IDF's, unchanged.

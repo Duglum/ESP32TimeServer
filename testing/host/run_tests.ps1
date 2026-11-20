@@ -81,9 +81,12 @@ $targets = [ordered]@{
     web_tls_pair_test = @("$here\web_tls_pair_test.cpp", "$main\web\web_tls_pair.cpp")
     # An NVS blob written only when its bytes changed (ESP-IDF 6.1.1 compares a blob of several chunks wrongly)
     nvs_blob_test  = @("$here\nvs_blob_test.cpp", "$main\custom\nvs_blob.cpp")
+    # No two NVS items of the firmware with the same 24-bit hash (ESP-IDF 6.1.1 Page::mLoadEntryTable(), corrected by the
+    # build); reads the NVS names in main\ to check its key table
+    nvs_hash_test  = @("$here\nvs_hash_test.cpp")
 }
 # Test programs without a fuzz target
-$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test')
+$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test')
 # Test programs with TF-PSA-Crypto
 $with_psa = @('radius_test', 'totp_test', 'auth_config_test')
 

@@ -7,6 +7,10 @@ if(DEFINED IDF_TARGET AND NOT IDF_TARGET STREQUAL "" AND
     message(FATAL_ERROR "ESP32TimeServer supports only the esp32p4 and esp32s31 targets")
 endif()
 
+# ESP-IDF's nvs_flash with Page::mLoadEntryTable() corrected (a stored blob or item is no longer erased at a start),
+# built from a copy in the build folder: see the file's header. Before project(): it adds the copy to
+# EXTRA_COMPONENT_DIRS.
+include(${CMAKE_CURRENT_LIST_DIR}/tools/cmake/nvs_flash_fix.cmake)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # Each build folder resolves its own component graph (the LCD components depend on the target), so a P4 and an S31
 # build do not overwrite each other's lock file. A build folder without a lock starts from the lock of the project
