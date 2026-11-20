@@ -19,6 +19,7 @@ set(MAIN_SOURCES
         "custom/ntp_cache.c"
         "custom/nvs_blob.cpp"
         "custom/time_diag.cpp"
+        "net/emac_halt.cpp"
         "net/ip_text.cpp"
         "third_party/qrcodegen/qrcodegen.c"
         "web/web_auth.cpp"
@@ -81,6 +82,10 @@ idf_component_register(
     EMBED_FILES
         "web/www/favicon.ico"
 )
+
+# The EMAC is stopped before every CPU reset and at the start (net/emac_halt.cpp): ESP-IDF has no hook at either
+# point. A renamed function makes the link fail (__real_<name> undefined).
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_restart_noos" "-Wl,--wrap=cache_hal_init")
 
 # qrcodegen (THIRD_PARTY_NOTICES) is taken unchanged: its warnings are not errors
 set_source_files_properties("third_party/qrcodegen/qrcodegen.c" PROPERTIES COMPILE_OPTIONS "-Wno-error")

@@ -74,6 +74,10 @@ esptool --chip esp32p4 -p COMx write-flash 0x8000 build_v3_1\partition_table\par
 
 The device then starts with its settings, password, certificates and tokens (the same fingerprints as before). The old region `0x9000` to `0xEFFF` is no longer used but still holds the password hash and the private keys of the web certificates: once the device works with the new table, erase it with `esptool --chip esp32p4 -p COMx erase-region 0x9000 0x6000` and delete `nvs_old.bin`. Tried on an ESP32-P4 (chip v3.2), not on the ESP32-S31.
 
+## Restarts and the Ethernet MAC
+
+A restart by the firmware (from the website, after an update, after a crash or a watchdog) is a CPU reset, which in ESP-IDF 6.1 leaves the Ethernet MAC receiving: its DMA went on storing frames into the memory of the firmware before until the new firmware created its Ethernet driver, about 0.8 s after the reset, and after an update to a firmware with more variables that memory can hold some of them or the first blocks of its heap (measured on the test board: the DMA was still running at every such start, and after an update to a firmware with 64 kB more variables it wrote a received frame into them in 8 of 8 starts). The firmware therefore stops and resets the MAC before each of its restarts and once more at its start, directly after its variables are cleared (`main/net/emac_halt.cpp`). An update from a firmware without this (before 2026-11-20) relies on the stop at the start alone: a frame that arrives in the 0.7 ms in which the new firmware clears its variables can still land there.
+
 ## Disclaimer
 
 **99.9% of this fork is AI slop!**  

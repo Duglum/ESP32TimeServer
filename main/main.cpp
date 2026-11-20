@@ -89,6 +89,7 @@
 #include "custom/ntp_auth.h"
 #include "custom/ntp_cache.h"
 #include "custom/time_diag.h"
+#include "net/emac_halt.h"
 
 extern "C"
 {
@@ -9878,6 +9879,21 @@ static bool start_ethernet_driver()
         ESP_LOGE(TAG, "Ethernet setup: %s failed (%s)", what, esp_err_to_name(result));
         return false;
     };
+
+    // The EMAC is stopped at the start (net/emac_halt.cpp) before the variables are used; here that is reported, and it
+    // is stopped now if that check did not run
+    switch (emac_halt_start_state())
+    {
+    case emac_start_state_t::not_checked:
+        emac_halt_now();
+        ESP_LOGE(TAG, "The EMAC was not checked at the start (ESP-IDF no longer calls cache_hal_init()): stopped only now");
+        break;
+    case emac_start_state_t::stopped:
+        ESP_LOGW(TAG, "The EMAC was still running after the reset (the firmware before did not stop it): stopped at the start");
+        break;
+    case emac_start_state_t::idle:
+        break;
+    }
 
     esp_err_t result = esp_netif_init();
     if (result != ESP_OK)
