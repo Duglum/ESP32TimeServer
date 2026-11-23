@@ -7,6 +7,7 @@
 #include "web_settings.h"
 #include "auth/totp_store.h"
 #include "custom/nvs_blob.h"
+#include "sys/nvs_state.h"
 #include "sys/record_mark.h"
 
 #include <atomic>
@@ -1035,7 +1036,9 @@ void web_settings_load_boot()
     const char *source = "defaults";
 
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    // NVS that cannot be used at this start (sys/nvs_state.h) is not opened: its state was logged by nvs_state_init()
+    const bool nvs = nvs_state_usable();
+    esp_err_t err = nvs ? nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) : nvs_state_error();
     // Lost = the mark without the set (sys/record_mark.h). A set that is there but not usable by this firmware is no
     // loss: as before, the defaults are used and it is not saved over.
     size_t saved_size = 0;
@@ -1096,14 +1099,15 @@ void web_settings_load_boot()
         }
         nvs_close(handle);
     }
-    else
+    else if (nvs)
         ESP_LOGW(TAG, "NVS namespace %s unavailable (%s), the defaults are used", NVS_NAMESPACE, esp_err_to_name(err));
 
-    if (s_saved_lost)
+    if (s_saved_lost || !nvs)
     {
-        // The owner's settings (NTP keys and required authentication, PTP, MQTT, logins) are gone: the defaults, no
-        // one-shot set, and no time service that a client could take for the owner's: NTP answers as unsynchronised
-        // (main.cpp), PTP, MQTT and OTE are off. Nothing is saved (web_settings_save) and no login is accepted.
+        // The owner's settings (NTP keys and required authentication, PTP, MQTT, logins) are gone, or NVS cannot be used
+        // at all (sys/nvs_state.h): the defaults, no one-shot set, and no time service that a client could take for the
+        // owner's: NTP answers as unsynchronised (main.cpp), PTP, MQTT and OTE are off. Nothing is saved
+        // (web_settings_save) and no login is accepted.
         web_settings_defaults(s_boot);
         s_boot.ptp_l2_enabled = false;
         s_boot.ptp_udp4_enabled = false;
@@ -1112,10 +1116,19 @@ void web_settings_load_boot()
         s_boot.ote_enabled = false;
         s_boot_oneshot = false;
         s_boot_network_confirm = false;
-        source = "defaults (the saved settings were lost)";
-        ESP_LOGE(TAG, "The saved settings were lost (NVS): the defaults are used with NTP answered as unsynchronised "
-                      "(stratum 16) and PTP, MQTT and OTE off; nothing is saved, no login is accepted. "
-                      "Erase NVS over the USB port to start again with the defaults (README, Lost stored security data)");
+        if (!nvs)
+        {
+            source = "defaults (NVS cannot be used)";
+            ESP_LOGE(TAG, "NVS cannot be used: the defaults are used with NTP answered as unsynchronised (stratum 16) and PTP, "
+                          "MQTT and OTE off; nothing is saved, no login is accepted (README, Lost stored security data)");
+        }
+        else
+        {
+            source = "defaults (the saved settings were lost)";
+            ESP_LOGE(TAG, "The saved settings were lost (NVS): the defaults are used with NTP answered as unsynchronised "
+                          "(stratum 16) and PTP, MQTT and OTE off; nothing is saved, no login is accepted. "
+                          "Erase NVS over the USB port to start again with the defaults (README, Lost stored security data)");
+        }
     }
     s_running = s_boot;
     ESP_LOGI(TAG, "Settings: %s", source);
@@ -1190,7 +1203,7 @@ bool web_settings_get_saved(web_settings_t &out)
 
 esp_err_t web_settings_save(const web_settings_t &in)
 {
-    if (web_settings_saved_lost())
+    if (web_settings_saved_lost() || !nvs_state_usable())
         return ESP_ERR_INVALID_STATE;
     return write_blob(NVS_KEY_SAVED, in, 0);
 }

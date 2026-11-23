@@ -7,6 +7,7 @@
 #include "web_auth.h"
 #include "web_settings.h"
 #include "custom/nvs_blob.h"
+#include "sys/nvs_state.h"
 #include "sys/record_mark.h"
 
 #include <algorithm>
@@ -391,7 +392,7 @@ void web_auth_init()
     else if (allow_loaded && s_allow_count > 0)
         ESP_LOGI(TAG, "Web admin: source allow-list with %u entries", static_cast<unsigned>(s_allow_count));
 
-    if (web_auth_default_password_active())
+    if (web_auth_default_password_active() && nvs_state_usable()) // without NVS no login at all (sys/nvs_state.h)
         ESP_LOGW(TAG, "Web admin: the default password is in use - change it on the settings page");
 }
 

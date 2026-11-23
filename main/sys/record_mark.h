@@ -48,7 +48,8 @@ uint64_t record_mark_text_hash(const char *text);
 // At a start, for record <ns>/<key>: reads the mark and decides (record_mark_decide). present with another value and
 // adopted: the mark is written with value. *stored (may be nullptr): the value of the mark that was there (0 without
 // one), for a lost record the only thing left of it. A read error of the mark counts as a mark (fails closed) and is
-// logged.
+// logged. NVS that is not initialised counts as no mark, not logged: that is the state of nvs_state.h, in which the
+// firmware refuses every login without looking at any record (as a mark it would read every record as lost).
 record_mark_state_t record_mark_check(const char *ns, const char *key, bool record_valid, uint64_t value, uint64_t *stored);
 // After the record was stored and committed: the mark (written only when it is missing or has another value)
 esp_err_t record_mark_set(const char *ns, const char *key, uint64_t value);

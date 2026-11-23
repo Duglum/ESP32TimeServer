@@ -14,6 +14,7 @@
 #include "custom/crash_dump.h"
 #include "custom/gnss_uart.h"
 #include "custom/gnss_ubx.h"
+#include "sys/nvs_state.h"
 #include "web_auth.h"
 #include "web_net.h"
 #include "web_ote.h"
@@ -1742,10 +1743,15 @@ namespace
     // Not counted by the throttling (no secret is checked).
     constexpr char LOST_DATA_MESSAGE[] = "Stored security data of the device was lost: logins are refused. Recovery: erase NVS over the USB port (see the README)";
 
-    // Some stored security record was lost (shown without a login in /api/info)
+    // NVS cannot be used at this start (sys/nvs_state.h): nothing stored can be read, so every login is refused as with
+    // lost data, before any password check. Not counted by the throttling.
+    constexpr char STORE_UNUSABLE_MESSAGE[] = "Stored data of the device cannot be read (NVS): logins are refused. Recovery: erase NVS over the USB port (see the README)";
+
+    // Some stored security record was lost, or none can be read (shown without a login in /api/info)
     bool security_data_lost()
     {
-        return web_settings_saved_lost() || web_auth_password_lost() || web_auth_allow_list_lost() || totp_store_lost_count() > 0;
+        return !nvs_state_usable() || web_settings_saved_lost() || web_auth_password_lost() || web_auth_allow_list_lost() ||
+               totp_store_lost_count() > 0;
     }
 
     esp_err_t login_lost(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, const char *what)
@@ -1754,6 +1760,14 @@ namespace
         format_address(peer, address, sizeof(address));
         ESP_LOGW(TAG, "Web admin: login from %s (user '%s') refused: %s was lost (NVS)", address, user, what);
         return send_error(req, "403 Forbidden", LOST_DATA_MESSAGE);
+    }
+
+    esp_err_t login_nvs_unusable(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user)
+    {
+        char address[INET6_ADDRSTRLEN];
+        format_address(peer, address, sizeof(address));
+        ESP_LOGW(TAG, "Web admin: login from %s (user '%s') refused: NVS cannot be used (%s)", address, user, esp_err_to_name(nvs_state_error()));
+        return send_error(req, "403 Forbidden", STORE_UNUSABLE_MESSAGE);
     }
 
     // A login that passed its first check (the password): the second factor when the settings ask for one, else the
@@ -1908,7 +1922,10 @@ namespace
         const bool local_user = name_ok && strcmp(w->user, AUTH_WEB_LOCAL_USER) == 0;
         const bool password_ok = valid_type && length > 0 && length <= WEB_PASSWORD_MAX_LEN;
         esp_err_t result = ESP_OK;
-        if (web_settings_saved_lost())
+        if (!nvs_state_usable())
+            // Nothing stored can be read (the password, the login methods): no login at all, also no RADIUS one
+            result = login_nvs_unusable(req, peer, w->user);
+        else if (web_settings_saved_lost())
             // The defaults are in use instead of the saved login methods (a second factor, RADIUS only): no login at all
             result = login_lost(req, peer, w->user, "the saved settings");
         else if (password_ok && local_user && methods.local && (!radius_on || !methods.local_fallback))
@@ -1983,6 +2000,12 @@ namespace
         cJSON_Delete(root);
         if (p == nullptr)
             return send_error(req, "401 Unauthorized", "The login has expired: log in again");
+        if (!nvs_state_usable())
+        {
+            const esp_err_t unusable_err = login_nvs_unusable(req, peer, p->user);
+            wipe(*p);
+            return unusable_err;
+        }
         if (web_settings_saved_lost() || totp_store_lost(p->user))
         {
             const esp_err_t lost_err = login_lost(req, peer, p->user, "stored security data");
@@ -2674,6 +2697,12 @@ namespace
     // The body is the raw application image (Content-Type application/octet-stream).
     esp_err_t handle_ote(httpd_req_t *req)
     {
+        if (!nvs_state_usable())
+        {
+            // Before the check of the setting: OTE is off in this state (web_settings_load_boot()), the reason is NVS
+            send_error(req, "403 Forbidden", STORE_UNUSABLE_MESSAGE);
+            return ESP_FAIL; // closes the connection (the body is not read)
+        }
         if (!app_ote_enabled())
             return send_error(req, "403 Forbidden", "Over The Ethernet updates are switched off in the settings");
 
@@ -3239,6 +3268,8 @@ namespace
         // Only in that state (the answer is as before otherwise): stored security data was lost, logins are refused
         if (security_data_lost())
             cJSON_AddBoolToObject(root, "security_data_lost", true);
+        if (!nvs_state_usable())
+            cJSON_AddStringToObject(root, "nvs_error", esp_err_to_name(nvs_state_error()));
         return send_json(req, "200 OK", root);
     }
 

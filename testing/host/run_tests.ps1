@@ -88,9 +88,11 @@ $targets = [ordered]@{
     # stops at any write; the logging of record_mark.cpp goes to stubs\host_stubs.c
     record_mark_test = @("$here\record_mark_test.cpp", "$main\sys\record_mark_core.cpp", "$main\sys\record_mark.cpp",
         "$here\stubs\host_stubs.c")
+    # The state "NVS cannot be used" (from ESP32-WebTherm): the cause of every error of nvs_flash_init() and its texts
+    nvs_state_test = @("$here\nvs_state_test.cpp", "$main\sys\nvs_state_core.cpp")
 }
 # Test programs without a fuzz target
-$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test', 'record_mark_test')
+$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test', 'record_mark_test', 'nvs_state_test')
 # Test programs with TF-PSA-Crypto
 $with_psa = @('radius_test', 'totp_test', 'auth_config_test')
 

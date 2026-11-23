@@ -42,9 +42,11 @@ record_mark_state_t record_mark_check(const char *ns, const char *key, bool reco
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
     {
         // The namespace opened but the mark cannot be read: counted as a mark (a record that is not valid then reads
-        // as lost, not as never stored). When NVS itself is not usable, nothing can be read: no mark.
-        ESP_LOGE(TAG, "The mark %s could not be read (%s)", mark, esp_err_to_name(err));
+        // as lost, not as never stored). When NVS itself is not usable, nothing can be read: no mark, and no line for
+        // each record (the firmware is in the state of nvs_state.h, which refuses every login by itself and logs it).
         marked = err != ESP_ERR_NVS_NOT_INITIALIZED && err != ESP_ERR_NVS_PART_NOT_FOUND;
+        if (marked)
+            ESP_LOGE(TAG, "The mark %s could not be read (%s)", mark, esp_err_to_name(err));
     }
     if (stored != nullptr)
         *stored = found;

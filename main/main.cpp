@@ -57,6 +57,7 @@
 
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
+#include "sys/nvs_state.h"
 #include "bootloader_random.h"
 #include "esp_ota_ops.h"
 #include "web/web_net.h"
@@ -168,6 +169,8 @@ static const char *TAG = "main_cpp";
 // and never changes afterwards. Live settings (time zone, LCD text, LED brightness) are copied into the atomics /
 // the mutex protected buffer below by app_apply_live_settings().
 static const web_settings_t *s_cfg = nullptr;
+// NVS cannot be used at this start (sys/nvs_state.h): set in setup_NVS_storage() before any task starts, never changes
+static bool s_nvs_unusable = false;
 static bool s_lcd_on = false;                         // LCD enabled for this boot
 // MQTT settings take effect at once: the MQTT service task applies them (mqtt_apply_settings) and sets these
 static std::atomic<bool> s_mqtt_on{false};                  // MQTT client and report buffers set up
@@ -2906,26 +2909,6 @@ static void get_uptime(char *buffer, size_t buffer_size)
     snprintf(buffer, buffer_size, "%llu %02llu:%02llu:%02llu", days, hours, minutes, seconds);
 }
 
-static bool initialize_nvs_storage()
-{
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        ESP_LOGE(TAG, "NVS recovery requires operator action; automatic erase is disabled to preserve authentication storage");
-        return false;
-    }
-
-    if (err != ESP_OK)
-    {
-#if DEBUG_ENABLED
-        ESP_LOGE(TAG, "nvs_flash_init failed: %s", esp_err_to_name(err));
-#endif
-        return false;
-    }
-
-    return true;
-}
-
 static bool parse_mac_id_string(const char *text, uint8_t mac[6])
 {
     if (text == nullptr || mac == nullptr || text[0] == '\0' || std::strlen(text) != 17)
@@ -3273,10 +3256,11 @@ struct ntp_reply_status_t
 // "unsynchronised" (stratum 16, PTP not served) while the writer was preempted.
 static ntp_reply_status_t get_ntp_reply_status()
 {
-    // The saved settings were lost (web_settings_saved_lost(), sys/record_mark.h): the defaults are in use instead of
-    // the owner's NTP keys and required authentication. The answer of the unsynchronised server (the last return
-    // below: leap indicator 3, stratum 16), so that clients drop this server (owner, 2026-11-20).
-    if (web_settings_saved_lost())
+    // The saved settings were lost (web_settings_saved_lost(), sys/record_mark.h) or NVS cannot be used at all
+    // (s_nvs_unusable, sys/nvs_state.h): the defaults are in use instead of the owner's NTP keys and required
+    // authentication. The answer of the unsynchronised server (the last return below: leap indicator 3, stratum 16), so
+    // that clients drop this server (owner, 2026-11-20 and 2026-11-22).
+    if (s_nvs_unusable || web_settings_saved_lost())
         return {3, 16, "INIT", false, false, false};
     for (;;)
     {
@@ -7921,7 +7905,9 @@ static void read_gnss_time_pulse()
 // With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE the bootloader starts an image written by an OTE update once in the state
 // "pending verify". This check keeps it (esp_ota_mark_app_valid_cancel_rollback) once the functions of the firmware
 // work for App_Update_Check_Hold_Us: Ethernet connected, NTP server ready (hardware path and sockets), web admin
-// running, data from the GNSS receiver. They do not depend on the sky (no fix or PPS needed). Otherwise, after
+// running, data from the GNSS receiver, and NVS can be used (sys/nvs_state.h): a new firmware that cannot use what the
+// previous one stored, e.g. NVS of a newer format after a downgrade, is not kept. They do not depend on the sky (no
+// fix or PPS needed). Otherwise, after
 // App_Update_Check_Timeout_Us from the start, the image is marked invalid and the previous one is started; a crash or
 // a reset before the image is kept also starts the previous one (bootloader). Images flashed over USB are not checked.
 #if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
@@ -7945,7 +7931,8 @@ static void app_update_check_task(void *parameter)
         const bool ntp = s_ntp_server_ready.load(std::memory_order_acquire) && s_hardware_ntp_accepting.load(std::memory_order_acquire);
         const bool web = web_admin_running();
         const bool gnss = nmea.sentences > 0 || ubx.frames > 0;
-        if (network && ntp && web && gnss)
+        const bool nvs = nvs_state_usable();
+        if (network && ntp && web && gnss && nvs)
         {
             if (ok_since_us == 0)
                 ok_since_us = now_us;
@@ -7966,8 +7953,9 @@ static void app_update_check_task(void *parameter)
         }
         if (now_us >= App_Update_Check_Timeout_Us)
         {
-            ESP_LOGE(TAG, "Firmware update check failed (Ethernet %s, NTP server %s, web admin %s, GNSS data %s): starting the previous firmware",
-                     network ? "ok" : "missing", ntp ? "ok" : "missing", web ? "ok" : "missing", gnss ? "ok" : "missing");
+            ESP_LOGE(TAG, "Firmware update check failed (Ethernet %s, NTP server %s, web admin %s, GNSS data %s, NVS %s): starting the previous firmware",
+                     network ? "ok" : "missing", ntp ? "ok" : "missing", web ? "ok" : "missing", gnss ? "ok" : "missing",
+                     nvs ? "ok" : "not usable");
             vTaskDelay(pdMS_TO_TICKS(500)); // let the console print the line
             esp_ota_mark_app_invalid_rollback_and_reboot(); // only returns if there is no previous image
             ESP_LOGE(TAG, "No previous firmware to start: the new firmware stays");
@@ -7986,7 +7974,7 @@ static void start_app_update_check()
     esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
     if (running == nullptr || esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY)
         return;
-    ESP_LOGW(TAG, "New firmware after an update: it is kept once Ethernet, the NTP server, the web admin and the GNSS data work for %lld s; otherwise the previous firmware is started after %lld min",
+    ESP_LOGW(TAG, "New firmware after an update: it is kept once Ethernet, the NTP server, the web admin and the GNSS data work and NVS can be used for %lld s; otherwise the previous firmware is started after %lld min",
              static_cast<long long>(App_Update_Check_Hold_Us / 1000000LL), static_cast<long long>(App_Update_Check_Timeout_Us / 60000000LL));
     if (xTaskCreatePinnedToCore(app_update_check_task, "update_check", App_Update_Check_Task_Stack_Size, nullptr, 3, nullptr, tskNO_AFFINITY) != pdPASS)
         ESP_LOGE(TAG, "Firmware update check could not be started: the new firmware is not confirmed (the previous one is started at the next reset)");
@@ -10166,11 +10154,11 @@ void write_settings_messages_to_the_console()
 
 void setup_NVS_storage(void)
 {
-    if (!initialize_nvs_storage())
-    {
-        ESP_LOGE(TAG, "NVS initialization failed. GNSS module settings persistence is unavailable.");
-    }
-    else
+    // Never erased by the firmware. While NVS cannot be used (sys/nvs_state.h: one E line with the cause and the
+    // recovery), NTP answers as unsynchronised, PTP, MQTT and OTE are off (web_settings_load_boot()) and every login is
+    // refused (web_server.cpp); nothing is stored
+    s_nvs_unusable = nvs_state_init() != ESP_OK;
+    if (!s_nvs_unusable)
     {
 #if PPS_ISR_LATENCY_AUTO
         load_pps_isr_latency_from_nvs();
@@ -10324,6 +10312,12 @@ static void setup_the_button()
     vTaskDelay(pdMS_TO_TICKS(20));
     if (gpio_get_level(static_cast<gpio_num_t>(s_button_pin)) != 0)
         return;
+    if (s_nvs_unusable)
+    {
+        // Nothing stored can be read or erased (sys/nvs_state.h): the recovery is the erase of NVS over the USB port
+        ESP_LOGW(TAG, "Button pressed at start: NVS cannot be used, nothing is reset (recovery: erase NVS over the USB port, see the README)");
+        return;
+    }
     ESP_LOGW(TAG, "Button pressed at start: keep it pressed for 10 s to reset the web settings and password");
     display_line(1, "Hold 10 s: reset");
     display_line(2, "web settings");

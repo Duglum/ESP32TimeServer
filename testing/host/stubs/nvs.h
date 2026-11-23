@@ -1,6 +1,6 @@
-// ESP32 Time Server - host tests: the NVS calls of main/custom/nvs_blob.cpp and main/sys/record_mark.cpp (declarations
-// and error codes as in ESP-IDF 6.1.1 components/nvs_flash/include/nvs.h). The tests that link them define them (a
-// fake NVS).
+// ESP32 Time Server - host tests: the NVS calls of main/custom/nvs_blob.cpp and main/sys/record_mark.cpp and the error
+// codes of main/sys/nvs_state_core.cpp (declarations and error codes as in ESP-IDF 6.1.1
+// components/nvs_flash/include/nvs.h). The tests that link the calls define them (a fake NVS).
 #pragma once
 
 #include "esp_err.h"
@@ -19,6 +19,9 @@ extern "C"
 #define ESP_ERR_NVS_NOT_INITIALIZED (ESP_ERR_NVS_BASE + 0x01)
 #define ESP_ERR_NVS_TYPE_MISMATCH (ESP_ERR_NVS_BASE + 0x03)
 #define ESP_ERR_NVS_PART_NOT_FOUND (ESP_ERR_NVS_BASE + 0x0f)
+#define ESP_ERR_NVS_NO_FREE_PAGES (ESP_ERR_NVS_BASE + 0x0d)
+#define ESP_ERR_NVS_NEW_VERSION_FOUND (ESP_ERR_NVS_BASE + 0x10)
+#define ESP_ERR_NVS_WRONG_ENCRYPTION (ESP_ERR_NVS_BASE + 0x19)
 
     typedef enum
     {

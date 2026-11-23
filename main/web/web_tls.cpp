@@ -14,6 +14,7 @@
 #include <new>
 
 #include "web_settings.h"
+#include "sys/nvs_state.h"
 
 extern "C"
 {
@@ -692,14 +693,15 @@ namespace
         return static_cast<size_t>(ret);
     }
 
-    // The self-signed identity: loaded, or created when missing or issued for another name
-    bool load_or_create_self(nvs_handle_t handle, const char *fqdn)
+    // The self-signed identity: loaded, or created when missing or issued for another name. Without NVS (nvs false,
+    // handle not used) it is created for this start only.
+    bool load_or_create_self(nvs_handle_t handle, bool nvs, const char *fqdn)
     {
         char stored_name[256] = "";
         size_t name_length = sizeof(stored_name);
-        const bool have_name = nvs_get_str(handle, NVS_KEY_NAME, stored_name, &name_length) == ESP_OK;
-        const bool have_key = read_blob(handle, NVS_KEY_KEY, s_self_key, s_self_key_length, MAX_DER);
-        const bool have_cert = read_blob(handle, NVS_KEY_CERT, s_self_cert, s_self_cert_length, MAX_DER);
+        const bool have_name = nvs && nvs_get_str(handle, NVS_KEY_NAME, stored_name, &name_length) == ESP_OK;
+        const bool have_key = nvs && read_blob(handle, NVS_KEY_KEY, s_self_key, s_self_key_length, MAX_DER);
+        const bool have_cert = nvs && read_blob(handle, NVS_KEY_CERT, s_self_cert, s_self_cert_length, MAX_DER);
 
         mbedtls_pk_context pk;
         mbedtls_pk_init(&pk);
@@ -757,7 +759,9 @@ namespace
             // With the saved settings lost (sys/record_mark.h) the FQDN is the default one: the identity is used, not
             // stored over the one that is left
             esp_err_t err = ESP_OK;
-            if (web_settings_saved_lost())
+            if (!nvs)
+                ESP_LOGW(TAG, "NVS cannot be used: the certificate for %s is made for this start only, not stored", fqdn);
+            else if (web_settings_saved_lost())
                 ESP_LOGW(TAG, "The saved web settings were lost: the certificate for %s is not stored", fqdn);
             else
             {
@@ -782,6 +786,15 @@ bool web_tls_load_or_create(const char *fqdn, web_tls_identity_t &identity)
     identity = web_tls_identity_t{};
     psa_crypto_init();
 
+    if (!nvs_state_usable())
+    {
+        // No stored identity can be read (sys/nvs_state.h): a self-signed one in RAM, so that the page can show the
+        // state and refuse the logins. Nothing is written.
+        if (!load_or_create_self(0, false, fqdn))
+            return false;
+        fill(identity);
+        return true;
+    }
     nvs_handle_t handle = 0;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK)
@@ -789,7 +802,7 @@ bool web_tls_load_or_create(const char *fqdn, web_tls_identity_t &identity)
         ESP_LOGE(TAG, "NVS namespace %s unavailable (%s)", NVS_NAMESPACE, esp_err_to_name(err));
         return false;
     }
-    if (!load_or_create_self(handle, fqdn))
+    if (!load_or_create_self(handle, true, fqdn))
     {
         nvs_close(handle);
         return false;
