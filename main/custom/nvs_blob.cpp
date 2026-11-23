@@ -4,6 +4,7 @@
 // See nvs_blob.h (workaround for the multi-chunk compare of ESP-IDF 6.1.1 nvs_set_blob())
 
 #include "custom/nvs_blob.h"
+#include "sys/secret.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -11,14 +12,6 @@
 
 namespace
 {
-    // The copy may hold secrets: a volatile store loop, which the compiler cannot drop before free()
-    void wipe(void *data, size_t size)
-    {
-        volatile uint8_t *p = static_cast<volatile uint8_t *>(data);
-        while (size-- > 0)
-            *p++ = 0;
-    }
-
     // True if NVS holds exactly size bytes equal to data under key
     bool stored_equal(nvs_handle_t handle, const char *key, const void *data, size_t size)
     {
@@ -29,7 +22,7 @@ namespace
         if (stored == nullptr)
             return false;
         bool equal = nvs_get_blob(handle, key, stored, &length) == ESP_OK && length == size && memcmp(stored, data, size) == 0;
-        wipe(stored, size);
+        mbedtls_platform_zeroize(stored, size); // the copy may hold secrets
         free(stored);
         return equal;
     }

@@ -24,6 +24,7 @@ set(MAIN_SOURCES
         "sys/nvs_state_core.cpp"
         "sys/record_mark.cpp"
         "sys/record_mark_core.cpp"
+        "sys/secret.cpp"
         "custom/time_diag.cpp"
         "net/emac_halt.cpp"
         "net/ip_text.cpp"

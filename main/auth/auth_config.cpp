@@ -4,6 +4,7 @@
 // Settings of the logins without ESP-IDF (see auth_config.h). Host tested and fuzzed.
 
 #include "auth/auth_config.h"
+#include "sys/secret.h"
 #include "net/ip_text.h"
 
 #include <cstdio>
@@ -342,6 +343,7 @@ bool auth_settings_from_json(const cJSON *root, radius_settings_t &r, web_login_
                     return false;
                 }
                 char secret[AUTH_RADIUS_SECRET_SIZE] = "";
+                const secret_wipe_t wipe_secret(secret, sizeof(secret));
                 const cJSON *secret_item = cJSON_GetObjectItemCaseSensitive(item, "secret");
                 if (!get_text(item, "RADIUS server", "host", s.host, err, err_size) ||
                     !get_field(item, "RADIUS server", "port", 1, 65535, s.port, err, err_size) ||
@@ -350,7 +352,6 @@ bool auth_settings_from_json(const cJSON *root, radius_settings_t &r, web_login_
                 // The API never gets the secret: there "" (or none) keeps it; the stored form sets it as it is
                 if (secret_item != nullptr && (!api || secret[0] != '\0'))
                     snprintf(s.secret, sizeof(s.secret), "%s", secret);
-                memset(secret, 0, sizeof(secret));
                 if (!radius_server_used(s))
                     memset(s.secret, 0, sizeof(s.secret));
             }

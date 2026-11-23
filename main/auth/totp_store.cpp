@@ -5,6 +5,7 @@
 #include "auth/totp_store.h"
 #include "custom/nvs_blob.h"
 #include "sys/record_mark.h"
+#include "sys/secret.h"
 
 #include <cstdio>
 #include <cstring>
@@ -186,6 +187,7 @@ void totp_store_init(size_t nvs_reserve_bytes)
         char key[4];
         key_of(i, key);
         record_t r{};
+        const secret_wipe_t wipe_r(&r, sizeof(r)); // the secret of the token
         size_t length = sizeof(r);
         const bool valid = opened && nvs_get_blob(handle, key, &r, &length) == ESP_OK && length == sizeof(r) && r.magic == MAGIC &&
                            r.crc == crc_of(r) && memchr(r.user, '\0', sizeof(r.user)) != nullptr && r.user[0] != '\0';
@@ -202,7 +204,6 @@ void totp_store_init(size_t nvs_reserve_bytes)
             s_lost_user[i] = user;
             ++lost_count;
         }
-        memset(&r, 0, sizeof(r));
     }
     if (opened)
         nvs_close(handle);
@@ -294,6 +295,7 @@ esp_err_t totp_store_add(const char *user, const uint8_t secret[TOTP_SECRET_SIZE
     if (slot->magic != MAGIC && !nvs_room_for_token()) // a new token (one replaced keeps its size)
         return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
     record_t r{};
+    const secret_wipe_t wipe_r(&r, sizeof(r)); // the secret and the hashes of the recovery codes, at every exit
     r.magic = MAGIC;
     snprintf(r.user, sizeof(r.user), "%s", user);
     memcpy(r.secret, secret, TOTP_SECRET_SIZE);
@@ -301,18 +303,19 @@ esp_err_t totp_store_add(const char *user, const uint8_t secret[TOTP_SECRET_SIZE
     for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
     {
         uint8_t random[7];
-        char normalised[11];
+        char normalised[11]; // a new recovery code
+        const secret_wipe_t wipe_random(random, sizeof(random));
+        const secret_wipe_t wipe_normalised(normalised, sizeof(normalised));
         esp_fill_random(random, sizeof(random));
         totp_recovery_text(random, codes[i]);
         if (!totp_recovery_normalise(codes[i], normalised) || !totp_recovery_hash(r.salt, normalised, r.hashes[i]))
             return ESP_FAIL;
-        memset(random, 0, sizeof(random));
     }
     r.created_s = now_s();
     r.last_step = step; // the confirming code is used (the steps of a replaced token belong to its old key)
-    const record_t previous = *slot;
+    record_t previous = *slot; // the token it replaces, for a failed store
+    const secret_wipe_t wipe_previous(&previous, sizeof(previous));
     *slot = r;
-    memset(&r, 0, sizeof(r));
     const esp_err_t err = save(static_cast<size_t>(slot - s_table->token));
     if (err != ESP_OK)
     {
@@ -333,7 +336,7 @@ bool totp_store_remove(const char *user)
     if (r == nullptr)
         return false;
     const size_t i = static_cast<size_t>(r - s_table->token);
-    memset(r, 0, sizeof(*r));
+    mbedtls_platform_zeroize(r, sizeof(*r));
     if (erase(i) != ESP_OK)
         ESP_LOGW(TAG, "TOTP: the token %u could not be erased in NVS", static_cast<unsigned>(i));
     ESP_LOGI(TAG, "TOTP: token of '%s' deleted", user);

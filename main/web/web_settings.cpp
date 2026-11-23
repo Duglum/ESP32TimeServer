@@ -8,7 +8,9 @@
 #include "auth/totp_store.h"
 #include "custom/nvs_blob.h"
 #include "sys/nvs_state.h"
+#include "sys/big_alloc.h"
 #include "sys/record_mark.h"
+#include "sys/secret.h"
 
 #include <atomic>
 #include <cctype>
@@ -424,8 +426,7 @@ namespace
             blob.crc = blob_crc(blob);
             ok = true;
         }
-        memset(raw, 0, sizeof(settings_blob_t)); // contains secrets
-        free(raw);
+        secret_free(raw); // contains secrets
         if (!ok)
             return false;
         // Text fields are always terminated (the CRC covers them, this only protects against a firmware bug)
@@ -470,8 +471,7 @@ namespace
                     ESP_LOGW(TAG, "The mark of the saved web settings could not be stored (%s)", esp_err_to_name(mark_err));
             }
         }
-        memset(blob, 0, sizeof(settings_blob_t)); // contains secrets
-        free(blob);
+        secret_free(blob); // contains secrets
         return err;
     }
 
@@ -1098,6 +1098,9 @@ void web_settings_load_boot()
                 nvs_commit(handle);
         }
         nvs_close(handle);
+        // Not read again: the copy of the saved or one-shot set with its secrets does not stay in RAM for the run
+        // (s_boot keeps the set in use)
+        mbedtls_platform_zeroize(&blob, sizeof(blob));
     }
     else if (nvs)
         ESP_LOGW(TAG, "NVS namespace %s unavailable (%s), the defaults are used", NVS_NAMESPACE, esp_err_to_name(err));
@@ -1192,11 +1195,11 @@ bool web_settings_get_saved(web_settings_t &out)
     nvs_handle_t handle = 0;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
         return false;
-    settings_blob_t *blob = new (std::nothrow) settings_blob_t{};
+    settings_blob_t *blob = big_new<settings_blob_t>();
     bool ok = blob != nullptr && read_blob(handle, NVS_KEY_SAVED, *blob);
     if (ok)
         out = blob->settings;
-    delete blob;
+    big_delete(blob); // zeroed: the saved set with its secrets
     nvs_close(handle);
     return ok;
 }

@@ -9,6 +9,7 @@
 #include "custom/nvs_blob.h"
 #include "sys/nvs_state.h"
 #include "sys/record_mark.h"
+#include "sys/secret.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -160,7 +161,7 @@ namespace
                 out[k] ^= u[k];
         }
         psa_destroy_key(key);
-        memset(u, 0, sizeof(u));
+        mbedtls_platform_zeroize(u, sizeof(u));
         return ok;
     }
 
@@ -256,7 +257,7 @@ namespace
         uint8_t hash[HASH_SIZE];
         const bool computed = pbkdf2_sha256(password, length, s_password.salt, SALT_SIZE, s_password.iterations, hash);
         const bool equal = web_constant_time_equal(hash, s_password.hash, HASH_SIZE);
-        memset(hash, 0, sizeof(hash));
+        mbedtls_platform_zeroize(hash, sizeof(hash));
         return computed && equal;
     }
 
@@ -342,7 +343,7 @@ void web_random_hex(char *out, size_t bytes)
         bytes -= n;
     }
     *out = '\0';
-    memset(buffer, 0, sizeof(buffer));
+    mbedtls_platform_zeroize(buffer, sizeof(buffer)); // the random bytes of session tokens and ids
 }
 
 void web_auth_init()

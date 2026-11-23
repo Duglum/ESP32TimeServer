@@ -14,7 +14,9 @@
 #include "custom/crash_dump.h"
 #include "custom/gnss_uart.h"
 #include "custom/gnss_ubx.h"
+#include "sys/big_alloc.h"
 #include "sys/nvs_state.h"
+#include "sys/secret.h"
 #include "web_auth.h"
 #include "web_net.h"
 #include "web_ote.h"
@@ -549,7 +551,9 @@ namespace
         return true;
     }
 
-    // Reads the JSON body (at most max bytes). Returns nullptr and sends the error response on failure.
+    // Reads the JSON body (at most max bytes). Returns nullptr and sends the error response on failure. The body may
+    // hold passwords, keys or a whole settings set: its block is zeroed at every exit (sys/secret.h), and so is every
+    // block of the tree when it is deleted (the free function of cJSON, main.cpp).
     cJSON *read_json(httpd_req_t *req, size_t max = MAX_BODY)
     {
         if (req->content_len == 0 || req->content_len > max)
@@ -572,7 +576,7 @@ namespace
                 continue;
             if (ret <= 0)
             {
-                free(body);
+                secret_free(body);
                 return nullptr; // the connection is closed by httpd
             }
             received += static_cast<size_t>(ret);
@@ -580,14 +584,12 @@ namespace
         body[received] = '\0';
         if (!json_shape_ok(body, received))
         {
-            memset(body, 0, received);
-            free(body);
+            secret_free(body);
             send_error(req, "400 Bad Request", "Request body nested too deeply or with too many values");
             return nullptr;
         }
         cJSON *root = cJSON_ParseWithLength(body, received);
-        memset(body, 0, received); // may contain passwords
-        free(body);
+        secret_free(body);
         if (root == nullptr || !cJSON_IsObject(root))
         {
             cJSON_Delete(root);
@@ -646,6 +648,7 @@ namespace
             return false;
         }
         web_ntp_key_t list[WEB_NTP_MAX_KEYS] = {};
+        const secret_wipe_t wipe_list(list, sizeof(list)); // the keys, at every exit
         size_t n = 0;
         cJSON *item = nullptr;
         cJSON_ArrayForEach(item, keys)
@@ -656,7 +659,6 @@ namespace
                 id->valuedouble > 65535 || id->valuedouble != static_cast<double>(static_cast<long>(id->valuedouble)) ||
                 strlen(value->valuestring) >= WEB_NTP_KEY_SIZE)
             {
-                memset(list, 0, sizeof(list));
                 snprintf(err, err_size, "%s key %u: key ID 1 to 65535 and 32 letters or digits expected", label, static_cast<unsigned>(n + 1));
                 return false;
             }
@@ -666,7 +668,6 @@ namespace
         }
         count = static_cast<uint8_t>(n);
         memcpy(out, list, max * sizeof(web_ntp_key_t));
-        memset(list, 0, sizeof(list));
         present = true;
         return true;
     }
@@ -1112,6 +1113,7 @@ namespace
 
         // Secrets: an empty field keeps the current value, a separate flag clears it
         char secret[WEB_MQTT_CREDENTIAL_SIZE] = "";
+        const secret_wipe_t wipe_secret(secret, sizeof(secret));
         bool clear = false;
         if (!json_string(root, "mqtt_password", secret, sizeof(secret), err, err_size) ||
             !json_bool(root, "mqtt_password_clear", clear, err, err_size))
@@ -1121,7 +1123,6 @@ namespace
         else if (secret[0] != '\0')
             snprintf(s.mqtt_password, sizeof(s.mqtt_password), "%s", secret);
 
-        memset(secret, 0, sizeof(secret));
         // NTP and PTP keys
         bool present = false;
         if (!json_keys(root, "ntp_keys", "NTP", s.ntp_keys, WEB_NTP_MAX_KEYS, s.ntp_key_count, present, err, err_size))
@@ -1167,7 +1168,7 @@ namespace
         {
             web_settings_t running, restored;
         };
-        sets_t *sets = new (std::nothrow) sets_t;
+        sets_t *sets = big_new<sets_t>();
         if (sets == nullptr)
         {
             ESP_LOGE(TAG, "Network settings could not be restored (out of memory): restarting with the saved settings");
@@ -1191,8 +1192,7 @@ namespace
         web_net_apply(app_eth_netif(), restored, &running);
         web_settings_set_running(restored);
         radius_use_settings(restored, false);
-        memset(sets, 0, sizeof(sets_t)); // no secrets left on the heap
-        delete sets;
+        big_delete(sets); // zeroed: no secrets left on the heap
         app_network_settings_changed();
     }
 
@@ -1382,8 +1382,7 @@ namespace
             break;
         }
         radius_complete(w->req);
-        mbedtls_platform_zeroize(w->password, sizeof(w->password));
-        delete w;
+        big_delete(w); // zeroed: the password of a login
     }
 
     // In the radius task
@@ -1395,8 +1394,7 @@ namespace
         {
             ESP_LOGW(TAG, "RADIUS: the answer could not be handed to the web server");
             radius_complete(w->req);
-            mbedtls_platform_zeroize(w->password, sizeof(w->password));
-            delete w;
+            big_delete(w); // zeroed: the password of a login
         }
     }
 
@@ -1408,8 +1406,7 @@ namespace
         if (httpd_req_async_handler_begin(req, &copy) != ESP_OK)
         {
             mbedtls_platform_zeroize(login.password, sizeof(login.password));
-            mbedtls_platform_zeroize(w->password, sizeof(w->password));
-            delete w;
+            big_delete(w); // zeroed: the password of a login
             return send_error(req, "503 Service Unavailable", "Out of memory");
         }
         w->req = copy;
@@ -1418,8 +1415,7 @@ namespace
         {
             send_error(copy, "503 Service Unavailable", "A login from your address is still being checked, or too many at once: try again");
             radius_complete(copy);
-            mbedtls_platform_zeroize(w->password, sizeof(w->password));
-            delete w;
+            big_delete(w); // zeroed: the password of a login
         }
         return ESP_OK;
     }
@@ -1457,7 +1453,7 @@ namespace
             web_login_settings_t web_login;
             radius_login_t login;
         };
-        parts_t *p = new (std::nothrow) parts_t{}; // about 7 kB: not on the server task stack
+        parts_t *p = big_new<parts_t>(); // about 7 kB: not on the server task stack
         if (p == nullptr)
         {
             cJSON_Delete(root);
@@ -1467,7 +1463,7 @@ namespace
         p->radius = p->running.radius;
         char err[160] = "";
         const cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
-        cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
+        const cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
         bool ok = auth_settings_from_json(root, p->radius, p->web_login, true, err, sizeof(err)) &&
                   radius_settings_validate(p->radius, true, err, sizeof(err));
         if (ok && (!cJSON_IsString(user) || !radius_user_valid(user->valuestring, strlen(user->valuestring))))
@@ -1485,14 +1481,11 @@ namespace
             snprintf(p->login.user, sizeof(p->login.user), "%s", user->valuestring);
             snprintf(p->login.password, sizeof(p->login.password), "%s", password->valuestring);
         }
-        if (cJSON_IsString(password))
-            memset(password->valuestring, 0, strlen(password->valuestring));
         cJSON_Delete(root);
-        radius_wait_t *w = ok ? new (std::nothrow) radius_wait_t{} : nullptr;
+        radius_wait_t *w = ok ? big_new<radius_wait_t>() : nullptr;
         if (!ok || w == nullptr)
         {
-            memset(p, 0, sizeof(*p)); // the secrets of the form
-            delete p;
+            big_delete(p); // zeroed: the secrets of the form
             return ok ? send_error(req, "503 Service Unavailable", "Out of memory") : send_error(req, "400 Bad Request", err);
         }
         radius_use_settings(p->running, true);
@@ -1502,8 +1495,7 @@ namespace
         p->login.settings = &p->radius; // copied by radius_submit
         w->kind = radius_wait_t::kind_t::test;
         const esp_err_t result = radius_begin(req, w, p->login);
-        memset(p, 0, sizeof(*p)); // the secrets of the form
-        delete p;
+        big_delete(p); // zeroed: the secrets of the form
         return result;
     }
 
@@ -1651,13 +1643,16 @@ namespace
     bool add_qr(cJSON *object, const char *uri)
     {
         constexpr size_t SIZE = qrcodegen_BUFFER_LEN_FOR_VERSION(15);
-        uint8_t *qr = new (std::nothrow) uint8_t[SIZE];
-        uint8_t *temp = new (std::nothrow) uint8_t[SIZE];
-        const bool ok = qr != nullptr && temp != nullptr &&
-                        qrcodegen_encodeText(uri, temp, qr, qrcodegen_Ecc_MEDIUM, 1, 15, qrcodegen_Mask_AUTO, true);
+        struct buffers_t
+        {
+            uint8_t qr[SIZE];
+            uint8_t temp[SIZE];
+        };
+        buffers_t *b = big_new<buffers_t>();
+        const bool ok = b != nullptr && qrcodegen_encodeText(uri, b->temp, b->qr, qrcodegen_Ecc_MEDIUM, 1, 15, qrcodegen_Mask_AUTO, true);
         if (ok)
         {
-            const int size = qrcodegen_getSize(qr);
+            const int size = qrcodegen_getSize(b->qr);
             cJSON *code = cJSON_AddObjectToObject(object, "qr");
             cJSON_AddNumberToObject(code, "size", size);
             cJSON *rows = cJSON_AddArrayToObject(code, "rows");
@@ -1669,16 +1664,15 @@ namespace
                 for (int x = 0; x < size; x += 4)
                 {
                     unsigned nibble = 0;
-                    for (int b = 0; b < 4; ++b)
-                        nibble = (nibble << 1) | (x + b < size && qrcodegen_getModule(qr, x + b, y) ? 1u : 0u);
+                    for (int bit = 0; bit < 4; ++bit)
+                        nibble = (nibble << 1) | (x + bit < size && qrcodegen_getModule(b->qr, x + bit, y) ? 1u : 0u);
                     row[at++] = HEX[nibble];
                 }
                 row[at] = '\0';
                 cJSON_AddItemToArray(rows, cJSON_CreateString(row));
             }
         }
-        delete[] qr;
-        delete[] temp;
+        big_delete(b); // zeroed: the key is in the code
         return ok;
     }
 
@@ -1734,8 +1728,8 @@ namespace
                 cJSON_AddItemToArray(list, cJSON_CreateString(codes[i]));
         }
         const esp_err_t err = send_json(req, "200 OK", reply);
-        memset(token, 0, sizeof(token));
-        memset(cookie, 0, sizeof(cookie));
+        mbedtls_platform_zeroize(token, sizeof(token));
+        mbedtls_platform_zeroize(cookie, sizeof(cookie));
         return err;
     }
 
@@ -1774,12 +1768,12 @@ namespace
     // session. The throttling forgets the failures of the source only when the whole login is done.
     esp_err_t login_succeeded(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius)
     {
-        web_settings_t *running = new (std::nothrow) web_settings_t{};
+        web_settings_t *running = big_new<web_settings_t>();
         if (running == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
         web_settings_get_running(*running);
         const web_login_settings_t methods = running->web_login;
-        delete running;
+        big_delete(running);
         // Asked after the first factor: whose token was lost is not told to whoever tries a name
         if (totp_store_lost(user))
             return login_lost(req, peer, user, "the TOTP token of this user");
@@ -1890,21 +1884,21 @@ namespace
         cJSON *root = read_json(req);
         if (root == nullptr)
             return ESP_OK;
-        radius_wait_t *w = new (std::nothrow) radius_wait_t{};
-        web_settings_t *running = new (std::nothrow) web_settings_t{}; // about 7 kB: not on the server task stack
+        radius_wait_t *w = big_new<radius_wait_t>();
+        web_settings_t *running = big_new<web_settings_t>(); // about 7 kB: not on the server task stack
         if (w == nullptr || running == nullptr)
         {
-            delete w;
-            delete running;
+            big_delete(w);
+            big_delete(running);
             cJSON_Delete(root);
             return send_error(req, "503 Service Unavailable", "Out of memory");
         }
         web_settings_get_running(*running);
         const web_login_settings_t methods = running->web_login;
         const bool radius_on = methods.radius && radius_any_server(running->radius) && radius_task_running();
-        delete running;
+        big_delete(running);
 
-        cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
+        const cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
         const cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
         const bool valid_type = cJSON_IsString(password) && password->valuestring != nullptr;
         const size_t length = valid_type ? strlen(password->valuestring) : 0;
@@ -1915,8 +1909,6 @@ namespace
         w->peer = peer;
         if (valid_type && length <= WEB_PASSWORD_MAX_LEN)
             snprintf(w->password, sizeof(w->password), "%s", password->valuestring);
-        if (valid_type)
-            mbedtls_platform_zeroize(password->valuestring, length);
         cJSON_Delete(root);
 
         const bool local_user = name_ok && strcmp(w->user, AUTH_WEB_LOCAL_USER) == 0;
@@ -1960,8 +1952,7 @@ namespace
             result = login_refused(req, peer, w->user, name_ok ? "no login method for this user" : "user name not valid",
                                    "Wrong user name or password");
         }
-        mbedtls_platform_zeroize(w->password, sizeof(w->password));
-        delete w;
+        big_delete(w); // zeroed: the password of a login
         return result;
     }
 
@@ -1990,13 +1981,11 @@ namespace
         uint8_t source[16];
         to_mapped(peer, source);
         const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "pending");
-        cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+        const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
         totp_pending_t *p = pending_find(cJSON_IsString(id) ? id->valuestring : nullptr, source);
         char typed[24] = "";
         if (cJSON_IsString(code) && strlen(code->valuestring) < sizeof(typed))
             snprintf(typed, sizeof(typed), "%s", code->valuestring);
-        if (cJSON_IsString(code))
-            mbedtls_platform_zeroize(code->valuestring, strlen(code->valuestring));
         cJSON_Delete(root);
         if (p == nullptr)
             return send_error(req, "401 Unauthorized", "The login has expired: log in again");
@@ -2126,17 +2115,21 @@ namespace
             return send_error(req, "409 Conflict", "The clock of the device is not set (no GNSS time yet): TOTP codes cannot be checked yet");
         if (!right)
             return send_error(req, "400 Bad Request", "Wrong code: check the time of the phone and try the next code");
-        char (*codes)[TOTP_RECOVERY_TEXT_SIZE] = new (std::nothrow) char[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE];
-        if (codes == nullptr)
+        struct codes_t
+        {
+            char codes[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE];
+        };
+        codes_t *c = big_new<codes_t>();
+        if (c == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
-        const esp_err_t err = totp_store_add(slot->user, slot->secret, step, codes);
+        const esp_err_t err = totp_store_add(slot->user, slot->secret, step, c->codes);
         char name[TOTP_USER_SIZE];
         snprintf(name, sizeof(name), "%s", slot->user);
         mbedtls_platform_zeroize(slot, sizeof(*slot));
         *slot = totp_enroll_t{};
         if (err != ESP_OK)
         {
-            delete[] codes;
+            big_delete(c);
             return send_error(req, "507 Insufficient Storage",
                               err == ESP_ERR_NO_MEM ? "All TOTP tokens are in use" : "The TOTP token could not be stored (NVS full?)");
         }
@@ -2145,9 +2138,8 @@ namespace
         cJSON_AddStringToObject(reply, "user", name);
         cJSON *list = cJSON_AddArrayToObject(reply, "recovery_codes");
         for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
-            cJSON_AddItemToArray(list, cJSON_CreateString(codes[i]));
-        mbedtls_platform_zeroize(codes, sizeof(char[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE]));
-        delete[] codes;
+            cJSON_AddItemToArray(list, cJSON_CreateString(c->codes[i]));
+        big_delete(c);
         return send_json(req, "200 OK", reply);
     }
 
@@ -2164,12 +2156,12 @@ namespace
         if (cJSON_IsString(user) && strlen(user->valuestring) < sizeof(name))
             snprintf(name, sizeof(name), "%s", user->valuestring);
         cJSON_Delete(root);
-        web_settings_t *running = new (std::nothrow) web_settings_t{};
+        web_settings_t *running = big_new<web_settings_t>();
         if (running == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
         web_settings_get_running(*running);
         const web_login_settings_t methods = running->web_login;
-        delete running;
+        big_delete(running);
         char own[WEB_SESSION_USER_SIZE] = "";
         bool radius = false;
         bool totp = false;
@@ -2276,7 +2268,7 @@ namespace
             web_net_status_t net;
             web_app_status_t app;
         };
-        sets_t *sets = new (std::nothrow) sets_t{};
+        sets_t *sets = big_new<sets_t>();
         if (sets == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
         web_settings_get_running(sets->running);
@@ -2411,7 +2403,7 @@ namespace
         cJSON_AddNumberToObject(status, "ntp_rate_limited", sets->app.ntp_rate_limited_requests);
         cJSON_AddNumberToObject(status, "ntp_unsigned_refused", sets->app.ntp_unsigned_refused);
         cJSON_AddNumberToObject(status, "free_heap", sets->app.free_heap);
-        delete sets;
+        big_delete(sets);
         return send_json(req, "200 OK", root);
     }
 
@@ -2432,7 +2424,7 @@ namespace
         {
             web_settings_t running, candidate;
         };
-        sets_t *sets = new (std::nothrow) sets_t{};
+        sets_t *sets = big_new<sets_t>();
         if (sets == nullptr)
         {
             cJSON_Delete(root);
@@ -2445,7 +2437,7 @@ namespace
         if (!parsed || !settings_valid(sets->candidate, err, sizeof(err)) ||
             !login_change_allowed(token, sets->running, sets->candidate, err, sizeof(err)))
         {
-            delete sets;
+            big_delete(sets);
             return send_error(req, "400 Bad Request", err);
         }
 
@@ -2454,7 +2446,7 @@ namespace
         if (web_settings_restart_fields_differ(sets->candidate, sets->running))
         {
             const esp_err_t write_err = web_settings_save_oneshot(sets->candidate, network_changed);
-            delete sets;
+            big_delete(sets);
             cJSON_Delete(reply);
             if (write_err != ESP_OK)
                 return send_error(req, "500 Internal Server Error", "One-shot settings could not be written");
@@ -2480,7 +2472,7 @@ namespace
         if (network_changed)
             app_network_settings_changed();
         ESP_LOGI(TAG, "Web admin: settings applied%s", network_changed ? " (network: waiting for the confirmation)" : "");
-        delete sets;
+        big_delete(sets);
 
         cJSON_AddBoolToObject(reply, "ok", true);
         cJSON_AddBoolToObject(reply, "restart", false);
@@ -2523,7 +2515,7 @@ namespace
         {
             web_settings_t running, candidate;
         };
-        sets_t *sets = new (std::nothrow) sets_t{};
+        sets_t *sets = big_new<sets_t>();
         if (sets == nullptr)
         {
             cJSON_Delete(root);
@@ -2536,19 +2528,19 @@ namespace
         if (!parsed || !settings_valid(sets->candidate, err, sizeof(err)) ||
             !login_change_allowed(token, sets->running, sets->candidate, err, sizeof(err)))
         {
-            delete sets;
+            big_delete(sets);
             return send_error(req, "400 Bad Request", err);
         }
         // Network settings are only saved once they work: apply and confirm them first (a lock-out would need
         // the reset to defaults otherwise)
         if (web_settings_network_differs(sets->candidate, sets->running))
         {
-            delete sets;
+            big_delete(sets);
             return send_error(req, "409 Conflict", "Apply and confirm the network settings before saving them");
         }
         const esp_err_t save_err = web_settings_save(sets->candidate);
         const bool equal = web_settings_equal(sets->candidate, sets->running);
-        delete sets;
+        big_delete(sets);
         if (save_err != ESP_OK)
             return send_error(req, "500 Internal Server Error", "Settings could not be written to NVS");
         ESP_LOGI(TAG, "Web admin: settings saved to NVS");
@@ -2579,11 +2571,9 @@ namespace
         cJSON *root = read_json(req);
         if (root == nullptr)
             return ESP_OK;
-        cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
+        const cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
         const bool ok = cJSON_IsString(password) && strlen(password->valuestring) <= WEB_PASSWORD_MAX_LEN &&
                         web_auth_verify_current_password(peer, password->valuestring, strlen(password->valuestring));
-        if (cJSON_IsString(password))
-            memset(password->valuestring, 0, strlen(password->valuestring));
         cJSON_Delete(root);
         if (!ok)
             return send_error(req, "403 Forbidden", "Wrong password");
@@ -2609,8 +2599,8 @@ namespace
         cJSON *root = read_json(req);
         if (root == nullptr)
             return ESP_OK;
-        cJSON *current = cJSON_GetObjectItemCaseSensitive(root, "current");
-        cJSON *next = cJSON_GetObjectItemCaseSensitive(root, "new");
+        const cJSON *current = cJSON_GetObjectItemCaseSensitive(root, "current");
+        const cJSON *next = cJSON_GetObjectItemCaseSensitive(root, "new");
         esp_err_t result = ESP_FAIL;
         const char *message = "Wrong current password";
         const char *status = "403 Forbidden";
@@ -2638,10 +2628,6 @@ namespace
                 }
             }
         }
-        if (cJSON_IsString(current))
-            memset(current->valuestring, 0, strlen(current->valuestring));
-        if (cJSON_IsString(next))
-            memset(next->valuestring, 0, strlen(next->valuestring));
         cJSON_Delete(root);
         if (result != ESP_OK)
             return send_error(req, status, message);
@@ -2668,7 +2654,7 @@ namespace
             return ESP_OK;
         if (s_pending->active)
             return send_error(req, "409 Conflict", "Confirm or wait for the pending network change first");
-        web_settings_t *settings = new (std::nothrow) web_settings_t{}; // about 5.5 kB: not on the server task stack
+        web_settings_t *settings = big_new<web_settings_t>(); // about 5.5 kB: not on the server task stack
         if (settings == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
         web_settings_get_running(*settings);
@@ -2676,11 +2662,11 @@ namespace
         char err[128] = "";
         if (!web_settings_validate(*settings, err, sizeof(err)))
         {
-            delete settings;
+            big_delete(settings);
             return send_error(req, "400 Bad Request", err);
         }
         const esp_err_t write_err = web_settings_save_oneshot(*settings, false);
-        delete settings;
+        big_delete(settings);
         if (write_err != ESP_OK)
             return send_error(req, "500 Internal Server Error", "One-shot settings could not be written");
         ESP_LOGW(TAG, "Web admin: restart with Over The Ethernet updates on until the next restart");
@@ -2719,13 +2705,13 @@ namespace
             }
             web_login_settings_t methods{};
             {
-                web_settings_t *running = new (std::nothrow) web_settings_t{};
+                web_settings_t *running = big_new<web_settings_t>();
                 if (running != nullptr)
                 {
                     web_settings_get_running(*running);
                     methods = running->web_login;
                 }
-                delete running;
+                big_delete(running);
                 if (!methods.local)
                 {
                     send_error(req, "403 Forbidden", "Scripted uploads use the local password, which is switched off: use the page");
@@ -2746,15 +2732,16 @@ namespace
                 httpd_resp_set_hdr(req, "Retry-After", retry);
                 return send_error(req, "429 Too Many Requests", "Too many failed password checks, please wait");
             }
-            // "Basic " and base64("<user name>:<password>"); the buffers are cleared after the check
+            // "Basic " and base64("<user name>:<password>"); the buffers are zeroed at every exit of this branch
             constexpr size_t CREDENTIALS_MAX = 64 + 1 + WEB_PASSWORD_MAX_LEN; // user name, ':', password
             char authorization[6 + 4 * ((CREDENTIALS_MAX + 2) / 3) + 8] = "";
             unsigned char credentials[CREDENTIALS_MAX] = {};
+            const secret_wipe_t wipe_authorization(authorization, sizeof(authorization));
+            const secret_wipe_t wipe_credentials(credentials, sizeof(credentials));
             const bool read = header(req, "Authorization", authorization, sizeof(authorization));
             if (read && strncasecmp(authorization, "Basic ", 6) != 0)
             {
                 // Another scheme (e.g. "Bearer <OTE password>" of an older tools/ote_upload.py): no password checked
-                memset(authorization, 0, sizeof(authorization));
                 httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"ESP32 Time Server\", charset=\"UTF-8\"");
                 send_error(req, "401 Unauthorized", "Use HTTP Basic authentication with the web admin password");
                 return ESP_FAIL;
@@ -2780,8 +2767,6 @@ namespace
             // whether a code is required or not, and that refusal is not counted (no code is checked)
             if (ok && totp_store_lost(AUTH_WEB_LOCAL_USER))
             {
-                memset(authorization, 0, sizeof(authorization));
-                memset(credentials, 0, sizeof(credentials));
                 char address[INET6_ADDRSTRLEN];
                 format_address(peer, address, sizeof(address));
                 ESP_LOGW(TAG, "Web admin: firmware upload from %s refused: the TOTP token of '%s' was lost (NVS)", address, AUTH_WEB_LOCAL_USER);
@@ -2800,8 +2785,6 @@ namespace
             }
             if (ok)
                 web_auth_record_success(peer); // the password and, when required, the code
-            memset(authorization, 0, sizeof(authorization));
-            memset(credentials, 0, sizeof(credentials));
             if (!ok)
             {
                 char address[INET6_ADDRSTRLEN];
@@ -3123,7 +3106,7 @@ namespace
             }
             err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(block), static_cast<ssize_t>(length));
         }
-        free(block);
+        secret_free(block); // the core dump holds RAM of the crashed firmware (stacks), secrets among it
         if (err != ESP_OK)
         {
             httpd_resp_send_chunk(req, nullptr, 0);
@@ -3273,11 +3256,11 @@ namespace
         cJSON_AddStringToObject(root, "hostname", hostname);
         cJSON_AddStringToObject(root, "fqdn", boot.fqdn);
         // The login page asks for a user name while RADIUS logins are on (the settings in use)
-        web_settings_t *running = new (std::nothrow) web_settings_t{};
+        web_settings_t *running = big_new<web_settings_t>();
         if (running != nullptr)
             web_settings_get_running(*running);
         cJSON_AddBoolToObject(root, "login_user", running != nullptr && running->web_login.radius);
-        delete running;
+        big_delete(running);
         // Only in that state (the answer is as before otherwise): stored security data was lost, logins are refused
         if (security_data_lost())
             cJSON_AddBoolToObject(root, "security_data_lost", true);
@@ -3373,7 +3356,7 @@ namespace
             return ESP_OK;
         const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
         const cJSON *certificate = cJSON_GetObjectItemCaseSensitive(root, "certificate");
-        cJSON *key = cJSON_GetObjectItemCaseSensitive(root, "key");
+        const cJSON *key = cJSON_GetObjectItemCaseSensitive(root, "key");
         char err[192] = "";
         bool ok = false;
         bool own = false;
@@ -3385,8 +3368,6 @@ namespace
         else
             ok = web_tls_set(own, own && certificate != nullptr ? certificate->valuestring : nullptr, own && key != nullptr ? key->valuestring : nullptr,
                              identity, err, sizeof(err));
-        if (cJSON_IsString(key))
-            mbedtls_platform_zeroize(key->valuestring, strlen(key->valuestring));
         cJSON_Delete(root);
         if (!ok)
             return send_error(req, "400 Bad Request", err);
@@ -3415,11 +3396,11 @@ namespace
         if (!header(req, "X-CSRF-Token", csrf, sizeof(csrf)) || !web_auth_csrf_valid(token, csrf) ||
             (header(req, "Sec-Fetch-Site", fetch_site, sizeof(fetch_site)) && strcmp(fetch_site, "same-origin") != 0))
             return send_error(req, "403 Forbidden", "Request rejected (origin or CSRF token)");
-        web_settings_t *running = new (std::nothrow) web_settings_t{}; // about 5.5 kB: not on the server task stack
+        web_settings_t *running = big_new<web_settings_t>(); // about 5.5 kB: not on the server task stack
         cJSON *root = cJSON_CreateObject();
         if (running == nullptr || root == nullptr)
         {
-            delete running;
+            big_delete(running);
             cJSON_Delete(root);
             return send_error(req, "503 Service Unavailable", "Out of memory");
         }
@@ -3428,8 +3409,7 @@ namespace
         settings_to_json(cJSON_AddObjectToObject(root, "settings"), *running, true);
         char host[WEB_HOSTNAME_MAX_LEN + 1];
         web_settings_hostname(*running, host, sizeof(host));
-        memset(running, 0, sizeof(web_settings_t)); // no secrets left on the heap (no temporary on the stack)
-        delete running;
+        big_delete(running); // zeroed: no secrets left on the heap
         cJSON_AddStringToObject(root, "hostname", host);
         cJSON_AddStringToObject(root, "firmware", get_app_metadata()->version);
         const time_t now = time(nullptr);
@@ -3458,8 +3438,6 @@ namespace
             cJSON_AddStringToObject(tls, "key", web_tls_own_key_pem());
         }
         char *text = cJSON_Print(root);
-        if (cJSON *key = cJSON_GetObjectItemCaseSensitive(tls, "key"); cJSON_IsString(key))
-            mbedtls_platform_zeroize(key->valuestring, strlen(key->valuestring));
         cJSON_Delete(root);
         if (text == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
@@ -3470,8 +3448,7 @@ namespace
         httpd_resp_set_hdr(req, "Content-Disposition", disposition);
         const size_t length = strlen(text);
         const esp_err_t err = httpd_resp_send(req, text, static_cast<ssize_t>(length));
-        memset(text, 0, length); // contains secrets
-        cJSON_free(text);
+        cJSON_free(text); // zeroed (main.cpp): it contains the secrets
         ESP_LOGI(TAG, "Web admin: configuration exported");
         return err;
     }
@@ -3496,7 +3473,7 @@ namespace
             web_settings_t running, defaults, candidate;
             web_allow_entry_t entries[WEB_ALLOW_LIST_MAX];
         };
-        sets_t *sets = new (std::nothrow) sets_t{};
+        sets_t *sets = big_new<sets_t>();
         if (sets == nullptr)
         {
             cJSON_Delete(root);
@@ -3558,7 +3535,7 @@ namespace
         {
             const cJSON *mode = cJSON_GetObjectItemCaseSensitive(tls, "mode");
             const cJSON *certificate = cJSON_GetObjectItemCaseSensitive(tls, "certificate");
-            cJSON *key = cJSON_GetObjectItemCaseSensitive(tls, "key");
+            const cJSON *key = cJSON_GetObjectItemCaseSensitive(tls, "key");
             if (!cJSON_IsObject(tls) || !cJSON_IsString(mode) || (strcmp(mode->valuestring, "own") != 0 && strcmp(mode->valuestring, "self") != 0))
             {
                 snprintf(err, sizeof(err), "Configuration file: tls.mode must be own or self");
@@ -3579,8 +3556,6 @@ namespace
                     ok = false;
                 }
             }
-            if (cJSON_IsString(key))
-                mbedtls_platform_zeroize(key->valuestring, strlen(key->valuestring));
         }
         const auto free_tls = [&]() {
             if (tls_key != nullptr)
@@ -3603,7 +3578,7 @@ namespace
         {
             delete tls_info;
             free_tls();
-            delete sets;
+            big_delete(sets);
             return send_error(req, "400 Bad Request", err);
         }
         delete tls_info;
@@ -3616,7 +3591,7 @@ namespace
             if (result != ESP_OK)
             {
                 free_tls();
-                delete sets;
+                big_delete(sets);
                 return result == ESP_ERR_INVALID_STATE
                            ? send_error(req, "409 Conflict", "Refused: the allow-list of the file does not allow your own address")
                            : send_error(req, "500 Internal Server Error", "Allow-list could not be stored");
@@ -3631,7 +3606,7 @@ namespace
             free_tls();
             if (!stored)
             {
-                delete sets;
+                big_delete(sets);
                 return send_error(req, "500 Internal Server Error", err);
             }
             tls_changed = strcmp(identity.fingerprint, s_identity.fingerprint) != 0;
@@ -3664,7 +3639,7 @@ namespace
         }
         if (write_err != ESP_OK)
         {
-            delete sets;
+            big_delete(sets);
             return send_error(req, "500 Internal Server Error", "Settings could not be written to NVS");
         }
         if (!restart)
@@ -3677,8 +3652,7 @@ namespace
             else
                 web_settings_end_oneshot(); // saved and in use: the next restart loads the same values
         }
-        memset(sets, 0, sizeof(sets_t)); // no secrets left on the heap (no temporary on the stack)
-        delete sets;
+        big_delete(sets); // zeroed: no secrets left on the heap
         ESP_LOGI(TAG, "Web admin: configuration imported%s%s", network_changed ? " (network: waiting for the confirmation)" : "",
                  restart ? ", restarting" : "");
 
@@ -3828,7 +3802,7 @@ namespace
         bool network_confirm = false;
         if (web_settings_boot_was_oneshot(&network_confirm) && network_confirm)
         {
-            web_settings_t *saved = new (std::nothrow) web_settings_t; // about 5.5 kB: not on the start task stack
+            web_settings_t *saved = big_new<web_settings_t>(); // about 5.5 kB: not on the start task stack
             if (saved == nullptr)
                 start_network_confirmation(boot, boot, true); // no rollback copy: the timeout restarts anyway
             else
@@ -3836,8 +3810,7 @@ namespace
                 if (!web_settings_get_saved(*saved))
                     web_settings_defaults(*saved);
                 start_network_confirmation(*saved, boot, true);
-                memset(saved, 0, sizeof(web_settings_t));
-                delete saved;
+                big_delete(saved);
             }
             ESP_LOGW(TAG, "Web admin: this start uses changed network settings; confirm them on the page within 120 s or the device restarts with the saved settings");
         }

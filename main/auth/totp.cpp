@@ -3,6 +3,7 @@
 //
 
 #include "auth/totp.h"
+#include "sys/secret.h"
 
 #include <cstdio>
 #include <cstring>
@@ -147,13 +148,13 @@ bool totp_hotp(const uint8_t *secret, size_t secret_length, uint64_t counter, ui
         counter >>= 8;
     }
     uint8_t mac[20];
+    const secret_wipe_t wipe_mac(mac, sizeof(mac));
     if (!hmac_sha1(secret, secret_length, message, sizeof(message), mac))
         return false;
     const unsigned offset = mac[19] & 0x0F; // dynamic truncation (RFC 4226 5.3)
     const uint32_t binary = (static_cast<uint32_t>(mac[offset] & 0x7F) << 24) | (static_cast<uint32_t>(mac[offset + 1]) << 16) |
                             (static_cast<uint32_t>(mac[offset + 2]) << 8) | mac[offset + 3];
     code = binary % 1000000u;
-    memset(mac, 0, sizeof(mac));
     return true;
 }
 
@@ -202,6 +203,7 @@ bool totp_verify(const uint8_t *secret, size_t secret_length, int64_t now_s, con
 bool totp_uri(const char *issuer, const char *user, const uint8_t *secret, size_t secret_length, char *out, size_t out_size)
 {
     char key[TOTP_BASE32_SIZE];
+    const secret_wipe_t wipe_key(key, sizeof(key));
     if (secret_length > TOTP_SECRET_SIZE || totp_base32_encode(secret, secret_length, key, sizeof(key)) == 0)
         return false;
     size_t at = 0;
@@ -210,7 +212,6 @@ bool totp_uri(const char *issuer, const char *user, const uint8_t *secret, size_
                     append_encoded(out, out_size, at, user) && append(out, out_size, at, "?secret=") && append(out, out_size, at, key) &&
                     append(out, out_size, at, "&issuer=") && append_encoded(out, out_size, at, issuer) &&
                     append(out, out_size, at, "&algorithm=SHA1&digits=6&period=30");
-    memset(key, 0, sizeof(key));
     if (!ok && out_size > 0)
         out[0] = '\0';
     return ok;
@@ -250,6 +251,7 @@ bool totp_recovery_normalise(const char *text, char out[11])
 bool totp_recovery_hash(const uint8_t salt[TOTP_SALT_SIZE], const char normalised[11], uint8_t out[TOTP_RECOVERY_HASH])
 {
     uint8_t input[TOTP_SALT_SIZE + 10];
+    const secret_wipe_t wipe_input(input, sizeof(input)); // holds the recovery code
     memcpy(input, salt, TOTP_SALT_SIZE);
     memcpy(input + TOTP_SALT_SIZE, normalised, 10);
     uint8_t hash[32];
@@ -257,13 +259,13 @@ bool totp_recovery_hash(const uint8_t salt[TOTP_SALT_SIZE], const char normalise
     const bool ok = psa_hash_compute(PSA_ALG_SHA_256, input, sizeof(input), hash, sizeof(hash), &length) == PSA_SUCCESS && length == 32;
     if (ok)
         memcpy(out, hash, TOTP_RECOVERY_HASH);
-    memset(input, 0, sizeof(input));
     return ok;
 }
 
 int totp_recovery_find(const uint8_t salt[TOTP_SALT_SIZE], const uint8_t hashes[TOTP_RECOVERY_CODES][TOTP_RECOVERY_HASH], const char *text)
 {
     char normalised[11];
+    const secret_wipe_t wipe_normalised(normalised, sizeof(normalised)); // the recovery code typed
     uint8_t hash[TOTP_RECOVERY_HASH];
     if (text == nullptr || !totp_recovery_normalise(text, normalised) || !totp_recovery_hash(salt, normalised, hash))
         return -1;

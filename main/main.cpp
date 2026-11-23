@@ -59,6 +59,8 @@
 #include "custom/crash_dump.h"
 #include "sys/nvs_purge.h"
 #include "sys/nvs_state.h"
+#include "sys/secret.h"
+#include "cJSON.h"
 #include "bootloader_random.h"
 #include "esp_ota_ops.h"
 #include "web/web_net.h"
@@ -13071,6 +13073,15 @@ extern "C" void app_main()
     // (random.rst), and the TLS key, salts, session IDs, TOTP secrets and lwIP draw from it. It stays on: the
     // firmware uses neither the ADC nor I2S, which need it off (bootloader_random.h).
     bootloader_random_enable();
+
+    // Every block cJSON frees is zeroed first (sys/secret.h): the trees of requests hold passwords, shared secrets
+    // and keys, and so do printed texts (the configuration export) and the buffers of a print. With a free function
+    // other than free() cJSON has no realloc and copies a growing print buffer into a new block, freeing the old one
+    // through this function (cJSON.c cJSON_InitHooks(), ensure()). cJSON is used by the web page only (and
+    // auth/auth_config.cpp for it), never on the NTP or PTP path; nodes still come from malloc().
+    cJSON_Hooks hooks{};
+    hooks.free_fn = secret_free;
+    cJSON_InitHooks(&hooks);
 
     // The settings of this boot (compiled defaults, NVS, one-shot set of the web admin) are needed by everything
     // below, the PPS pin included

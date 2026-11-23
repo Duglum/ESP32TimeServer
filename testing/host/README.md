@@ -47,7 +47,7 @@ Needs clang with the sanitizer and libFuzzer runtimes for Windows: [LLVM-MinGW](
 (`winget install MartinStorsjo.LLVM-MinGW.UCRT`). `radius_test` and `totp_test` also need ESP-IDF 6.1 (`IDF_PATH`,
 default `C:\esp\v6.1\esp-idf`) and its CMake and Ninja: the first run builds TF-PSA-Crypto of ESP-IDF for the PC into
 `build\psa` (ESP-IDF's copy includes two headers of its port: `stubs\psa_shim` stands in for them). `stubs\mbedtls\platform_util.h` gives
-`ntp_auth_test` and `ptp_auth_test` the `mbedtls_platform_zeroize()` of TF-PSA-Crypto (bytes written through a volatile
+`ntp_auth_test`, `ptp_auth_test`, `nvs_blob_test` and `nvs_purge_test` the `mbedtls_platform_zeroize()` of TF-PSA-Crypto (bytes written through a volatile
 pointer); the tests built with TF-PSA-Crypto find its own header first.
 
 ```powershell

@@ -3,6 +3,7 @@
 //
 
 #include "auth/radius_proto.h"
+#include "sys/secret.h"
 
 #include <cstdio>
 #include <cstring>
@@ -250,11 +251,11 @@ size_t radius_build_access_request(const radius_request_t &request, uint8_t iden
         for (size_t block = 0; block < padded; block += 16)
         {
             uint8_t b[MD5_SIZE];
+            const secret_wipe_t wipe_b(b, sizeof(b)); // MD5 of the shared secret: hides the password
             if (!md5_parts(secret, secret_length, previous, 16, nullptr, 0, b))
                 return 0;
             for (size_t k = 0; k < 16; ++k)
                 hidden[block + k] ^= b[k];
-            memset(b, 0, sizeof(b));
             previous = hidden + block;
         }
     }

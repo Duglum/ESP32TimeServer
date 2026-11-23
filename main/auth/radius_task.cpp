@@ -5,6 +5,7 @@
 #include "auth/radius_task.h"
 #include "auth/radius_client.h"
 #include "auth/radius_proto.h"
+#include "sys/secret.h"
 #include "net/ip_text.h"
 #include "web/web_server.h" // app_eth_netif()
 
@@ -302,7 +303,7 @@ namespace
                 case radius_result_t::no_answer: ++s_no_answer; break;
                 case radius_result_t::busy: ++s_busy; break;
                 }
-            memset(&job, 0, sizeof(job)); // the password and the secrets
+            mbedtls_platform_zeroize(&job, sizeof(job)); // the password and the secrets
             job.fd = -1;
         }
         done(context, ticket, outcome);
@@ -597,7 +598,7 @@ uint32_t radius_submit(radius_login_t &login, radius_done_t done, void *context)
         else
             ++s_busy;
     }
-    memset(login.password, 0, sizeof(login.password));
+    mbedtls_platform_zeroize(login.password, sizeof(login.password));
     if (ticket != 0)
         xTaskNotifyGive(s_task);
     return ticket;

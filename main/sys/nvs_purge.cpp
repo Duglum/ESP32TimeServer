@@ -4,6 +4,7 @@
 // See nvs_purge.h (replaced and erased NVS data is purged from the flash)
 
 #include "sys/nvs_purge.h"
+#include "sys/secret.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -80,7 +81,7 @@ void nvs_purge_start()
         if (!written)
             ++failed;
     }
-    memset(page, 0, NVS_PURGE_PAGE_SIZE); // it held stored data, secrets among them
+    mbedtls_platform_zeroize(page, NVS_PURGE_PAGE_SIZE); // it held stored data, secrets among them
     free(page);
     free(zeros);
     free(runs);

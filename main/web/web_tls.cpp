@@ -753,20 +753,19 @@ namespace
             const int key_length = buffer == nullptr ? 0 : mbedtls_pk_write_key_der(&pk, buffer + MAX_DER, MAX_DER);
             if (cert_length == 0 || key_length <= 0)
             {
-                free(buffer);
+                free_data_secret(buffer, 2 * MAX_DER);
                 mbedtls_pk_free(&pk);
                 return false;
             }
             const uint8_t *key_der = buffer + 2 * MAX_DER - key_length;
 
             free(s_self_cert);
-            free(s_self_key);
+            free_data_secret(s_self_key, s_self_key_length);
             s_self_cert = static_cast<uint8_t *>(malloc(cert_length));
             s_self_key = static_cast<uint8_t *>(malloc(key_length));
             if (s_self_cert == nullptr || s_self_key == nullptr)
             {
-                memset(buffer, 0, 2 * MAX_DER);
-                free(buffer);
+                free_data_secret(buffer, 2 * MAX_DER);
                 mbedtls_pk_free(&pk);
                 return false;
             }
@@ -774,8 +773,7 @@ namespace
             memcpy(s_self_key, key_der, key_length);
             s_self_cert_length = cert_length;
             s_self_key_length = static_cast<size_t>(key_length);
-            memset(buffer, 0, 2 * MAX_DER);
-            free(buffer);
+            free_data_secret(buffer, 2 * MAX_DER);
 
             // With the saved settings lost (sys/record_mark.h) the FQDN is the default one: the identity is used, not
             // stored over the one that is left
