@@ -2693,7 +2693,8 @@ namespace
     //  - the page: session cookie, same origin and the CSRF header, as every other state changing request
     //  - scripts (tools/ote_upload.py): HTTP Basic authentication with the web admin password (any user name),
     //    inside the TLS connection. Refused while the default password is in use; wrong passwords count for the
-    //    login throttling like failed logins.
+    //    login throttling like failed logins. Refused like a login of the local user while stored security data it
+    //    depends on is lost: the saved settings, the password, the TOTP token of admin (after the password).
     // The body is the raw application image (Content-Type application/octet-stream).
     esp_err_t handle_ote(httpd_req_t *req)
     {
@@ -2775,6 +2776,18 @@ namespace
                                                       credentials_length - static_cast<size_t>(colon + 1 - credentials));
             else
                 web_auth_record_failed_check(peer); // header too long or not decodable
+            // As the page (login_succeeded()): a lost token of the local user is told only after the right password,
+            // whether a code is required or not, and that refusal is not counted (no code is checked)
+            if (ok && totp_store_lost(AUTH_WEB_LOCAL_USER))
+            {
+                memset(authorization, 0, sizeof(authorization));
+                memset(credentials, 0, sizeof(credentials));
+                char address[INET6_ADDRSTRLEN];
+                format_address(peer, address, sizeof(address));
+                ESP_LOGW(TAG, "Web admin: firmware upload from %s refused: the TOTP token of '%s' was lost (NVS)", address, AUTH_WEB_LOCAL_USER);
+                send_error(req, "403 Forbidden", LOST_DATA_MESSAGE);
+                return ESP_FAIL; // closes the connection (the body is not read)
+            }
             // The second factor of the local user: the code in X-TOTP-Code (tools/ote_upload.py --totp)
             if (ok && methods.totp_local)
             {
