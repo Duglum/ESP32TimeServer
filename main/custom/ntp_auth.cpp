@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/platform_util.h"
 #include "psa/crypto.h"
 
 namespace
@@ -129,10 +130,14 @@ namespace
         if (status == PSA_SUCCESS)
             status = psa_hash_finish(&operation, full_digest, sizeof(full_digest), &full_digest_length);
         psa_hash_abort(&operation);
-        if (status != PSA_SUCCESS || full_digest_length != sizeof(full_digest))
-            return false;
-        memcpy(digest, full_digest, NTP_AUTH_DIGEST_SIZE);
-        return true;
+        const bool ok = status == PSA_SUCCESS && full_digest_length == sizeof(full_digest);
+        if (ok)
+            memcpy(digest, full_digest, NTP_AUTH_DIGEST_SIZE);
+        // The whole digest of key and data: only the first NTP_AUTH_DIGEST_SIZE bytes are sent. Every wipe of key
+        // material in this file is mbedtls_platform_zeroize(): the compiler removed the plain memset() of a local at
+        // its end (seen in the release object)
+        mbedtls_platform_zeroize(full_digest, sizeof(full_digest));
+        return ok;
     }
 } // namespace
 
@@ -190,7 +195,7 @@ bool ntp_auth_configure(bool enabled, bool required, const ntp_auth_key_input_t 
         taskEXIT_CRITICAL(&s_writer_lock);
         s_available.store(available, std::memory_order_release);
     }
-    memset(&next, 0, sizeof(next));
+    mbedtls_platform_zeroize(&next, sizeof(next));
     return available;
 }
 
@@ -211,7 +216,7 @@ size_t ntp_auth_key_count()
     key_set_t keys{};
     snapshot(keys);
     const size_t count = keys.count;
-    memset(&keys, 0, sizeof(keys));
+    mbedtls_platform_zeroize(&keys, sizeof(keys));
     return count;
 }
 
@@ -222,7 +227,7 @@ uint32_t ntp_auth_default_key_id()
     key_set_t keys{};
     snapshot(keys);
     const uint32_t key_id = keys.count != 0 ? keys.keys[0].key_id : 0;
-    memset(&keys, 0, sizeof(keys));
+    mbedtls_platform_zeroize(&keys, sizeof(keys));
     return key_id;
 }
 
@@ -245,7 +250,7 @@ bool ntp_auth_key_hex(size_t index, uint32_t *key_id, char *output, size_t outpu
         output[key.key_length * 2] = '\0';
         *key_id = key.key_id;
     }
-    memset(&keys, 0, sizeof(keys));
+    mbedtls_platform_zeroize(&keys, sizeof(keys));
     return ok;
 }
 
@@ -272,7 +277,7 @@ bool ntp_auth_default_key_ascii(char *output, size_t output_size)
     }
     if (ok)
         output[keys.keys[0].key_length] = '\0';
-    memset(&keys, 0, sizeof(keys));
+    mbedtls_platform_zeroize(&keys, sizeof(keys));
     return ok;
 }
 
@@ -294,12 +299,16 @@ ntp_auth_result_t ntp_auth_verify_request(const uint8_t *packet, size_t packet_l
     const uint32_t requested_key_id = read_u32_be(packet + key_id_offset);
     ntp_auth_key_t key{};
     if (!find_key(requested_key_id, key))
+    {
+        // A pass of find_key() that was retried may have copied a key that is not in the set any more
+        mbedtls_platform_zeroize(&key, sizeof(key));
         return ntp_auth_result_t::unknown_key;
+    }
 
     uint8_t digest[NTP_AUTH_DIGEST_SIZE] = {};
     const bool valid = calculate_digest(key, packet, key_id_offset, digest) &&
                        constant_time_equal(digest, packet + key_id_offset + NTP_AUTH_KEY_ID_SIZE, NTP_AUTH_DIGEST_SIZE);
-    memset(&key, 0, sizeof(key));
+    mbedtls_platform_zeroize(&key, sizeof(key));
     if (!valid)
         return ntp_auth_result_t::invalid_mac;
 
@@ -315,11 +324,14 @@ bool ntp_auth_append_response(uint8_t *packet, size_t packet_capacity, size_t *p
 
     ntp_auth_key_t key{};
     if (!find_key(key_id, key))
+    {
+        mbedtls_platform_zeroize(&key, sizeof(key)); // see ntp_auth_verify_request()
         return false;
+    }
 
     write_u32_be(packet + 48, key_id);
     const bool ok = calculate_digest(key, packet, 48, packet + 48 + NTP_AUTH_KEY_ID_SIZE);
-    memset(&key, 0, sizeof(key));
+    mbedtls_platform_zeroize(&key, sizeof(key));
     if (!ok)
         return false;
     *packet_length = 48 + NTP_AUTH_TRAILER_SIZE;

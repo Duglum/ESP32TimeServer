@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/platform_util.h"
 #include "psa/crypto.h"
 
 namespace
@@ -172,10 +173,12 @@ namespace
             ok = hash_block_and_data(pad, inner, sizeof(inner), false, outer);
             if (ok)
                 memcpy(icv, outer, PTP_AUTH_ICV_SIZE);
-            memset(outer, 0, sizeof(outer));
+            mbedtls_platform_zeroize(outer, sizeof(outer));
         }
-        memset(pad, 0, sizeof(pad));
-        memset(inner, 0, sizeof(inner));
+        // Every wipe of key material in this file is mbedtls_platform_zeroize(): the compiler removed the plain
+        // memset() of a local at its end (seen in the release object)
+        mbedtls_platform_zeroize(pad, sizeof(pad));
+        mbedtls_platform_zeroize(inner, sizeof(inner));
         return ok;
     }
 } // namespace
@@ -224,7 +227,7 @@ bool ptp_auth_configure(const ptp_auth_config_t &config, const ptp_auth_key_inpu
         taskEXIT_CRITICAL(&s_writer_lock);
         s_available.store(available, std::memory_order_release);
     }
-    memset(&next, 0, sizeof(next));
+    mbedtls_platform_zeroize(&next, sizeof(next));
     if (config.enabled && !available)
         ESP_LOGE(TAG, "PTP authentication is on but the active key %lu is not usable: PTP messages are not signed%s",
                  static_cast<unsigned long>(config.active_key_id), config.required ? " and not answered" : "");
@@ -268,13 +271,13 @@ ptp_auth_result_t ptp_auth_verify(const uint8_t *message, size_t length)
     if (tlv[4] != snapshot.spp || !snapshot.found)
     {
         const bool other_association = tlv[4] != snapshot.spp;
-        memset(&snapshot, 0, sizeof(snapshot));
+        mbedtls_platform_zeroize(&snapshot, sizeof(snapshot));
         return other_association ? ptp_auth_result_t::malformed : ptp_auth_result_t::unknown_key;
     }
     uint8_t icv[PTP_AUTH_ICV_SIZE];
     const bool valid = calculate_icv(snapshot.key, message, length - PTP_AUTH_ICV_SIZE, snapshot.mutable_correction, icv) &&
                        constant_time_equal(icv, tlv + 10, PTP_AUTH_ICV_SIZE);
-    memset(&snapshot, 0, sizeof(snapshot));
+    mbedtls_platform_zeroize(&snapshot, sizeof(snapshot));
     return valid ? ptp_auth_result_t::valid : ptp_auth_result_t::invalid_mac;
 }
 
@@ -287,7 +290,11 @@ bool ptp_auth_append(uint8_t *message, size_t capacity, size_t *length)
     snapshot_t snapshot{};
     load(0, snapshot);
     if (!snapshot.found)
+    {
+        // A pass of load() that was retried may have copied a key that is not the active one any more
+        mbedtls_platform_zeroize(&snapshot, sizeof(snapshot));
         return false;
+    }
     const size_t total = *length + PTP_AUTH_TLV_SIZE;
     uint8_t *tlv = message + *length;
     tlv[0] = static_cast<uint8_t>(TLV_AUTHENTICATION >> 8);
@@ -301,7 +308,7 @@ bool ptp_auth_append(uint8_t *message, size_t capacity, size_t *length)
     message[2] = static_cast<uint8_t>(total >> 8);
     message[3] = static_cast<uint8_t>(total);
     const bool ok = calculate_icv(snapshot.key, message, total - PTP_AUTH_ICV_SIZE, snapshot.mutable_correction, tlv + 10);
-    memset(&snapshot, 0, sizeof(snapshot));
+    mbedtls_platform_zeroize(&snapshot, sizeof(snapshot));
     if (!ok)
     {
         // Back to the unsigned message (the caller does not send it: no unsigned fallback)

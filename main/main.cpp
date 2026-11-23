@@ -109,6 +109,7 @@ extern "C"
 #include "ff.h"
 #include "esp_mac.h"
 #include "esp_tls.h"
+#include "mbedtls/platform_util.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
 #include "esp_heap_caps.h"
@@ -9665,7 +9666,8 @@ static void setup_mqtt()
         {
             web_settings_get_running(*running);
             mqtt_hand_over_settings(*running);
-            memset(running, 0, sizeof(web_settings_t));
+            // A copy of every secret of the settings: the compiler removed a plain memset() before the delete
+            mbedtls_platform_zeroize(running, sizeof(web_settings_t));
             delete running;
         }
         else
@@ -13016,6 +13018,7 @@ void write_open_for_business_messages_to_the_console()
                 ESP_LOGI(TAG, "%" PRIu32 " SHA256 HEX:%s", authentication_key_id, authentication_key_hex);
         }
         ESP_LOGI(TAG, " ");
+        mbedtls_platform_zeroize(authentication_key_hex, sizeof(authentication_key_hex));
     }
 #endif
 
