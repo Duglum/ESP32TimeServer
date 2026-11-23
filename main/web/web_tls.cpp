@@ -693,6 +693,19 @@ namespace
         return static_cast<size_t>(ret);
     }
 
+    // The stored self-signed certificate (s_self_cert) parses and belongs to the key pk
+    bool self_cert_belongs(mbedtls_pk_context &pk)
+    {
+        mbedtls_x509_crt *crt = static_cast<mbedtls_x509_crt *>(calloc(1, sizeof(mbedtls_x509_crt))); // not on the stack
+        if (crt == nullptr)
+            return true; // not checked: the certificate is used as before
+        mbedtls_x509_crt_init(crt);
+        const bool ok = mbedtls_x509_crt_parse_der(crt, s_self_cert, s_self_cert_length) == 0 && key_belongs(crt->pk, pk);
+        mbedtls_x509_crt_free(crt);
+        free(crt);
+        return ok;
+    }
+
     // The self-signed identity: loaded, or created when missing or issued for another name. Without NVS (nvs false,
     // handle not used) it is created for this start only.
     bool load_or_create_self(nvs_handle_t handle, bool nvs, const char *fqdn)
@@ -706,7 +719,15 @@ namespace
         mbedtls_pk_context pk;
         mbedtls_pk_init(&pk);
         const bool key_ok = have_key && mbedtls_pk_parse_key(&pk, s_self_key, s_self_key_length, nullptr, 0) == 0;
-        const bool ok = key_ok && have_cert && have_name && strcmp(stored_name, fqdn) == 0;
+        bool ok = key_ok && have_cert && have_name && strcmp(stored_name, fqdn) == 0;
+        // Key, certificate and name are three writes: a new key (made when the stored one was missing or unreadable)
+        // whose certificate write then failed or was cut off leaves the certificate of the former key, and with that
+        // pair every TLS handshake fails. Such a certificate is issued again for the stored key.
+        if (ok && !self_cert_belongs(pk))
+        {
+            ESP_LOGW(TAG, "The stored self-signed certificate does not belong to the stored key: it is issued again");
+            ok = false;
+        }
 
         if (!ok)
         {
