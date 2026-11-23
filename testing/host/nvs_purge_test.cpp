@@ -129,6 +129,16 @@ namespace
         corrupt.fill(0, 4, ERASED, 0x41);
         corrupt.b[28] ^= 0x80; // CRC of the header
         CHECK(runs_of(corrupt, runs) == 0);
+        // The format version (byte 8, counted down by ESP-IDF for a new format): 0xfe of ESP-IDF 6.1.1 and 0xff of
+        // the format before it are scanned, a newer one (0xfd, 0x00) is not touched, also with a right header CRC
+        for (int version : {0xff, 0xfe, 0xfd, 0x00})
+        {
+            page_t p;
+            p.b[8] = static_cast<uint8_t>(version);
+            put32(&p.b[28], crc32_le(0xFFFFFFFFu, &p.b[4], 24));
+            p.fill(0, 4, ERASED, 0x41);
+            CHECK(runs_of(p, runs) == (version >= 0xfe ? 1u : 0u));
+        }
     }
 
     void test_runs()

@@ -16,6 +16,13 @@ namespace
     constexpr uint32_t PAGE_ACTIVE = 0xFFFFFFFEu;
     constexpr uint32_t PAGE_FULL = 0xFFFFFFFCu;
     constexpr uint8_t ENTRY_ERASED = 0; // EntryState::ERASED (WRITTEN 2, EMPTY 3, ILLEGAL 1)
+    // The format version in the header (nvs_constants.h: NVS_CONST_NVS_VERSION 0xfe, "Decrement to upgrade"). ESP-IDF
+    // 6.1.1 uses it for one check only: a partition with a page of a smaller value is refused (Page::load():
+    // ESP_ERR_NVS_NEW_VERSION_FOUND), so this scan never sees one there; a page with 0xff is read with the layout
+    // above. A later ESP-IDF with a new format would accept its smaller value: such a page is not touched by code
+    // written for the layout above.
+    constexpr size_t VERSION_OFFSET = 8;
+    constexpr uint8_t VERSION_KNOWN_MIN = 0xFE;
 
     uint32_t u32_at(const uint8_t *p)
     {
@@ -54,6 +61,8 @@ size_t nvs_purge_page_runs(const uint8_t *page, nvs_purge_run_t runs[NVS_PURGE_M
     const uint32_t state = u32_at(page);
     if ((state != PAGE_ACTIVE && state != PAGE_FULL) || crc32_le(0xFFFFFFFFu, page + 4, 24) != u32_at(page + 28))
         return 0;
+    if (page[VERSION_OFFSET] < VERSION_KNOWN_MIN)
+        return 0; // a format newer than the one this scan was written for
     size_t count = 0;
     size_t index = 0;
     while (index < ENTRY_COUNT)

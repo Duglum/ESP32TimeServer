@@ -44,7 +44,8 @@ struct nvs_purge_run_t
 
 // The runs of consecutive entries of one page (NVS_PURGE_PAGE_SIZE bytes) that the state bitmap marks erased and that
 // still hold data (not all zero), at most NVS_PURGE_MAX_RUNS; 0 for a page NVS does not use (only ACTIVE and FULL pages
-// with a right header CRC are looked at). Pure.
+// with a right header CRC are looked at) and for a page whose format version is newer than that of ESP-IDF 6.1.1 (a
+// version byte below 0xfe). Pure.
 size_t nvs_purge_page_runs(const uint8_t *page, nvs_purge_run_t runs[NVS_PURGE_MAX_RUNS]);
 
 // At the start, after nvs_state_init() and before anything else writes NVS: zeroes every erased entry of the NVS
