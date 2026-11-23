@@ -29,6 +29,19 @@
 # built with its own component list and gets ESP-IDF's nvs_flash, which it builds without Page::mLoadEntryTable().
 # ESP-IDF itself is not changed.
 #
+# The path of the copy in the image. ESP-IDF replaces the project folder and IDF_PATH in __FILE__ (assert texts) with
+# -fmacro-prefix-map=<project>=. and <IDF_PATH>=/IDF (CONFIG_COMPILER_HIDE_PATHS_MACROS), but the copy lies in the
+# build folder: without a map of its own an assert text of the copy holds the build folder (./<build>/nvs_flash_fix/...
+# inside the project, the absolute path outside it). So the script adds -fmacro-prefix-map=<copy>=<name of ESP-IDF's
+# component> to ESP-IDF's COMPILE_OPTIONS (every component, as ESP-IDF's own maps): the copy's files read as ESP-IDF's
+# own, /IDF/components/nvs_flash/... (or <IDF_PATH>/components/nvs_flash/... when that option is off). Of several
+# matching -fmacro-prefix-map options GCC uses the last one given (the manual says nothing about it; measured with
+# GCC 15.2 of ESP-IDF 6.1.1), and inside the project <project>=. matches the copy too: the option is added by a
+# deferred call at the end of the CMakeLists.txt that includes this file, after project() has added ESP-IDF's maps.
+# The line numbers in an assert text are those of the corrected file. Debug information (ELF only) is not mapped:
+# without CONFIG_APP_REPRODUCIBLE_BUILD ESP-IDF's own components carry the build folder there too (DW_AT_comp_dir),
+# with it ESP-IDF maps every component folder, the copy's included.
+#
 # Three cases, decided at every CMake configure:
 # - both faulty texts are there exactly once: the copy is made (only changed files are written) and used;
 # - both corrected texts are there exactly once (an ESP-IDF with these corrections): ESP-IDF's own component is used,
@@ -104,6 +117,24 @@ function(nvs_fix_count needle out)
     endif()
 endfunction()
 
+# Deferred to the end of the including CMakeLists.txt: __FILE__ of the copy <copy> reads as ESP-IDF's nvs_flash (see
+# the header). The sdkconfig values are read here, in the function's own scope.
+function(nvs_fix_map_copy copy)
+    if(NOT COMMAND idf_build_set_property)
+        message(FATAL_ERROR "nvs_flash_fix.cmake: ESP-IDF's project.cmake was not included in the CMakeLists.txt that "
+                            "includes this file")
+    endif()
+    idf_build_get_property(idf_path IDF_PATH)
+    idf_build_get_property(sdkconfig_cmake SDKCONFIG_CMAKE)
+    include("${sdkconfig_cmake}")
+    if(CONFIG_COMPILER_HIDE_PATHS_MACROS)
+        set(name "/IDF/components/nvs_flash")
+    else()
+        set(name "${idf_path}/components/nvs_flash")
+    endif()
+    idf_build_set_property(COMPILE_OPTIONS "-fmacro-prefix-map=${copy}=${name}" APPEND)
+endfunction()
+
 nvs_fix_count("${nvs_fix_faulty_1}" nvs_fix_f1)
 nvs_fix_count("${nvs_fix_corrected_1}" nvs_fix_c1)
 nvs_fix_count("${nvs_fix_faulty_2}" nvs_fix_f2)
@@ -167,6 +198,9 @@ if(nvs_fix_f1 EQUAL 1 AND nvs_fix_c1 EQUAL 0 AND nvs_fix_f2 EQUAL 1 AND nvs_fix_
     endif()
 
     list(APPEND EXTRA_COMPONENT_DIRS "${nvs_fix_copy}")
+    # The copy's path in __FILE__ (see the header): at the end of the including CMakeLists.txt, after project(). The
+    # bracket argument keeps the path as it is now.
+    cmake_language(EVAL CODE "cmake_language(DEFER CALL nvs_fix_map_copy [==[${nvs_fix_copy}]==])")
     message(STATUS "${nvs_fix_name}: nvs_flash is built from ${nvs_fix_copy} (Page::mLoadEntryTable() of nvs_page.cpp "
                    "corrected in two places)")
 elseif(nvs_fix_f1 EQUAL 0 AND nvs_fix_c1 EQUAL 1 AND nvs_fix_f2 EQUAL 0 AND nvs_fix_c2 EQUAL 1)
