@@ -57,6 +57,7 @@
 
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
+#include "sys/nvs_purge.h"
 #include "sys/nvs_state.h"
 #include "bootloader_random.h"
 #include "esp_ota_ops.h"
@@ -2998,7 +2999,7 @@ static bool save_gnss_nvs_data(const gnss_identity_t &identity, uint32_t initial
         return false;
 
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(gnss_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(gnss_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err != ESP_OK)
         return false;
 
@@ -3027,7 +3028,7 @@ static bool save_gnss_nvs_initial_baud(uint32_t initial_baud)
         return false;
 
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(gnss_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(gnss_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err == ESP_OK)
     {
         uint32_t stored_initial_baud = 0;
@@ -3047,7 +3048,7 @@ static bool save_gnss_nvs_initial_baud(uint32_t initial_baud)
 static void clear_gnss_nvs_data()
 {
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(gnss_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(gnss_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err != ESP_OK)
         return;
 
@@ -5651,7 +5652,7 @@ static void load_pps_isr_latency_from_nvs()
 static bool save_pps_isr_latency_to_nvs(int32_t ns)
 {
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(isr_lat_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(isr_lat_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "PPS ISR latency: nvs_open failed: %s", esp_err_to_name(err));
@@ -5911,7 +5912,7 @@ static void load_ptp_write_latency_from_nvs()
 static bool save_ptp_write_latency_to_nvs(int32_t ns)
 {
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(ptp_lat_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(ptp_lat_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "PTP write latency: nvs_open failed: %s", esp_err_to_name(err));
@@ -8974,7 +8975,7 @@ static bool mqtt_publish_pending_restart_notification()
 
     char payload[512] = "";
     nvs_handle_t handle = 0;
-    if (nvs_open(restart_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+    if (nvs_open(restart_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle) != ESP_OK)
         return false;
 
     size_t payload_size = sizeof(payload);
@@ -9192,7 +9193,7 @@ static void controlled_restart(const char *reason)
 #endif
 
                     nvs_handle_t handle = 0;
-                    esp_err_t result = nvs_open(restart_NVS_NAMESPACE, NVS_READWRITE, &handle);
+                    esp_err_t result = nvs_open(restart_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
                     if (result == ESP_OK)
                     {
                         result = nvs_set_str(handle, restart_NVS_KEY_PENDING, payload);
@@ -10158,6 +10159,9 @@ void setup_NVS_storage(void)
     // recovery), NTP answers as unsynchronised, PTP, MQTT and OTE are off (web_settings_load_boot()) and every login is
     // refused (web_server.cpp); nothing is stored
     s_nvs_unusable = nvs_state_init() != ESP_OK;
+    // Before anything is written: erased data left in the flash is zeroed (sys/nvs_purge.h; nothing while NVS cannot be
+    // used). Every writer opens NVS with NVS_READWRITE_PURGE, so a replaced or erased item is zeroed when it goes.
+    nvs_purge_start();
     if (!s_nvs_unusable)
     {
 #if PPS_ISR_LATENCY_AUTO

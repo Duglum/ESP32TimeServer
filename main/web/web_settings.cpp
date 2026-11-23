@@ -449,7 +449,7 @@ namespace
         blob->crc = blob_crc(*blob);
 
         nvs_handle_t handle = 0;
-        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
         if (err == ESP_OK)
         {
             // The same bytes again (a Save of unchanged settings, the same one-shot set twice): nothing is written.
@@ -1038,7 +1038,7 @@ void web_settings_load_boot()
     nvs_handle_t handle = 0;
     // NVS that cannot be used at this start (sys/nvs_state.h) is not opened: its state was logged by nvs_state_init()
     const bool nvs = nvs_state_usable();
-    esp_err_t err = nvs ? nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) : nvs_state_error();
+    esp_err_t err = nvs ? nvs_open(NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle) : nvs_state_error();
     // Lost = the mark without the set (sys/record_mark.h). A set that is there but not usable by this firmware is no
     // loss: as before, the defaults are used and it is not saved over.
     size_t saved_size = 0;
@@ -1223,7 +1223,7 @@ esp_err_t web_settings_factory_reset()
     for (const char *ns : {NVS_NAMESPACE, AUTH_NVS_NAMESPACE, TOTP_NVS_NAMESPACE})
     {
         nvs_handle_t handle = 0;
-        esp_err_t err = nvs_open(ns, NVS_READWRITE, &handle);
+        esp_err_t err = nvs_open(ns, NVS_READWRITE_PURGE, &handle);
         if (err == ESP_ERR_NVS_NOT_FOUND)
             continue;
         if (err == ESP_OK)

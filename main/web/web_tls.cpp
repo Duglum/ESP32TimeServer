@@ -796,7 +796,7 @@ bool web_tls_load_or_create(const char *fqdn, web_tls_identity_t &identity)
         return true;
     }
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "NVS namespace %s unavailable (%s)", NVS_NAMESPACE, esp_err_to_name(err));
@@ -843,7 +843,7 @@ bool web_tls_check_own(const char *cert_pem, const char *key_pem, web_tls_info_t
 bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_identity_t &identity, char *err, size_t err_size)
 {
     nvs_handle_t handle = 0;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle) != ESP_OK)
     {
         snprintf(err, err_size, "The certificate could not be stored (NVS)");
         return false;
@@ -948,7 +948,7 @@ const char *web_tls_own_key_pem()
 void web_tls_clear_own()
 {
     nvs_handle_t handle = 0;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle) != ESP_OK)
         return;
     own_nvs_t o;
     if (!read_own(handle, o))

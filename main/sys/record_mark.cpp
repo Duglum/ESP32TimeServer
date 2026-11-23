@@ -71,7 +71,7 @@ esp_err_t record_mark_set(const char *ns, const char *key, uint64_t value)
     if (read_mark(mark, &found) == ESP_OK && found == value)
         return ESP_OK;
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(RECORD_MARK_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(RECORD_MARK_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err != ESP_OK)
         return err;
     err = nvs_set_u64(handle, mark, value);
@@ -91,7 +91,7 @@ esp_err_t record_mark_clear(const char *ns, const char *key)
     if (err == ESP_ERR_NVS_NOT_FOUND)
         return ESP_OK; // no mark (and no namespace is made for nothing)
     nvs_handle_t handle = 0;
-    err = nvs_open(RECORD_MARK_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    err = nvs_open(RECORD_MARK_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err != ESP_OK)
         return err;
     err = nvs_erase_key(handle, mark);
@@ -110,7 +110,7 @@ esp_err_t record_mark_clear_all()
     if (err != ESP_OK)
         return err;
     nvs_close(handle);
-    err = nvs_open(RECORD_MARK_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    err = nvs_open(RECORD_MARK_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err != ESP_OK)
         return err;
     err = nvs_erase_all(handle);

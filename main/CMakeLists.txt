@@ -18,6 +18,8 @@ set(MAIN_SOURCES
         "custom/ptp_auth.cpp"
         "custom/ntp_cache.c"
         "custom/nvs_blob.cpp"
+        "sys/nvs_purge.cpp"
+        "sys/nvs_purge_core.cpp"
         "sys/nvs_state.cpp"
         "sys/nvs_state_core.cpp"
         "sys/record_mark.cpp"

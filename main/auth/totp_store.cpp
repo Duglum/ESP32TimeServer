@@ -118,7 +118,7 @@ namespace
         record_t &r = s_table->token[i];
         r.crc = crc_of(r);
         nvs_handle_t handle = 0;
-        esp_err_t err = nvs_open(TOTP_NVS_NAMESPACE, NVS_READWRITE, &handle);
+        esp_err_t err = nvs_open(TOTP_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
         if (err != ESP_OK)
             return err;
         char key[4];
@@ -146,7 +146,7 @@ namespace
         if (err != ESP_OK)
             return err;
         nvs_handle_t handle = 0;
-        err = nvs_open(TOTP_NVS_NAMESPACE, NVS_READWRITE, &handle);
+        err = nvs_open(TOTP_NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
         if (err != ESP_OK)
             return err;
         err = nvs_erase_key(handle, key);

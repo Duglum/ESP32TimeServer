@@ -459,7 +459,7 @@ esp_err_t web_auth_set_password(const char *password, size_t length, const char 
     record.crc = crc_of(&record, offsetof(password_record_t, crc));
 
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err == ESP_OK)
     {
         err = nvs_set_blob(handle, NVS_KEY_PASSWORD, &record, sizeof(record));
@@ -622,7 +622,7 @@ esp_err_t web_auth_set_allow_list(const web_allow_entry_t *entries, size_t count
     record.crc = crc_of(&record, offsetof(allow_record_t, crc));
 
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle);
     if (err == ESP_OK)
     {
         err = nvs_set_blob(handle, NVS_KEY_ALLOW, &record, sizeof(record));
