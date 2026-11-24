@@ -233,16 +233,25 @@ namespace
 
     // Reads a settings blob. Returns true if it exists, matches this firmware (or version 5 to 12) and passes the CRC.
     // *had_ote_fields (optional): the stored set still held the former OTE device name or password (zeroed in blob)
-    bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob, bool *had_ote_fields = nullptr)
+    // false: not stored, not usable, or not read for lack of memory (*no_memory = true: the set may be there, a
+    // later read may give it)
+    bool read_blob(nvs_handle_t handle, const char *key, settings_blob_t &blob, bool *had_ote_fields = nullptr,
+                   bool *no_memory = nullptr)
     {
         if (had_ote_fields != nullptr)
             *had_ote_fields = false;
+        if (no_memory != nullptr)
+            *no_memory = false;
         // Stored as header (magic, version, size, flags), settings, CRC of everything before it
         constexpr size_t HEADER_SIZE = offsetof(settings_blob_t, settings);
         static_assert(offsetof(settings_blob_t, crc) == HEADER_SIZE + sizeof(web_settings_t), "blob layout");
         uint8_t *raw = static_cast<uint8_t *>(calloc(1, sizeof(settings_blob_t)));
         if (raw == nullptr)
+        {
+            if (no_memory != nullptr)
+                *no_memory = true;
             return false;
+        }
         size_t length = sizeof(settings_blob_t);
         const esp_err_t err = nvs_get_blob(handle, key, raw, &length);
         const bool readable = err == ESP_OK && length >= HEADER_SIZE + sizeof(uint32_t);
@@ -1050,7 +1059,18 @@ void web_settings_load_boot()
         static settings_blob_t blob; // static: about 5.5 kB, the caller (app_main) has a small stack
         char error[96] = "";
         bool had_ote_fields = false;
-        if (read_blob(handle, NVS_KEY_SAVED, blob, &had_ote_fields))
+        bool no_memory = false;
+        const bool saved_read = read_blob(handle, NVS_KEY_SAVED, blob, &had_ote_fields, &no_memory);
+        // Without memory for reading it the defaults would be used for this start (network, login methods, RADIUS,
+        // NTP and PTP keys, MQTT) and a later Save would store over the saved set: a restart instead (one that does
+        // not keep a firmware still under test, so that a restart loop after an update ends in the previous firmware)
+        if (no_memory)
+        {
+            ESP_LOGE(TAG, "The saved settings could not be read (out of memory): restart");
+            nvs_close(handle);
+            app_restart_not_kept("settings_no_memory");
+        }
+        if (saved_read)
         {
             if (had_ote_fields)
             {
@@ -1075,7 +1095,7 @@ void web_settings_load_boot()
 
         // The one-shot set is erased before it is used: if it makes the device crash, the next boot is back on the
         // saved settings
-        if (read_blob(handle, NVS_KEY_ONESHOT, blob))
+        if (read_blob(handle, NVS_KEY_ONESHOT, blob, nullptr, &no_memory))
         {
             const esp_err_t erase_err = nvs_erase_key(handle, NVS_KEY_ONESHOT);
             const esp_err_t commit_err = erase_err == ESP_OK ? nvs_commit(handle) : erase_err;
@@ -1093,7 +1113,10 @@ void web_settings_load_boot()
         }
         else
         {
-            // remove an unusable one-shot entry, if any
+            // remove an unusable one-shot entry, if any (one that could not be read for lack of memory too: a
+            // one-shot set is meant for the start after it was written only)
+            if (no_memory)
+                ESP_LOGW(TAG, "One-shot settings could not be read (out of memory), ignored");
             if (nvs_erase_key(handle, NVS_KEY_ONESHOT) == ESP_OK)
                 nvs_commit(handle);
         }
@@ -1190,13 +1213,17 @@ void web_settings_set_running(const web_settings_t &in)
         xSemaphoreGive(s_mutex);
 }
 
-bool web_settings_get_saved(web_settings_t &out)
+bool web_settings_get_saved(web_settings_t &out, bool *no_memory)
 {
+    if (no_memory != nullptr)
+        *no_memory = false;
     nvs_handle_t handle = 0;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
         return false;
     settings_blob_t *blob = big_new<settings_blob_t>();
-    bool ok = blob != nullptr && read_blob(handle, NVS_KEY_SAVED, *blob);
+    if (blob == nullptr && no_memory != nullptr)
+        *no_memory = true;
+    bool ok = blob != nullptr && read_blob(handle, NVS_KEY_SAVED, *blob, nullptr, no_memory);
     if (ok)
         out = blob->settings;
     big_delete(blob); // zeroed: the saved set with its secrets

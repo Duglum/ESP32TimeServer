@@ -299,7 +299,7 @@ void web_settings_get_running(web_settings_t &out);
 void web_settings_set_running(const web_settings_t &in);
 
 // Settings saved in NVS. Returns false if nothing is saved (or the saved data is unusable).
-bool web_settings_get_saved(web_settings_t &out);
+bool web_settings_get_saved(web_settings_t &out, bool *no_memory = nullptr);
 // The saved set was lost (NVS: its presence mark without the set, see sys/record_mark.h), found at the start: the
 // defaults are in use with PTP, MQTT and OTE off and NTP answered as unsynchronised, web_settings_save() refuses
 // (ESP_ERR_INVALID_STATE), and the web page accepts no login. Until NVS is erased over USB.
@@ -369,3 +369,6 @@ bool web_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t length);
 void app_apply_live_settings(const web_settings_t &settings);
 // Implemented in main.cpp: controlled restart (MQTT final report etc.)
 void app_controlled_restart(const char *reason);
+// As app_controlled_restart(), but a new firmware still under test is not kept by it (a restart for a lack of memory
+// at the start: a restart loop after an update then ends in the previous firmware)
+[[noreturn]] void app_restart_not_kept(const char *reason);

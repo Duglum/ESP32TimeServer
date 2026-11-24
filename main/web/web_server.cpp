@@ -2380,7 +2380,13 @@ namespace
             return send_error(req, "503 Service Unavailable", "Out of memory");
         web_settings_get_running(sets->running);
         web_settings_defaults(sets->defaults);
-        const bool saved = web_settings_get_saved(sets->saved);
+        bool saved_no_memory = false;
+        const bool saved = web_settings_get_saved(sets->saved, &saved_no_memory);
+        if (saved_no_memory) // not "nothing saved": no "saved": null, no unsaved changes made up
+        {
+            big_delete(sets);
+            return send_out_of_memory(req);
+        }
         web_net_status(app_eth_netif(), sets->running, sets->net);
         app_get_status(sets->app);
 
@@ -2820,11 +2826,13 @@ namespace
             web_login_settings_t methods{};
             {
                 web_settings_t *running = big_new<web_settings_t>();
-                if (running != nullptr)
+                if (running == nullptr) // not "the local password is switched off"
                 {
-                    web_settings_get_running(*running);
-                    methods = running->web_login;
+                    send_error(req, "503 Service Unavailable", "Out of memory");
+                    return ESP_FAIL; // closes the connection (the body is not read)
                 }
+                web_settings_get_running(*running);
+                methods = running->web_login;
                 big_delete(running);
                 if (!methods.local)
                 {
@@ -3371,9 +3379,13 @@ namespace
         cJSON_AddStringToObject(root, "fqdn", boot.fqdn);
         // The login page asks for a user name while RADIUS logins are on (the settings in use)
         web_settings_t *running = big_new<web_settings_t>();
-        if (running != nullptr)
-            web_settings_get_running(*running);
-        cJSON_AddBoolToObject(root, "login_user", running != nullptr && running->web_login.radius);
+        if (running == nullptr) // not "login_user": false while RADIUS logins are on
+        {
+            cJSON_Delete(root);
+            return send_out_of_memory(req);
+        }
+        web_settings_get_running(*running);
+        cJSON_AddBoolToObject(root, "login_user", running->web_login.radius);
         big_delete(running);
         // Only in that state (the answer is as before otherwise): stored security data was lost, logins are refused
         if (security_data_lost())
@@ -3613,6 +3625,7 @@ namespace
         web_settings_defaults(sets->defaults);
         char err[192] = ""; // the longest message of web_tls has 129 characters
         bool ok = true;
+        bool no_memory = false; // a 503, not a 400, when the import lacked memory
         const cJSON *format = cJSON_GetObjectItemCaseSensitive(root, CONFIG_MARKER);
         cJSON *settings = cJSON_GetObjectItemCaseSensitive(root, "settings");
         const cJSON *allow = cJSON_GetObjectItemCaseSensitive(root, "allow_list");
@@ -3684,6 +3697,7 @@ namespace
                 {
                     snprintf(err, sizeof(err), "Out of memory");
                     ok = false;
+                    no_memory = true;
                 }
             }
         }
@@ -3700,6 +3714,7 @@ namespace
         {
             snprintf(err, sizeof(err), "Out of memory");
             ok = false;
+            no_memory = true;
         }
         // The certificate is checked with the rest, before anything is applied
         if (!ok || !settings_valid(sets->candidate, err, sizeof(err)) ||
@@ -3709,7 +3724,7 @@ namespace
             big_delete(tls_info);
             free_tls();
             big_delete(sets);
-            return send_error(req, "400 Bad Request", err);
+            return send_error(req, no_memory ? "503 Service Unavailable" : "400 Bad Request", err);
         }
         big_delete(tls_info);
         // The allow-list first: it is refused when it would lock out the address of this request

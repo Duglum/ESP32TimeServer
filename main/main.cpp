@@ -12580,6 +12580,13 @@ void app_controlled_restart(const char *reason)
     controlled_restart(reason);
 }
 
+void app_restart_not_kept(const char *reason)
+{
+    controlled_restart(reason);
+    for (;;) // the restart deadline of controlled_restart() restarts in any case
+        vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
 esp_netif_t *app_eth_netif()
 {
     return s_eth_netif;
