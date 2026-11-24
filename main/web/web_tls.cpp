@@ -11,9 +11,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
-#include <new>
 
 #include "web_settings.h"
+#include "sys/big_alloc.h"
 #include "sys/nvs_state.h"
 
 extern "C"
@@ -871,7 +871,7 @@ bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_id
     char *new_cert = nullptr;
     char *new_key = nullptr;
     bool pair_stored = false;
-    web_tls_info_t *info = own ? new (std::nothrow) web_tls_info_t{} : nullptr; // about 1 kB: not on the task stack
+    web_tls_info_t *info = own ? big_new<web_tls_info_t>() : nullptr; // about 1 kB: not on the task stack
     if (own && info == nullptr)
     {
         nvs_close(handle);
@@ -884,7 +884,7 @@ bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_id
         const char *key = key_pem != nullptr && key_pem[0] != '\0' ? key_pem : s_own_key;
         if (!check(cert, key, *info, err, err_size))
         {
-            delete info;
+            big_delete(info);
             nvs_close(handle);
             return false;
         }
@@ -901,7 +901,7 @@ bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_id
             // Refused for lack of room before anything is written: NVS stays as it is
             if (!room)
             {
-                delete info;
+                big_delete(info);
                 free_secret(new_cert);
                 free_secret(new_key);
                 nvs_close(handle);
@@ -922,7 +922,7 @@ bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_id
             s_own_differs = true;
             ESP_LOGW(TAG, "The new own certificate is stored, a later step is not (%s): the next start uses it with the mode stored before", esp_err_to_name(result));
         }
-        delete info;
+        big_delete(info);
         free_secret(new_cert);
         free_secret(new_key);
         snprintf(err, err_size, "The certificate could not be stored (NVS: %s)", esp_err_to_name(result));
@@ -937,7 +937,7 @@ bool web_tls_set(bool own, const char *cert_pem, const char *key_pem, web_tls_id
         s_own_key = new_key;
         s_own_info = *info;
         snprintf(s_own_fingerprint, sizeof(s_own_fingerprint), "%s", info->fingerprint);
-        delete info;
+        big_delete(info);
         s_own_differs = false;
     }
     s_own_mode = own;

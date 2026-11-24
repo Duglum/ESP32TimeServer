@@ -15,6 +15,7 @@
 #include "custom/gnss_uart.h"
 #include "custom/gnss_ubx.h"
 #include "sys/big_alloc.h"
+#include "sys/heap_new.h"
 #include "sys/nvs_state.h"
 #include "sys/secret.h"
 #include "web_auth.h"
@@ -31,7 +32,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <new>
 #include <strings.h>
 
 extern "C"
@@ -2177,15 +2177,15 @@ namespace
         return send_ok(req, "Token deleted.");
     }
 
-    // "totp" of /api/state
-    void add_totp(cJSON *object)
+    // "totp" of /api/state; false when there is no memory for the list (an empty list would read as "no tokens")
+    bool add_totp(cJSON *object)
     {
+        totp_token_info_t *tokens = big_new_array<totp_token_info_t>(TOTP_TOKENS_MAX);
+        if (tokens == nullptr)
+            return false;
         cJSON_AddBoolToObject(object, "time_ok", totp_store_time_ok());
         cJSON_AddNumberToObject(object, "max", TOTP_TOKENS_MAX);
         cJSON *list = cJSON_AddArrayToObject(object, "tokens");
-        totp_token_info_t *tokens = new (std::nothrow) totp_token_info_t[TOTP_TOKENS_MAX];
-        if (tokens == nullptr)
-            return;
         const size_t n = totp_store_list(tokens, TOTP_TOKENS_MAX);
         for (size_t i = 0; i < n; ++i)
         {
@@ -2196,7 +2196,8 @@ namespace
             cJSON_AddNumberToObject(row, "recovery_left", tokens[i].recovery_left);
             cJSON_AddItemToArray(list, row);
         }
-        delete[] tokens;
+        big_delete_array(tokens, TOTP_TOKENS_MAX);
+        return true;
     }
 
     esp_err_t handle_logout(httpd_req_t *req)
@@ -2212,18 +2213,21 @@ namespace
         return send_ok(req, nullptr);
     }
 
-    // "tls": the certificate in use and the stored own one (no key)
-    void add_tls_json(cJSON *parent)
+    // "tls": the certificate in use and the stored own one (no key). false, with nothing added, when there is no memory
+    // for it ("own": null would read as "no own certificate")
+    bool add_tls_json(cJSON *parent)
     {
+        web_tls_info_t *info = big_new<web_tls_info_t>(); // about 1 kB: not on the server task stack
+        if (info == nullptr)
+            return false;
         cJSON *tls = cJSON_AddObjectToObject(parent, "tls");
         cJSON_AddStringToObject(tls, "mode", s_identity.own ? "own" : "self");
         cJSON_AddStringToObject(tls, "fingerprint", s_identity.fingerprint);
-        web_tls_info_t *info = new (std::nothrow) web_tls_info_t{}; // about 1 kB: not on the server task stack
-        if (info == nullptr || !web_tls_own_info(*info))
+        if (!web_tls_own_info(*info))
         {
             cJSON_AddNullToObject(tls, "own");
-            delete info;
-            return;
+            big_delete(info);
+            return true;
         }
         const auto add_utc = [](cJSON *object, const char *name, int64_t when) {
             const time_t t = static_cast<time_t>(when);
@@ -2250,7 +2254,8 @@ namespace
         cJSON_AddStringToObject(own, "key_type", info->key_type);
         cJSON_AddNumberToObject(own, "chain_length", static_cast<double>(info->chain_length));
         cJSON_AddStringToObject(own, "fingerprint", info->fingerprint);
-        delete info;
+        big_delete(info);
+        return true;
     }
 
     esp_err_t handle_state(httpd_req_t *req)
@@ -2281,7 +2286,13 @@ namespace
         cJSON_AddStringToObject(root, "csrf", csrf);
         cJSON_AddBoolToObject(root, "default_password", web_auth_default_password_active());
         cJSON_AddStringToObject(root, "fingerprint", s_identity.fingerprint);
-        add_tls_json(root);
+        const auto out_of_memory = [&]() {
+            cJSON_Delete(root);
+            big_delete(sets);
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        };
+        if (!add_tls_json(root))
+            return out_of_memory();
         settings_to_json(cJSON_AddObjectToObject(root, "settings"), sets->running);
         settings_to_json(cJSON_AddObjectToObject(root, "defaults"), sets->defaults);
         if (saved)
@@ -2294,7 +2305,8 @@ namespace
         cJSON_AddBoolToObject(root, "unsaved_changes", !web_settings_equal(sets->running, saved ? sets->saved : sets->defaults));
         add_confirm_info(root);
         add_radius(cJSON_AddObjectToObject(root, "radius_status"));
-        add_totp(cJSON_AddObjectToObject(root, "totp"));
+        if (!add_totp(cJSON_AddObjectToObject(root, "totp")))
+            return out_of_memory();
         {
             char user[WEB_SESSION_USER_SIZE] = "";
             bool radius = false;
@@ -2834,7 +2846,7 @@ namespace
         char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
         if (check_session(req, false, token) != gate_t::passed)
             return ESP_OK;
-        web_ptp_status_t *p = new (std::nothrow) web_ptp_status_t{};
+        web_ptp_status_t *p = big_new<web_ptp_status_t>();
         if (p == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
         app_get_ptp_status(*p);
@@ -2894,7 +2906,7 @@ namespace
             cJSON_AddNumberToObject(item, "last_seen_s", follower.last_seen_s);
             cJSON_AddItemToArray(followers, item);
         }
-        delete p;
+        big_delete(p);
         return send_json(req, "200 OK", root);
     }
 
@@ -2906,7 +2918,7 @@ namespace
         char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
         if (check_session(req, false, token) != gate_t::passed)
             return ESP_OK;
-        web_diag_t *d = new (std::nothrow) web_diag_t{};
+        web_diag_t *d = big_new<web_diag_t>();
         if (d == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
         app_get_diag(*d);
@@ -3062,7 +3074,7 @@ namespace
         cJSON_AddNumberToObject(root, "rf_agc_count", d->rf_agc_count);
         cJSON_AddNumberToObject(root, "rf_jam_indicator", d->rf_jam_indicator);
         cJSON_AddNumberToObject(root, "uptime_s", static_cast<double>(esp_timer_get_time() / 1000000LL));
-        delete d;
+        big_delete(d);
         crash_dump_info_t crash{};
         crash_dump_get(&crash);
         cJSON *dump = cJSON_AddObjectToObject(root, "crash");
@@ -3340,7 +3352,11 @@ namespace
         if (check_session(req, false, token) != gate_t::passed)
             return ESP_OK;
         cJSON *root = cJSON_CreateObject();
-        add_tls_json(root);
+        if (!add_tls_json(root))
+        {
+            cJSON_Delete(root);
+            return send_error(req, "503 Service Unavailable", "Out of memory");
+        }
         return send_json(req, "200 OK", root);
     }
 
@@ -3376,7 +3392,7 @@ namespace
         cJSON_AddBoolToObject(reply, "ok", true);
         cJSON_AddStringToObject(reply, "message", own ? "Own certificate stored and in use. The page connects again with it."
                                                       : "The self-signed certificate is in use again. The page connects again with it.");
-        add_tls_json(reply);
+        add_tls_json(reply); // no "tls" without memory for it: the change is made, the page loads again 2.5 s later
         const esp_err_t send_err = send_json(req, "200 OK", reply);
         httpd_queue_work(s_server, close_sessions_work, nullptr);
         return send_err;
@@ -3565,7 +3581,7 @@ namespace
             tls_cert = tls_key = nullptr;
         };
         cJSON_Delete(root);
-        web_tls_info_t *tls_info = ok && tls_own ? new (std::nothrow) web_tls_info_t{} : nullptr;
+        web_tls_info_t *tls_info = ok && tls_own ? big_new<web_tls_info_t>() : nullptr;
         if (ok && tls_own && tls_info == nullptr)
         {
             snprintf(err, sizeof(err), "Out of memory");
@@ -3576,12 +3592,12 @@ namespace
             !login_change_allowed(token, sets->running, sets->candidate, err, sizeof(err)) ||
             (tls_own && !web_tls_check_own(tls_cert, tls_key, *tls_info, err, sizeof(err))))
         {
-            delete tls_info;
+            big_delete(tls_info);
             free_tls();
             big_delete(sets);
             return send_error(req, "400 Bad Request", err);
         }
-        delete tls_info;
+        big_delete(tls_info);
         // The allow-list first: it is refused when it would lock out the address of this request
         if (has_allow)
         {
@@ -3735,7 +3751,9 @@ namespace
         // The TOTP tokens; NVS keeps room for one more settings set besides them (Save writes the new set before the
         // old one is erased, and so does the one-shot set of an Apply with a restart; the device restarts with it)
         totp_store_init(web_settings_stored_size());
-        s_totp_pending = new (std::nothrow) totp_pending_t[TOTP_PENDING_MAX];
+        s_totp_pending = big_new_array<totp_pending_t>(TOTP_PENDING_MAX);
+        if (s_totp_pending == nullptr) // the page works; a login that needs the second factor is answered 503
+            ESP_LOGE(TAG, "Web admin: out of memory for the pending TOTP logins: a login with a TOTP token is refused until the next start");
 
         if (!web_tls_load_or_create(boot.fqdn, s_identity))
         {
@@ -3754,7 +3772,7 @@ namespace
         esp_log_level_set("esp-tls-mbedtls", ESP_LOG_NONE);
         s_tls_config.ciphersuites_list = s_ciphersuites;
 
-        s_pending = new (std::nothrow) network_pending_t{};
+        s_pending = big_new<network_pending_t>();
         esp_timer_create_args_t timer_args{};
         timer_args.callback = confirm_timer_callback;
         timer_args.name = "web_net_confirm";

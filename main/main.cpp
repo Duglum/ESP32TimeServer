@@ -51,12 +51,12 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <algorithm>
-#include <new>
 #include <string>
 #include <vector>
 
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
+#include "sys/heap_new.h"
 #include "sys/nvs_purge.h"
 #include "sys/nvs_state.h"
 #include "sys/secret.h"
@@ -9512,7 +9512,7 @@ static bool mqtt_allocate_buffers()
     const size_t payload_size = a.client_reporting ? web_mqtt_report_size(a.tf_client_limit) : MQTT_REPORT_SIZE;
     const size_t clients_size = a.client_reporting ? a.tf_client_limit : 0;
     if (s_mqtt_ram_queue == nullptr)
-        s_mqtt_ram_queue = new (std::nothrow) mqtt_ram_queue_t();
+        s_mqtt_ram_queue = heap_new<mqtt_ram_queue_t>(); // malloc(), as before: internal RAM on this board
     if (s_mqtt_final_payload == nullptr)
         s_mqtt_final_payload = static_cast<char *>(calloc(MQTT_REPORT_SIZE, 1));
     if (payload_size != s_mqtt_payload_size || s_mqtt_payload == nullptr)
@@ -9525,8 +9525,8 @@ static bool mqtt_allocate_buffers()
     {
         // The table is only used by this task and mqtt_build_report() (under the statistics mutex)
         xSemaphoreTake(s_mqtt_stats_mutex, portMAX_DELAY);
-        delete[] s_mqtt_clients;
-        s_mqtt_clients = clients_size > 0 ? new (std::nothrow) mqtt_client_request_t[clients_size]() : nullptr;
+        heap_delete_array(s_mqtt_clients, s_mqtt_clients_size);
+        s_mqtt_clients = heap_new_array<mqtt_client_request_t>(clients_size); // nullptr for 0
         s_mqtt_clients_size = s_mqtt_clients != nullptr ? clients_size : 0;
         s_mqtt_client_count = 0;
         xSemaphoreGive(s_mqtt_stats_mutex);
@@ -9542,7 +9542,7 @@ static void mqtt_free_buffers()
     s_mqtt_payload = nullptr;
     s_mqtt_payload_size = 0;
     xSemaphoreTake(s_mqtt_stats_mutex, portMAX_DELAY);
-    delete[] s_mqtt_clients;
+    heap_delete_array(s_mqtt_clients, s_mqtt_clients_size);
     s_mqtt_clients = nullptr;
     s_mqtt_clients_size = 0;
     s_mqtt_client_count = 0;
@@ -9663,14 +9663,14 @@ static void setup_mqtt()
     s_mqtt_service_allowed = true;
     if (s_mqtt_wanted != nullptr)
     {
-        web_settings_t *running = new (std::nothrow) web_settings_t; // about 5.5 kB: not on the main task stack
+        web_settings_t *running = big_new<web_settings_t>(); // about 7 kB: not on the main task stack
         if (running != nullptr)
         {
             web_settings_get_running(*running);
             mqtt_hand_over_settings(*running);
-            // A copy of every secret of the settings: the compiler removed a plain memset() before the delete
-            mbedtls_platform_zeroize(running, sizeof(web_settings_t));
-            delete running;
+            // A copy of every secret of the settings: big_delete() zeroes it with mbedtls_platform_zeroize() before the
+            // free (the compiler removed a plain memset() before a delete)
+            big_delete(running);
         }
         else
             mqtt_hand_over_settings(*s_cfg);

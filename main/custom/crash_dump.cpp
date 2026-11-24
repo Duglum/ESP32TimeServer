@@ -10,12 +10,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <new>
 
 #include "esp_core_dump.h"
 #include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "sys/big_alloc.h"
 
 namespace
 {
@@ -56,13 +56,13 @@ void crash_dump_init()
     s_info.size = static_cast<uint32_t>(size);
     s_flash_address = address;
     // The summary holds a copy of the stack of the crashed task (about 1 kB): on the heap
-    esp_core_dump_summary_t *summary = new (std::nothrow) esp_core_dump_summary_t{};
+    esp_core_dump_summary_t *summary = big_new<esp_core_dump_summary_t>();
     if (summary != nullptr && esp_core_dump_get_summary(summary) == ESP_OK)
     {
         snprintf(s_info.task, sizeof(s_info.task), "%.*s", static_cast<int>(sizeof(summary->exc_task)), summary->exc_task);
         s_info.pc = summary->exc_pc;
     }
-    delete summary;
+    big_delete(summary);
     if (esp_core_dump_get_panic_reason(s_info.reason, sizeof(s_info.reason)) != ESP_OK)
         s_info.reason[0] = '\0';
     ESP_LOGW(TAG, "A core dump of a crash is stored: task %s, PC 0x%08lx%s%s (%lu bytes; download it on the web admin page or with idf.py coredump-info)",
