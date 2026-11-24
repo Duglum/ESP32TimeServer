@@ -875,6 +875,7 @@
     // TLS certificate of the web admin
     'Own certificate stored and in use. The page connects again with it.': 'Eigenes Zertifikat gespeichert und in Verwendung. Die Seite verbindet sich damit neu.',
     'The self-signed certificate is in use again. The page connects again with it.': 'Das selbstsignierte Zertifikat ist wieder in Verwendung. Die Seite verbindet sich damit neu.',
+    'The certificate in use has changed: the page connects again with it.': 'Das verwendete Zertifikat hat sich geändert: Die Seite verbindet sich damit neu.',
     'Certificate: paste the certificate chain (PEM)': 'Zertifikat: die Zertifikatskette (PEM) einfügen',
     'No private key stored: paste the private key (PEM)': 'Kein privater Schlüssel gespeichert: den privaten Schlüssel (PEM) einfügen',
     'Private key: encrypted; export it without a password': 'Privater Schlüssel: verschlüsselt; ohne Passwort exportieren',

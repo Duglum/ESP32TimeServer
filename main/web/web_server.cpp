@@ -3494,8 +3494,17 @@ namespace
         cJSON_AddBoolToObject(reply, "ok", true);
         cJSON_AddStringToObject(reply, "message", own ? "Own certificate stored and in use. The page connects again with it."
                                                       : "The self-signed certificate is in use again. The page connects again with it.");
-        add_tls_json(reply); // false (out of memory): send_json() answers 503 although the change is made
-        const esp_err_t send_err = send_json(req, "200 OK", reply);
+        // Without memory for the information on the certificate (add_tls_json() false: its copy, not an allocation of
+        // cJSON) or for a part of the answer (send_json()): 503, not a success without "tls", although the change is
+        // made; the connections are closed all the same
+        esp_err_t send_err = ESP_OK;
+        if (add_tls_json(reply))
+            send_err = send_json(req, "200 OK", reply);
+        else
+        {
+            cJSON_Delete(reply);
+            send_err = send_out_of_memory(req);
+        }
         httpd_queue_work(s_server, close_sessions_work, nullptr);
         return send_err;
     }

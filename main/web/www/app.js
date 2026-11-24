@@ -2200,6 +2200,18 @@
     setBusy(true);
     const r = await api('/api/tls', body);
     setBusy(false);
+    if (r.status === 503 && state && state.tls) {
+      // The device may have made the change before it lacked memory for its answer: then it has closed its
+      // connections, and a page that stays would get no answer once the browser does not trust the new certificate.
+      // Changed (or no answer): load the page again over a new connection, as after a 200; unchanged: the form stays
+      const now = await api('/api/tls');
+      const tls = now.status === 200 ? now.data.tls : null;
+      if (now.status === 0 || (tls && (tls.mode !== state.tls.mode || tls.fingerprint !== state.tls.fingerprint))) {
+        show(ts(r.data.error) + '. ' + t('The certificate in use has changed: the page connects again with it.'), 'error');
+        setTimeout(() => location.reload(), 2500);
+        return;
+      }
+    }
     if (r.status !== 200) {
       show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
       return;
