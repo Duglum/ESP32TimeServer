@@ -789,6 +789,7 @@
     'Wrong user name or password': 'Falscher Benutzername oder falsches Passwort',
     'Stored security data of the device was lost: logins are refused. Recovery: erase NVS over the USB port (see the README)': 'Gespeicherte Sicherheitsdaten des Geräts sind verloren gegangen: Logins werden abgelehnt. Wiederherstellung: NVS über den USB-Anschluss löschen (siehe README)',
     'Stored data of the device cannot be read (NVS): logins are refused. Recovery: erase NVS over the USB port (see the README)': 'Gespeicherte Daten des Geräts können nicht gelesen werden (NVS): Logins werden abgelehnt. Wiederherstellung: NVS über den USB-Anschluss löschen (siehe README)',
+    'NVS error: {name}': 'NVS-Fehler: {name}',
     'The stored TOTP token of this user was lost: a new one needs an erase of NVS over the USB port': 'Der gespeicherte TOTP-Token dieses Benutzers ist verloren gegangen: Ein neuer braucht ein Löschen des NVS über den USB-Anschluss',
     'No RADIUS server answered': 'Kein RADIUS-Server hat geantwortet',
     'A login from your address is still being checked, or too many at once: try again': 'Ein Login von Ihrer Adresse wird noch geprüft, oder zu viele gleichzeitig: bitte noch einmal versuchen',

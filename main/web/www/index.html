@@ -53,6 +53,8 @@
 
   <section id="login-card" class="card narrow" hidden>
     <h2>Log in</h2>
+    <!-- Stored data lost or NVS not usable (/api/info): the device's own text, set by app.js as text -->
+    <p id="login-store-notice" class="banner danger" role="alert" hidden></p>
     <form id="login-form" class="stack" autocomplete="on">
       <input type="text" name="username" value="admin" autocomplete="username" id="login-user-fixed" hidden>
       <label id="login-user-row" hidden><span class="lt">User name</span>

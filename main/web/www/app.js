@@ -204,6 +204,15 @@
       $('login-user-row').hidden = !r.data.login_user;
       $('login-user-fixed').disabled = !!r.data.login_user;
       if (r.data.login_user) $('login-user').focus();
+      // Stored security data lost, or NVS cannot be used: every login is refused; the same text as the device's 403
+      const notice = $('login-store-notice');
+      if (r.data.nvs_error) {
+        notice.textContent = t('Stored data of the device cannot be read (NVS): logins are refused. Recovery: erase NVS over the USB port (see the README)') +
+          '. ' + t('NVS error: {name}', { name: String(r.data.nvs_error) });
+      } else if (r.data.security_data_lost) {
+        notice.textContent = t('Stored security data of the device was lost: logins are refused. Recovery: erase NVS over the USB port (see the README)');
+      }
+      notice.hidden = !(r.data.nvs_error || r.data.security_data_lost);
     });
   }
 
