@@ -56,6 +56,7 @@
 
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
+#include "custom/tx_delay_rule.h"
 #include "sys/cjson_mem.h"
 #include "sys/heap_new.h"
 #include "sys/mbedtls_mem.h"
@@ -3668,19 +3669,24 @@ __attribute__((noinline)) static esp_err_t transmit_with_hw_timestamp(esp_eth_ha
 // In basic mode T3 has to be written into the packet before it is sent, so it is read from the model clock just
 // before the transmit call. The real transmit instant is later by the time needed for the rest of the packet
 // (checksum, MAC with authentication) and the EMAC DMA. The hardware TX time stamp of every response measures this
-// delay; its running mean is added to the T3 of later basic mode responses. Separate estimates are kept for
-// IPv4 / IPv6 and with / without authentication, because these paths take different times.
-// Interleaved responses are not affected (their T3 is the hardware TX time stamp itself).
+// delay; an estimate of the delay of an undisturbed transmission is added to the T3 of later basic mode responses
+// (custom/tx_delay_rule.h: the smallest of the first 16 samples, then a running mean with weight 1/32 of the samples
+// close to it; a sample far above it, delayed by a disturbance such as cache refills, a flash write or preemption,
+// does not move it, so the answers after a disturbance are not stamped too late; a lasting change of the delay is
+// followed after 64 samples above or 4 below). Separate estimates are kept for IPv4 / IPv6 and with / without
+// authentication, because these paths take different times. Interleaved responses are not affected (their T3 is the
+// hardware TX time stamp itself).
 // 1 = compensate, 0 = T3 is the clock reading before the transmit call (previous behaviour)
 #define NTP_BASIC_T3_TX_COMPENSATION 1
 #if NTP_BASIC_T3_TX_COMPENSATION && NTP_HW_TX_TIMESTAMPS
 struct tx_delay_estimate_t
 {
-    std::atomic<int32_t> delay_ns{0}; // running mean of hardware TX time - software T3
+    std::atomic<int32_t> delay_ns{0}; // estimate of hardware TX time - software T3 (custom/tx_delay_rule.h)
     std::atomic<uint32_t> samples{0};
 };
 static tx_delay_estimate_t s_tx_delay[2][2]; // [0 = IPv4, 1 = IPv6][0 = unauthenticated, 1 = authenticated]
-static constexpr uint32_t tx_delay_min_samples = 16;  // compensate only after this many samples
+static tx_delay_rule_t s_tx_delay_rule[2][2]; // the state of each estimate; only the hardware NTP task uses it
+static constexpr uint32_t tx_delay_min_samples = TX_DELAY_START_SAMPLES; // compensate only after this many samples
 static constexpr int32_t tx_delay_max_ns = 500000;    // plausible range of a sample
 static constexpr int32_t tx_delay_ewma_shift = 5;     // running mean with weight 1/32
 
@@ -3697,7 +3703,7 @@ struct tx_delay_stats_t
 };
 static tx_delay_stats_t s_tx_delay_stats[2]; // [0 = IPv4, 1 = IPv6]
 
-// Plain mean for the first 32 samples, then the running mean with weight 1/32
+// Plain mean for the first 32 samples, then the running mean with weight 1/32 (the phase bins of the diagnostics)
 static int32_t tx_delay_running_mean(int32_t current, uint32_t n, int64_t sample_ns)
 {
     if (n < (1u << tx_delay_ewma_shift))
@@ -3727,12 +3733,12 @@ __attribute__((noinline)) static void update_tx_delay_estimate(bool ipv6, bool a
     if (sample_ns < 0 || sample_ns > tx_delay_max_ns)
         return;
 
+    // The estimate (custom/tx_delay_rule.h); the diagnostics below still see every sample
+    tx_delay_rule_t &rule = s_tx_delay_rule[ipv6 ? 1 : 0][authenticated ? 1 : 0];
+    tx_delay_rule_update(rule, static_cast<int32_t>(sample_ns));
     tx_delay_estimate_t &estimate = s_tx_delay[ipv6 ? 1 : 0][authenticated ? 1 : 0];
-    const uint32_t n = estimate.samples.load(std::memory_order_relaxed);
-    estimate.delay_ns.store(tx_delay_running_mean(estimate.delay_ns.load(std::memory_order_relaxed), n, sample_ns),
-                            std::memory_order_relaxed);
-    if (n < UINT32_MAX)
-        estimate.samples.store(n + 1, std::memory_order_relaxed);
+    estimate.delay_ns.store(rule.estimate_ns, std::memory_order_relaxed);
+    estimate.samples.store(rule.samples, std::memory_order_relaxed);
 
     if (authenticated)
         return;

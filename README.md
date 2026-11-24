@@ -111,14 +111,40 @@ A restart by the firmware (from the website, after an update, after a crash or a
 
 ## NTP answers while the web page is used
 
-An NTP answer in interleaved mode (RFC 9769, e.g. chrony with `xleave`) carries the hardware transmit time stamp of the earlier answer as its T3 and is not affected by what follows; PTP is not affected either. An answer in basic mode has to carry its T3 before it is sent: the firmware reads the clock right before the transmit call and adds the running mean of the measured transmit delay (hardware transmit stamp minus that reading; every sample up to 500 us enters the mean with a weight of 1/32).
+An NTP answer in interleaved mode (RFC 9769, e.g. chrony with `xleave`) carries the hardware transmit time stamp of the earlier answer as its T3 and is not affected by what follows; PTP is not affected either. An answer in basic mode has to carry its T3 before it is sent: the firmware reads the clock right before the transmit call and adds an estimate of the transmit delay (hardware transmit stamp minus that reading), kept separately for IPv4 and IPv6, with and without authentication.
 
-Measured on the test board (ESP32-P4 v3.1; basic mode requests 8 times per second, the hardware transmit stamp of each answer read back with an interleaved request; error = that stamp minus the T3 in the answer; runs of the fix session and of an independent check on 2026-11-24, firmware of 69bad76 and 22be381). A client's offset from one answer is wrong by half of its error.
+Measured on the test board (ESP32-P4 v3.1; basic mode requests 8 times per second, or one pair every 2 s where said, the hardware transmit stamp of each answer read back with an interleaved request; error = that stamp minus the T3 in the answer; runs of the fix sessions and of an independent check on 2026-11-24). A client's offset from one answer is wrong by half of its error.
 
-- No web activity during the answers and none shortly before: median 0.02 to 0.08 us, p90 0.2 us, at most 3.8 us.
-- Inside a web request that makes a TLS handshake (a new HTTPS connection), without any NVS write: the frame left later than its T3 by a median of 5.9 to 19.7 us, p90 17.2 to 41.7 us, at most 32 to 74 us in six runs on one image (a seventh run on another image: median 13 us). The figures vary that much from run to run on the same image; no upper bound has been established. Inside requests on a kept HTTPS connection: median 0.0 to 7.0 us.
+- No web activity during the answers and none shortly before: median 0.02 to 0.08 us, p90 0.2 us, at most 3.9 us (IPv4 and IPv6; signed IPv4 answers at most 4.5 to 7.1 us).
+- Inside a web request that makes a TLS handshake (a new HTTPS connection), without any NVS write: the frame left later than its T3 by a median of 5.9 to 19.7 us, p90 17.2 to 41.7 us, at most 32 to 74 us in six runs on one image (firmware of 22be381, before the estimate below). The figures vary that much from run to run on the same image; no upper bound has been established. Inside requests on a kept HTTPS connection: median 0.0 to 7.0 us.
 - Inside *Save Settings*: median 18.5 to 29 us, at most 280 to 283 us (the answer itself left up to 16 ms after its request).
-- After such a load the answers are stamped too late (the error is negative): the late frames have pulled the running mean up, and the following answers carry that larger delay until about 100 answers of the same kind have brought it back. Measured by the check with one probe answer per second: after 60 s of new HTTPS connections back to back (the mean 13.4 -> 48.7 us) a median of -26.5 us in the first 10 s (at worst -33.1 us), -18.0 us at 10 to 20 s, -8.3 us at 20 to 40 s, -2.2 us at 40 to 80 s, -0.3 us at 80 to 160 s; after 40 s of *Save Settings* back to back (13.5 -> 100.4 us) -67.7 us in the first 10 s (at worst -76.7 us), down to -0.5 us at 80 to 160 s; after a single Save, with 16 answers per second, -3.5 us in the median (at worst -9.9 us), gone after about 5 s. So the quiet figures above hold only when no web activity came shortly before. Over 180 s of the page's polling (`/api/state` and `/api/diag` every 5 s) the median of all answers was -1.0 to -1.3 us and the largest 167 to 201 us: this effect and the one above together.
+
+**The estimate of the transmit delay** (`main/custom/tx_delay_rule.cpp`, since 2026-11-24). Up to then it was the running mean of every sample (weight 1/32): the late frames of a load pulled it up, and the answers after the load carried that larger delay, so they were stamped too late until about 100 answers of the same kind had brought it back (measured: after 60 s of new HTTPS connections back to back the mean went from 13.6 to 47.8 us and the answers of the next 10 s were stamped 26.3 us too late in the median; after 40 s of Saves 13.5 -> 82.6 us and 45.4 us; after one Save 5.3 us, gone after about 5 s). A disturbance only adds delay, so the undisturbed delay is the lower edge of the samples, and without disturbance the samples lie close together (IPv4 -0.4 to +3.9 us around the mean, p90 0.2 us; IPv6 -0.4 to +4.0 us; signed IPv4 -1.2 to +7.1 us, p99 3.8 to 4.2 us; none more than 2 us below in any run of about 1130 answers). Now:
+  - the first 16 samples: the estimate is their smallest (compensation starts after them, as before);
+  - a sample within 2 us of the estimate (either side) moves it by 1/32 of the difference. The band is symmetric so that disturbed samples spread across it do not move the estimate on average (with +5 / -2 us a continuous load without quiet samples walked it up by about 12 us in a simulation on synthetic loads; with +-2 us by about 5 us);
+  - a sample more than 2 us above is not used; only after 64 of them in a row is the delay taken as lastingly longer, and the estimate becomes the smallest of them (measured under handshakes and Saves at 8 answers per second: at most 5 late samples in a row);
+  - a sample more than 2 us below is not used; after 4 of them (only a sample within the band ends that run, a late one does not) the delay is taken as lastingly shorter and the estimate becomes the largest of them; a single low sample changes nothing.
+  The band and the run lengths were measured for IPv4 answers without authentication and checked against the quiet spread of IPv6 and of signed IPv4 answers; loads were measured with IPv4 answers without authentication only.
+
+Measured on the same day, the estimate before -> now (firmware of 38cd4aa -> this rule; the same scripts):
+
+| | before | now |
+|---|---|---|
+| mean / estimate at the end of 60 s of new HTTPS connections | 13.6 -> 47.8 us | 13.2 -> 13.2 us |
+| error of the answers 0 to 10 s after that load (one pair per 2 s) | median -26.3 us | median 0.4 us |
+| the same after 40 s of Saves | median -45.4 us | median 1.4 us |
+| 300 s of new HTTPS connections, 8 pairs per second: estimate during the load / answers 0 to 10 s after | 16.7 to 29.2 us / median -1.5 us, answers 4 to 6 after: -13 to -11 us | 13.1 to 13.4 us / median 0.1 us |
+| the same with one pair per 2 s | 19.2 to 49.2 us / median -24.5 us | 13.1 to 13.4 us / median 0.0 us |
+| answers 0.5 to 2 s after one Save | median -4.4 to -3.0 us | median -0.1 to 0.0 us |
+| page polling (`/api/state` and `/api/diag` every 5 s), all answers of 180 s | median -1.03 us | median 0.08 us |
+| quiet: median / p90 / max | 0.04 / 0.16 / 3.5 us | 0.06 / 0.18 / 3.8 us |
+| answers DURING 60 s of new HTTPS connections (one pair per 2 s) | median +33.9 us | median +63.8 us |
+| answers during 300 s of them, 8 pairs per second / one pair per 2 s | median +13.2 / +18.3 us | median +30.5 / +60.3 us |
+| answers during 40 s of Saves | median +111.7 us | median +179.7 us |
+
+The trade: the answers sent during a load are now later than their T3 by the whole disturbance, where the pulled mean used to hide part of it; those answers also arrive with a longer delay, which a client's filter tends to drop. In exchange, the answers after the load, which arrive with a normal delay and which a client keeps, are right. What bounds the error after a load now is a number of answers of that kind, not a time: at most 3 answers of the same kind (IPv4 or IPv6, signed or not) carry a wrong T3 before 4 low samples bring the estimate back, and only after a load that moved it at all (64 late samples in a row; seen once in a test with 357 Saves in 40 s: +2.4 us, back 54 s after the load). With few clients that poll at long intervals, 3 answers can still be minutes. A lasting change is followed: with a test build that added 40 us before the transmit call, the answers were right again 4 to 6 s later at 16 answers per second (64 samples), and within 1 to 2 s after the 40 us were removed. A start under load: the smallest of the first 16 samples was 2.7 us (one low sample among them, against 13 us otherwise); the estimate was re-based to 12.7 us after 64 samples, and the answers after the load were right (median 0.2 us).
+
+Seen in these tests, not caused by the estimate: during and after 40 s of Saves back to back (357 Saves) the clock discipline counted PPS outliers (8 in one run) and its offset reached 11 to 17 us for some 30 s; answers in that time were early or late by up to 46 us while the estimate stayed where it was. This is a flood of NVS stores, not normal use.
 
 What is known about the cause:
 
@@ -127,7 +153,7 @@ What is known about the cause:
 - Not shown: that cache refills are what delays the answers inside a TLS handshake. The NTP task can also be preempted on core 1 by the task of the network stack (lwIP, priority 18, no core affinity) or by interrupts; the measurements show that the delay inside a handshake lies before the transmit call (it took 32 us or more in 7 of 1840 calls), not why. No frame of the web server was waiting on the wire ahead of an NTP answer (by a model of the wire fed with every frame of the network stack), and the network stack was never inside its transmit call when the NTP task made its own.
 - A flash write (a store to NVS) stops the other core for its duration (ESP-IDF, `spi_flash_disable_interrupts_caches_and_other_cpu()`), whatever the placement of its code: one answer whose T3 was read just before left 7.7 ms late in one test.
 
-The firmware is not changed for this. Placing the 7 functions in internal RAM would be a small change (about 4.2 kB of heap); whether it removes the effect has not been measured, it would not help during a flash write, and it would not change the running mean. For the best accuracy use interleaved mode or PTP, and keep the web page closed during measurements.
+The placement is not changed for this. Placing the 7 functions in internal RAM would be a small change (about 4.2 kB of heap); whether it removes the effect has not been measured, and it would not help during a flash write. For the best accuracy use interleaved mode or PTP, and keep the web page closed during measurements.
 
 ## Disclaimer
 

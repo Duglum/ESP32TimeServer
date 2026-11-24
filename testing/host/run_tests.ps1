@@ -95,10 +95,12 @@ $targets = [ordered]@{
     nvs_purge_test = @("$here\nvs_purge_test.cpp", "$main\sys\nvs_purge.cpp", "$main\sys\nvs_purge_core.cpp",
         "$here\stubs\host_stubs.c")
     # The short answers of the web API without allocation (from ESP32-WebTherm), against cJSON
+    # The estimate of the transmit delay of basic mode NTP answers (the T3 compensation)
+    tx_delay_rule_test = @("$here\tx_delay_rule_test.cpp", "$main\custom\tx_delay_rule.cpp")
     json_reply_test = @("$here\json_reply_test.cpp", "$main\core\json_reply.cpp", "$main\core\json_writer.cpp", "$cjson\cJSON.c")
 }
 # Test programs without a fuzz target
-$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test', 'record_mark_test', 'nvs_state_test', 'nvs_purge_test', 'json_reply_test')
+$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test', 'record_mark_test', 'nvs_state_test', 'nvs_purge_test', 'json_reply_test', 'tx_delay_rule_test')
 # Test programs with TF-PSA-Crypto
 $with_psa = @('radius_test', 'totp_test', 'auth_config_test')
 

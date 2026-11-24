@@ -28,6 +28,7 @@ set(MAIN_SOURCES
         "sys/record_mark_core.cpp"
         "sys/secret.cpp"
         "custom/time_diag.cpp"
+        "custom/tx_delay_rule.cpp"
         "core/json_reply.cpp"
         "core/json_writer.cpp"
         "net/emac_halt.cpp"
