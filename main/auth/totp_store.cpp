@@ -272,8 +272,19 @@ size_t totp_store_count()
     return n;
 }
 
+void totp_store_new_codes(char codes[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE])
+{
+    for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
+    {
+        uint8_t random[7];
+        const secret_wipe_t wipe_random(random, sizeof(random));
+        esp_fill_random(random, sizeof(random));
+        totp_recovery_text(random, codes[i]);
+    }
+}
+
 esp_err_t totp_store_add(const char *user, const uint8_t secret[TOTP_SECRET_SIZE], uint64_t step,
-                         char codes[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE])
+                         const char codes[TOTP_RECOVERY_CODES][TOTP_RECOVERY_TEXT_SIZE])
 {
     if (s_lock == nullptr)
         return ESP_ERR_INVALID_STATE;
@@ -302,12 +313,8 @@ esp_err_t totp_store_add(const char *user, const uint8_t secret[TOTP_SECRET_SIZE
     esp_fill_random(r.salt, sizeof(r.salt));
     for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
     {
-        uint8_t random[7];
-        char normalised[11]; // a new recovery code
-        const secret_wipe_t wipe_random(random, sizeof(random));
+        char normalised[11]; // a recovery code as it is checked
         const secret_wipe_t wipe_normalised(normalised, sizeof(normalised));
-        esp_fill_random(random, sizeof(random));
-        totp_recovery_text(random, codes[i]);
         if (!totp_recovery_normalise(codes[i], normalised) || !totp_recovery_hash(r.salt, normalised, r.hashes[i]))
             return ESP_FAIL;
     }

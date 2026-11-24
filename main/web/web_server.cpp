@@ -10,11 +10,13 @@
 #include "web_server.h"
 #include "auth/radius_task.h"
 #include "auth/totp_store.h"
+#include "core/json_reply.h"
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
 #include "custom/gnss_uart.h"
 #include "custom/gnss_ubx.h"
 #include "sys/big_alloc.h"
+#include "sys/cjson_mem.h"
 #include "sys/heap_new.h"
 #include "sys/nvs_state.h"
 #include "sys/secret.h"
@@ -398,34 +400,70 @@ namespace
         httpd_resp_set_hdr(req, "Cache-Control", cache_control);
     }
 
-    esp_err_t send_json(httpd_req_t *req, const char *status, cJSON *root)
+    esp_err_t send_text(httpd_req_t *req, const char *status, const char *text)
     {
-        char *text = cJSON_PrintUnformatted(root);
-        cJSON_Delete(root);
         set_security_headers(req, "no-store");
         httpd_resp_set_status(req, status);
         httpd_resp_set_type(req, "application/json");
-        const esp_err_t err = text == nullptr ? httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN)
-                                              : httpd_resp_send(req, text, HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, text, HTTPD_RESP_USE_STRLEN);
+    }
+
+    // The answer when an answer could not be built completely for lack of memory: constant, nothing to allocate
+    esp_err_t send_out_of_memory(httpd_req_t *req)
+    {
+        return send_text(req, "503 Service Unavailable", "{\"error\":\"Out of memory\"}");
+    }
+
+    // The text of an answer (root is deleted; free the text with cJSON_free()). nullptr when it is not complete: the
+    // print failed, or an allocation of cJSON failed in this task since the request began (sys/cjson_mem.h), so a
+    // member that the handler added may be missing (cJSON_Add...ToObject() drops a member it cannot allocate).
+    char *print_reply(cJSON *root)
+    {
+        char *text = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (text != nullptr && !cjson_mem_failed())
+            return text;
+        cJSON_free(text);
+        return nullptr;
+    }
+
+    // An answer that could not be built completely is never sent with the status of the caller: 503 instead
+    esp_err_t send_json(httpd_req_t *req, const char *status, cJSON *root)
+    {
+        char *text = print_reply(root);
+        if (text == nullptr)
+            return send_out_of_memory(req);
+        const esp_err_t err = send_text(req, status, text);
         cJSON_free(text);
         return err;
     }
 
-    esp_err_t send_error(httpd_req_t *req, const char *status, const char *message)
+    // {"ok":true} with an optional "message", or {"error":message}: written without allocation (core/json_reply.h),
+    // so that the answer of a request that has already acted does not depend on free memory; 503 when an allocation
+    // of cJSON failed in this request (what it did may have lacked memory)
+    esp_err_t send_message(httpd_req_t *req, const char *status, bool ok, const char *message)
     {
+        if (cjson_mem_failed())
+            return send_out_of_memory(req);
+        char text[320]; // every message of the firmware fits (the longest about 200 characters)
+        if (json_reply_message(text, sizeof(text), ok, message))
+            return send_text(req, status, text);
+        // Longer, or with a backspace or form feed: with cJSON as before
         cJSON *root = cJSON_CreateObject();
-        cJSON_AddStringToObject(root, "error", message);
+        if (ok)
+        {
+            cJSON_AddBoolToObject(root, "ok", true);
+            if (message != nullptr)
+                cJSON_AddStringToObject(root, "message", message);
+        }
+        else
+            cJSON_AddStringToObject(root, "error", message);
         return send_json(req, status, root);
     }
 
-    esp_err_t send_ok(httpd_req_t *req, const char *message)
-    {
-        cJSON *root = cJSON_CreateObject();
-        cJSON_AddBoolToObject(root, "ok", true);
-        if (message != nullptr)
-            cJSON_AddStringToObject(root, "message", message);
-        return send_json(req, "200 OK", root);
-    }
+    esp_err_t send_error(httpd_req_t *req, const char *status, const char *message) { return send_message(req, status, false, message); }
+
+    esp_err_t send_ok(httpd_req_t *req, const char *message) { return send_message(req, "200 OK", true, message); }
 
     esp_err_t send_static(httpd_req_t *req, const char *type, const char *start, const char *end)
     {
@@ -553,7 +591,7 @@ namespace
 
     // Reads the JSON body (at most max bytes). Returns nullptr and sends the error response on failure. The body may
     // hold passwords, keys or a whole settings set: its block is zeroed at every exit (sys/secret.h), and so is every
-    // block of the tree when it is deleted (the free function of cJSON, main.cpp).
+    // block of the tree when it is deleted (the free function of cJSON, sys/cjson_mem.cpp).
     cJSON *read_json(httpd_req_t *req, size_t max = MAX_BODY)
     {
         if (req->content_len == 0 || req->content_len > max)
@@ -1253,6 +1291,7 @@ namespace
 
     esp_err_t handle_not_found(httpd_req_t *req, httpd_err_code_t)
     {
+        cjson_mem_watch_begin(); // as dispatch() does for the routes
         return send_error(req, "404 Not Found", "Not found");
     }
 
@@ -1371,6 +1410,7 @@ namespace
     // In the server task
     void radius_finish(void *argument)
     {
+        cjson_mem_watch_begin(); // its answer is built here, not in the request that began the wait (dispatch())
         radius_wait_t *w = static_cast<radius_wait_t *>(argument);
         switch (w->kind)
         {
@@ -1704,32 +1744,76 @@ namespace
         return ok;
     }
 
-    // The login is complete: the session (the throttling forgets the failures of the source). codes: the recovery
-    // codes of a token set up with this login.
-    esp_err_t login_open_session(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius, bool totp,
-                                 const char (*codes)[TOTP_RECOVERY_TEXT_SIZE] = nullptr)
+    // The token of the first login of a RADIUS user, stored by login_open_session()
+    struct new_token_t
     {
-        web_auth_record_success(peer);
-        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        const char *user = nullptr;
+        const uint8_t *secret = nullptr;
+        uint64_t step = 0;
+        const char (*codes)[TOTP_RECOVERY_TEXT_SIZE] = nullptr;
+    };
+
+    // The login is complete: the session (the throttling forgets the failures of the source), and its answer. The
+    // answer is built first, with a placeholder for the CSRF token (its first member, written into the text once the
+    // session exists): without memory for it no session is opened that nobody would get, the token of a first login
+    // (store) is not stored, and so its recovery codes, shown only in this answer, cannot be lost (*no_memory is set:
+    // the same login step can be tried again). Only then the token, the session, the cookie.
+    esp_err_t login_open_session(httpd_req_t *req, const struct sockaddr_storage &peer, const char *user, bool radius, bool totp,
+                                 const new_token_t *store = nullptr, bool *no_memory = nullptr)
+    {
+        static constexpr char CSRF_START[] = "{\"csrf\":\"";
+        static constexpr size_t CSRF_AT = sizeof(CSRF_START) - 1;
         char csrf[WEB_CSRF_TOKEN_HEX_LEN + 1];
-        if (!web_auth_create_session(token, csrf, user, radius, totp))
-            return send_error(req, "500 Internal Server Error", "Session could not be created");
-        char cookie[WEB_SESSION_TOKEN_HEX_LEN + 80];
-        snprintf(cookie, sizeof(cookie), "%s=%s; Path=/; Secure; HttpOnly; SameSite=Strict", SESSION_COOKIE, token);
-        httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+        memset(csrf, '0', WEB_CSRF_TOKEN_HEX_LEN);
+        csrf[WEB_CSRF_TOKEN_HEX_LEN] = '\0';
         cJSON *reply = cJSON_CreateObject();
         cJSON_AddStringToObject(reply, "csrf", csrf);
         cJSON_AddStringToObject(reply, "user", user);
         cJSON_AddBoolToObject(reply, "radius", radius);
-        if (codes != nullptr)
+        if (store != nullptr)
         {
             cJSON *list = cJSON_AddArrayToObject(reply, "recovery_codes");
             for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
-                cJSON_AddItemToArray(list, cJSON_CreateString(codes[i]));
+                cJSON_AddItemToArray(list, cJSON_CreateString(store->codes[i]));
         }
-        const esp_err_t err = send_json(req, "200 OK", reply);
+        char *text = print_reply(reply);
+        if (text == nullptr)
+        {
+            if (no_memory != nullptr)
+                *no_memory = true;
+            return send_out_of_memory(req);
+        }
+        if (strncmp(text, CSRF_START, CSRF_AT) != 0 || strlen(text) < CSRF_AT + WEB_CSRF_TOKEN_HEX_LEN)
+        {
+            cJSON_free(text);
+            return send_error(req, "500 Internal Server Error", "Session could not be created");
+        }
+        if (store != nullptr)
+        {
+            const esp_err_t err = totp_store_add(store->user, store->secret, store->step, store->codes);
+            if (err != ESP_OK)
+            {
+                cJSON_free(text); // zeroed (sys/cjson_mem.cpp): the recovery codes
+                return send_error(req, "507 Insufficient Storage",
+                                  err == ESP_ERR_NO_MEM ? "All TOTP tokens are in use" : "The TOTP token could not be stored (NVS full?)");
+            }
+        }
+        char token[WEB_SESSION_TOKEN_HEX_LEN + 1];
+        if (!web_auth_create_session(token, csrf, user, radius, totp))
+        {
+            cJSON_free(text);
+            return send_error(req, "500 Internal Server Error", "Session could not be created");
+        }
+        memcpy(text + CSRF_AT, csrf, WEB_CSRF_TOKEN_HEX_LEN);
+        web_auth_record_success(peer);
+        char cookie[WEB_SESSION_TOKEN_HEX_LEN + 80];
+        snprintf(cookie, sizeof(cookie), "%s=%s; Path=/; Secure; HttpOnly; SameSite=Strict", SESSION_COOKIE, token);
+        httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+        const esp_err_t err = send_text(req, "200 OK", text);
+        cJSON_free(text); // zeroed (sys/cjson_mem.cpp): the CSRF token and the recovery codes
         mbedtls_platform_zeroize(token, sizeof(token));
         mbedtls_platform_zeroize(cookie, sizeof(cookie));
+        mbedtls_platform_zeroize(csrf, sizeof(csrf));
         return err;
     }
 
@@ -1815,7 +1899,15 @@ namespace
                 return send_error(req, "500 Internal Server Error", "The new TOTP token could not be made");
             }
         }
-        return send_json(req, "200 OK", reply);
+        char *text = print_reply(reply);
+        if (text == nullptr)
+        {
+            wipe(*p); // nobody got its id: the login starts again
+            return send_out_of_memory(req);
+        }
+        const esp_err_t err = send_text(req, "200 OK", text);
+        cJSON_free(text); // zeroed (sys/cjson_mem.cpp): the key of a new token
+        return err;
     }
 
     // A refused login (the throttling has counted it): the same answer for a wrong user name and a wrong password
@@ -2002,20 +2094,18 @@ namespace
             return lost_err;
         }
         bool right = false;
+        new_token_t store{};
         if (p->enroll)
         {
-            uint64_t step = 0;
             const time_t now = time(nullptr);
-            right = totp_store_time_ok() && totp_verify(p->secret, sizeof(p->secret), static_cast<int64_t>(now), typed, 0, step);
+            right = totp_store_time_ok() && totp_verify(p->secret, sizeof(p->secret), static_cast<int64_t>(now), typed, 0, store.step);
             if (right)
             {
-                const esp_err_t err = totp_store_add(p->user, p->secret, step, p->codes);
-                if (err != ESP_OK)
-                {
-                    wipe(*p);
-                    return send_error(req, "507 Insufficient Storage",
-                                      err == ESP_ERR_NO_MEM ? "All TOTP tokens are in use" : "The TOTP token could not be stored (NVS full?)");
-                }
+                // Stored by login_open_session() once its answer with the recovery codes is built
+                totp_store_new_codes(p->codes);
+                store.user = p->user;
+                store.secret = p->secret;
+                store.codes = p->codes;
             }
         }
         else
@@ -2034,8 +2124,10 @@ namespace
             }
             return send_error(req, "401 Unauthorized", "Wrong code");
         }
-        const esp_err_t err = login_open_session(req, peer, p->user, p->radius, true, p->enroll ? p->codes : nullptr);
-        wipe(*p);
+        bool no_memory = false;
+        const esp_err_t err = login_open_session(req, peer, p->user, p->radius, true, p->enroll ? &store : nullptr, &no_memory);
+        if (!no_memory)
+            wipe(*p); // else kept: nothing was stored, the next code can be typed (a code that was checked is used up)
         return err;
     }
 
@@ -2122,25 +2214,34 @@ namespace
         codes_t *c = big_new<codes_t>();
         if (c == nullptr)
             return send_error(req, "503 Service Unavailable", "Out of memory");
+        // The answer with the recovery codes, shown only in it, before the token is stored: without memory for it
+        // nothing is stored, and the set-up stays open for the next code
+        totp_store_new_codes(c->codes);
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddStringToObject(reply, "user", slot->user);
+        cJSON *list = cJSON_AddArrayToObject(reply, "recovery_codes");
+        for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
+            cJSON_AddItemToArray(list, cJSON_CreateString(c->codes[i]));
+        char *text = print_reply(reply);
+        if (text == nullptr)
+        {
+            big_delete(c);
+            return send_out_of_memory(req);
+        }
         const esp_err_t err = totp_store_add(slot->user, slot->secret, step, c->codes);
-        char name[TOTP_USER_SIZE];
-        snprintf(name, sizeof(name), "%s", slot->user);
+        big_delete(c);
         mbedtls_platform_zeroize(slot, sizeof(*slot));
         *slot = totp_enroll_t{};
         if (err != ESP_OK)
         {
-            big_delete(c);
+            cJSON_free(text); // zeroed (sys/cjson_mem.cpp): the recovery codes
             return send_error(req, "507 Insufficient Storage",
                               err == ESP_ERR_NO_MEM ? "All TOTP tokens are in use" : "The TOTP token could not be stored (NVS full?)");
         }
-        cJSON *reply = cJSON_CreateObject();
-        cJSON_AddBoolToObject(reply, "ok", true);
-        cJSON_AddStringToObject(reply, "user", name);
-        cJSON *list = cJSON_AddArrayToObject(reply, "recovery_codes");
-        for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
-            cJSON_AddItemToArray(list, cJSON_CreateString(c->codes[i]));
-        big_delete(c);
-        return send_json(req, "200 OK", reply);
+        const esp_err_t send_err = send_text(req, "200 OK", text);
+        cJSON_free(text);
+        return send_err;
     }
 
     esp_err_t handle_totp_delete(httpd_req_t *req)
@@ -3392,7 +3493,7 @@ namespace
         cJSON_AddBoolToObject(reply, "ok", true);
         cJSON_AddStringToObject(reply, "message", own ? "Own certificate stored and in use. The page connects again with it."
                                                       : "The self-signed certificate is in use again. The page connects again with it.");
-        add_tls_json(reply); // no "tls" without memory for it: the change is made, the page loads again 2.5 s later
+        add_tls_json(reply); // false (out of memory): send_json() answers 503 although the change is made
         const esp_err_t send_err = send_json(req, "200 OK", reply);
         httpd_queue_work(s_server, close_sessions_work, nullptr);
         return send_err;
@@ -3455,8 +3556,11 @@ namespace
         }
         char *text = cJSON_Print(root);
         cJSON_Delete(root);
-        if (text == nullptr)
-            return send_error(req, "503 Service Unavailable", "Out of memory");
+        if (text == nullptr || cjson_mem_failed()) // not a file with a setting missing
+        {
+            cJSON_free(text);
+            return send_out_of_memory(req);
+        }
         char disposition[96];
         snprintf(disposition, sizeof(disposition), "attachment; filename=\"timeserver-config-%s.json\"", host);
         set_security_headers(req, "no-store");
@@ -3464,7 +3568,7 @@ namespace
         httpd_resp_set_hdr(req, "Content-Disposition", disposition);
         const size_t length = strlen(text);
         const esp_err_t err = httpd_resp_send(req, text, static_cast<ssize_t>(length));
-        cJSON_free(text); // zeroed (main.cpp): it contains the secrets
+        cJSON_free(text); // zeroed (sys/cjson_mem.cpp): it contains the secrets
         ESP_LOGI(TAG, "Web admin: configuration exported");
         return err;
     }
@@ -3688,14 +3792,23 @@ namespace
         return send_err;
     }
 
+    struct route_t
+    {
+        const char *uri = nullptr;
+        httpd_method_t method = HTTP_GET;
+        esp_err_t (*handler)(httpd_req_t *) = nullptr;
+    };
+
+    // Every request starts with no failed allocation of cJSON: send_json() and send_message() answer 503 when one
+    // fails while the request is served (sys/cjson_mem.h)
+    esp_err_t dispatch(httpd_req_t *req)
+    {
+        cjson_mem_watch_begin();
+        return static_cast<const route_t *>(req->user_ctx)->handler(req);
+    }
+
     bool register_handlers(httpd_handle_t server)
     {
-        struct route_t
-        {
-            const char *uri;
-            httpd_method_t method;
-            esp_err_t (*handler)(httpd_req_t *);
-        };
         static const route_t routes[] = {
             {"/", HTTP_GET, handle_index},
             {"/app.js", HTTP_GET, handle_js},
@@ -3736,7 +3849,8 @@ namespace
             httpd_uri_t uri{};
             uri.uri = route.uri;
             uri.method = route.method;
-            uri.handler = route.handler;
+            uri.handler = dispatch;
+            uri.user_ctx = const_cast<route_t *>(&route);
             if (httpd_register_uri_handler(server, &uri) != ESP_OK)
                 return false;
         }

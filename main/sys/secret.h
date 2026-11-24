@@ -13,7 +13,7 @@
 // So that a later change cannot forget it, the zeroing is built in where memory is given back:
 //  - big_delete() (sys/big_alloc.h) zeroes every object after its destructor;
 //  - every block cJSON frees (the nodes and strings of a tree, a printed text, the buffers of a print) goes through
-//    secret_free(): main.cpp sets it as the free function of cJSON;
+//    secret_free(): sys/cjson_mem.cpp sets it as the free function of cJSON;
 //  - every block mbedTLS frees (the TLS record buffers among them) goes through secret_free(): sys/mbedtls_mem.cpp
 //    registers it as the free function of mbedTLS (main.cpp calls mbedtls_mem_install());
 //  - a stack buffer of a function with several exits gets a secret_wipe_t, which zeroes it at every exit of its scope.

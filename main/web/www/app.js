@@ -198,7 +198,14 @@
     $('recovery-card').hidden = true;
     $('login-password').focus();
     api('/api/info').then((r) => {
-      if (r.status !== 200) return;
+      if (r.status !== 200) {
+        // 503: the device had no memory for the answer (the login itself may work)
+        if (r.status === 503 && r.data.error) {
+          $('login-store-notice').textContent = ts(r.data.error);
+          $('login-store-notice').hidden = false;
+        }
+        return;
+      }
       setHost(r.data.fqdn || r.data.hostname);
       // RADIUS logins on: a user name (empty = the local user admin); off: the hidden admin field for password managers
       $('login-user-row').hidden = !r.data.login_user;
