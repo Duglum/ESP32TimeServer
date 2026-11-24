@@ -18,6 +18,7 @@ set(MAIN_SOURCES
         "custom/ptp_auth.cpp"
         "custom/ntp_cache.c"
         "custom/nvs_blob.cpp"
+        "sys/mbedtls_mem.cpp"
         "sys/nvs_purge.cpp"
         "sys/nvs_purge_core.cpp"
         "sys/nvs_state.cpp"

@@ -79,6 +79,9 @@ CONFIG_MBEDTLS_SSL_TLS1_3_KEXM_EPHEMERAL=y
 # Allocate the TLS record buffers only while they are used (about 40 kB less per idle connection)
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+# mbedTLS memory from main/sys/mbedtls_mem.cpp: internal RAM as the "Internal memory" mode, every block (the TLS record
+# buffers with the decrypted requests among them) zeroed before it is freed; app_main() installs it
+CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=y
 # Validity dates of certificates (the MQTT broker's): without it mbedTLS ignores them; the MQTT client leaves them out
 # while the clock is not set yet (no GNSS time)
 CONFIG_MBEDTLS_HAVE_TIME_DATE=y

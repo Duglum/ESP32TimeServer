@@ -57,6 +57,7 @@
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
 #include "sys/heap_new.h"
+#include "sys/mbedtls_mem.h"
 #include "sys/nvs_purge.h"
 #include "sys/nvs_state.h"
 #include "sys/secret.h"
@@ -13082,6 +13083,9 @@ extern "C" void app_main()
     cJSON_Hooks hooks{};
     hooks.free_fn = secret_free;
     cJSON_InitHooks(&hooks);
+
+    // The same for every block mbedTLS frees (sys/mbedtls_mem.h): the TLS record buffers hold the decrypted requests
+    mbedtls_mem_install();
 
     // The settings of this boot (compiled defaults, NVS, one-shot set of the web admin) are needed by everything
     // below, the PPS pin included
