@@ -13084,7 +13084,8 @@ extern "C" void app_main()
     hooks.free_fn = secret_free;
     cJSON_InitHooks(&hooks);
 
-    // The same for every block mbedTLS frees (sys/mbedtls_mem.h): the TLS record buffers hold the decrypted requests
+    // The same for every block mbedTLS frees (sys/mbedtls_mem.h): a TLS record buffer can hold decrypted data that was
+    // not read (a request the web server cuts off)
     mbedtls_mem_install();
 
     // The settings of this boot (compiled defaults, NVS, one-shot set of the web admin) are needed by everything

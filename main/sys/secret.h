@@ -14,9 +14,11 @@
 //  - big_delete() (sys/big_alloc.h) zeroes every object after its destructor;
 //  - every block cJSON frees (the nodes and strings of a tree, a printed text, the buffers of a print) goes through
 //    secret_free(): main.cpp sets it as the free function of cJSON;
+//  - every block mbedTLS frees (the TLS record buffers among them) goes through secret_free(): sys/mbedtls_mem.cpp
+//    registers it as the free function of mbedTLS (main.cpp calls mbedtls_mem_install());
 //  - a stack buffer of a function with several exits gets a secret_wipe_t, which zeroes it at every exit of its scope.
 // The secrets in use for the whole run (the settings in use, the keys of the TLS identity, the tables of sessions and
-// TOTP tokens) stay where they are; ESP-IDF, mbedTLS and cJSON zero (or do not zero) their own memory themselves.
+// TOTP tokens) stay where they are; ESP-IDF and esp-mqtt zero (or do not zero) their own memory themselves.
 #pragma once
 
 #include <cstddef>

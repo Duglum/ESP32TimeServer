@@ -21,9 +21,11 @@ extern "C" void *esp_mbedtls_mem_calloc(size_t n, size_t size)
     return heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
-// With ESP-IDF's dynamic TLS buffers (CONFIG_MBEDTLS_DYNAMIC_BUFFER) a record buffer is freed through here right
-// after its record was read (esp_mbedtls_free_buf() of ESP-IDF 6.1.1 calls mbedtls_free() without zeroing it): it
-// holds the decrypted request, with the passwords, TOTP codes and private keys of the page among them.
+// With ESP-IDF's dynamic TLS buffers (CONFIG_MBEDTLS_DYNAMIC_BUFFER) a record buffer is freed through here
+// (esp_mbedtls_free_buf() of ESP-IDF 6.1.1 calls mbedtls_free() and does not zero it). mbedTLS zeroes the application
+// data it hands to the web server (mbedtls_ssl_read()), so such a buffer still holds decrypted data only when the
+// connection ends before it was read: a request header above the limit of the web server (answered 431), the rest of
+// a request the web server cuts off.
 extern "C" void esp_mbedtls_mem_free(void *ptr)
 {
     secret_free(ptr);

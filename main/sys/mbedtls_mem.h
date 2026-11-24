@@ -5,8 +5,9 @@
 // esp_mbedtls_mem_calloc() / esp_mbedtls_mem_free() (port/esp_mem.c) nor points mbedTLS at them (esp_config.h): until
 // mbedtls_platform_set_calloc_free() is called, mbedTLS takes calloc() and free() of the C library
 // (tf-psa-crypto platform.h, platform.c). So the firmware calls mbedtls_mem_install() first in app_main(), before
-// anything uses mbedTLS. A block taken before it (with calloc()) is freed through esp_mbedtls_mem_free() as well:
-// secret_free() handles every block of the heap.
+// the web server, MQTT and the TLS identity use mbedTLS. ESP-IDF's secondary initialization calls psa_crypto_init()
+// before app_main() (components/mbedtls/port/esp_psa_crypto_init.c): a block taken there (with calloc(), from the same
+// heap) is freed through esp_mbedtls_mem_free() as well, and secret_free() handles every block of the heap.
 #pragma once
 
 // mbedTLS gets esp_mbedtls_mem_calloc() and esp_mbedtls_mem_free() of mbedtls_mem.cpp
