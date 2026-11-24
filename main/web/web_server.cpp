@@ -2127,7 +2127,8 @@ namespace
         bool no_memory = false;
         const esp_err_t err = login_open_session(req, peer, p->user, p->radius, true, p->enroll ? &store : nullptr, &no_memory);
         if (!no_memory)
-            wipe(*p); // else kept: nothing was stored, the next code can be typed (a code that was checked is used up)
+            wipe(*p); // else kept: nothing was stored, a code can be typed again (one checked against a stored token
+                      // is used up; the code of a new token is not, the token was not stored)
         return err;
     }
 
