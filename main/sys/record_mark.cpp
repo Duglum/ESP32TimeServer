@@ -8,6 +8,8 @@
 #include "esp_log.h"
 #include "nvs.h"
 
+[[noreturn]] void app_restart_not_kept(const char *reason); // main.cpp (declared in web/web_settings.h)
+
 namespace
 {
     const char *const TAG = "record_mark";
@@ -38,6 +40,14 @@ record_mark_state_t record_mark_check(const char *ns, const char *key, bool reco
     }
     uint64_t found = 0;
     const esp_err_t err = read_mark(mark, &found);
+    // Without memory for the handle (nvs_open() allocates it) the mark is not known: counted as a mark, a record that
+    // was never stored would read as lost for the whole run; counted as none, a lost one would read as never stored
+    // (a default in its place, e.g. the default password). Neither: a restart (the callers run at the start)
+    if (err == ESP_ERR_NO_MEM)
+    {
+        ESP_LOGE(TAG, "The mark %s could not be read (out of memory): restart", mark);
+        app_restart_not_kept("nvs_no_memory");
+    }
     bool marked = err == ESP_OK;
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
     {

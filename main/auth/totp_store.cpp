@@ -6,6 +6,7 @@
 #include "custom/nvs_blob.h"
 #include "sys/record_mark.h"
 #include "sys/secret.h"
+#include "web/web_settings.h" // app_restart_not_kept()
 
 #include <cstdio>
 #include <cstring>
@@ -179,7 +180,16 @@ void totp_store_init(size_t nvs_reserve_bytes)
     esp_fill_random(s_dummy_secret, sizeof(s_dummy_secret));
     esp_fill_random(s_dummy_salt, sizeof(s_dummy_salt));
     nvs_handle_t handle = 0;
-    const bool opened = nvs_open(TOTP_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK;
+    const esp_err_t open_err = nvs_open(TOTP_NVS_NAMESPACE, NVS_READONLY, &handle);
+    // Without memory for the handle (nvs_open() allocates it) nothing about the tokens is known. Taken for "not
+    // stored", every stored token would read as lost (its mark): its logins refused for the whole run and a line that
+    // says to erase NVS. A restart instead (as for the settings, web/web_settings.cpp)
+    if (open_err == ESP_ERR_NO_MEM)
+    {
+        ESP_LOGE(TAG, "TOTP: the stored tokens could not be read (out of memory): restart");
+        app_restart_not_kept("nvs_no_memory");
+    }
+    const bool opened = open_err == ESP_OK;
     size_t loaded = 0;
     size_t lost_count = 0;
     for (size_t i = 0; i < TOTP_TOKENS_MAX; ++i)

@@ -1048,6 +1048,14 @@ void web_settings_load_boot()
     // NVS that cannot be used at this start (sys/nvs_state.h) is not opened: its state was logged by nvs_state_init()
     const bool nvs = nvs_state_usable();
     esp_err_t err = nvs ? nvs_open(NVS_NAMESPACE, NVS_READWRITE_PURGE, &handle) : nvs_state_error();
+    // nvs_open() allocates its handle (ESP-IDF 6.1.1: malloc()): without that memory nothing about the saved set is
+    // known, as for the read below. Taken for "not stored", the mark would make it read as lost (the defaults with NTP
+    // answered as unsynchronised, no login, for the whole run): a restart instead
+    if (err == ESP_ERR_NO_MEM)
+    {
+        ESP_LOGE(TAG, "The saved settings could not be read (out of memory): restart");
+        app_restart_not_kept("settings_no_memory");
+    }
     // Lost = the mark without the set (sys/record_mark.h). A set that is there but not usable by this firmware is no
     // loss: as before, the defaults are used and it is not saved over.
     size_t saved_size = 0;
@@ -1218,8 +1226,13 @@ bool web_settings_get_saved(web_settings_t &out, bool *no_memory)
     if (no_memory != nullptr)
         *no_memory = false;
     nvs_handle_t handle = 0;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
+    const esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK)
+    {
+        if (err == ESP_ERR_NO_MEM && no_memory != nullptr) // no handle (nvs_open() allocates it): not "nothing saved"
+            *no_memory = true;
         return false;
+    }
     settings_blob_t *blob = big_new<settings_blob_t>();
     if (blob == nullptr && no_memory != nullptr)
         *no_memory = true;

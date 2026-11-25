@@ -286,10 +286,23 @@ namespace
         return found;
     }
 
+    // The start: nvs_open() without memory for its handle says nothing about what is stored. Taken for "not stored",
+    // a stored password or allow-list would read as lost (its mark, sys/record_mark.h): no login for the whole run and
+    // a line that says to erase NVS. A restart instead (as for the settings, web_settings.cpp)
+    void restart_if_no_memory(esp_err_t err, const char *what)
+    {
+        if (err != ESP_ERR_NO_MEM)
+            return;
+        ESP_LOGE(TAG, "Web admin: the stored %s could not be read (out of memory): restart", what);
+        app_restart_not_kept("nvs_no_memory");
+    }
+
     bool load_allow_list()
     {
         nvs_handle_t handle = 0;
-        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
+        const esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+        restart_if_no_memory(err, "allow-list");
+        if (err != ESP_OK)
             return false;
         allow_record_t record{};
         size_t length = sizeof(record);
@@ -351,7 +364,9 @@ void web_auth_init()
     psa_crypto_init();
 
     nvs_handle_t handle = 0;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK)
+    const esp_err_t open_err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    restart_if_no_memory(open_err, "password");
+    if (open_err == ESP_OK)
     {
         password_record_t record{};
         size_t length = sizeof(record);

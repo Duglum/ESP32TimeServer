@@ -28,6 +28,24 @@ namespace
     };
     fake_nvs_t g;
 
+    // app_restart_not_kept() of the firmware: counted, then thrown so that the test goes on after the call
+    struct restart_t
+    {
+    };
+    int g_restarts = 0;
+    std::string g_restart_reason;
+} // namespace
+
+[[noreturn]] void app_restart_not_kept(const char *reason)
+{
+    ++g_restarts;
+    g_restart_reason = reason != nullptr ? reason : "";
+    throw restart_t{};
+}
+
+namespace
+{
+
     void reset()
     {
         g = fake_nvs_t{};
@@ -281,6 +299,21 @@ namespace
         CHECK(record_mark_check("webauth", "allow", false, 0, nullptr) == record_mark_state_t::none);
         g.open_error = ESP_ERR_NVS_PART_NOT_FOUND;
         CHECK(record_mark_check("webauth", "allow", false, 0, nullptr) == record_mark_state_t::none);
+        // Without memory for the handle of nvs_open(): neither a mark nor none, the restart (app_restart_not_kept())
+        g.open_error = ESP_ERR_NO_MEM;
+        for (const bool valid : {false, true})
+        {
+            g_restarts = 0;
+            g_restart_reason.clear();
+            try
+            {
+                record_mark_check("webauth", "allow", valid, valid ? 1 : 0, nullptr);
+            }
+            catch (const restart_t &)
+            {
+            }
+            CHECK(g_restarts == 1 && g_restart_reason == "nvs_no_memory");
+        }
         g.open_error = ESP_OK;
     }
 
