@@ -2012,6 +2012,7 @@
     setBusy(true);
     const r = await api('/api/config', body);
     setBusy(false);
+    if (await reloadIfCertificateChanged(r)) return;
     if (r.status !== 200) {
       show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
       return;
@@ -2188,6 +2189,22 @@
 
   for (const r of document.querySelectorAll('input[name="tls_mode"]')) r.addEventListener('change', () => renderTls(false));
 
+  // POST /api/tls and the import (POST /api/config) can switch the certificate before they fail: a 503 for lack of
+  // memory for the answer, or a 500 of the import when its settings could not be written. The device has closed its
+  // connections then, and a page that stays would get no answer once the browser does not trust the new certificate.
+  // Changed (or no answer): show the error, load the page again over a new connection, as after a 200, and return true;
+  // unchanged: false, the caller shows the error as usual
+  async function reloadIfCertificateChanged(r) {
+    if (r.status < 500 || !state || !state.tls) return false;
+    const now = await api('/api/tls');
+    const tls = now.status === 200 ? now.data.tls : null;
+    if (now.status !== 0 && !(tls && (tls.mode !== state.tls.mode || tls.fingerprint !== state.tls.fingerprint))) return false;
+    show((ts(r.data.error) || t('Request failed ({status})', { status: r.status })) + '. ' +
+      t('The certificate in use has changed: the page connects again with it.'), 'error');
+    setTimeout(() => location.reload(), 2500);
+    return true;
+  }
+
   $('tls-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const body = { mode: tlsMode() };
@@ -2200,18 +2217,7 @@
     setBusy(true);
     const r = await api('/api/tls', body);
     setBusy(false);
-    if (r.status === 503 && state && state.tls) {
-      // The device may have made the change before it lacked memory for its answer: then it has closed its
-      // connections, and a page that stays would get no answer once the browser does not trust the new certificate.
-      // Changed (or no answer): load the page again over a new connection, as after a 200; unchanged: the form stays
-      const now = await api('/api/tls');
-      const tls = now.status === 200 ? now.data.tls : null;
-      if (now.status === 0 || (tls && (tls.mode !== state.tls.mode || tls.fingerprint !== state.tls.fingerprint))) {
-        show(ts(r.data.error) + '. ' + t('The certificate in use has changed: the page connects again with it.'), 'error');
-        setTimeout(() => location.reload(), 2500);
-        return;
-      }
-    }
+    if (await reloadIfCertificateChanged(r)) return;
     if (r.status !== 200) {
       show(ts(r.data.error) || t('Request failed ({status})', { status: r.status }), 'error');
       return;

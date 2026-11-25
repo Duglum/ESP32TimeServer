@@ -3786,7 +3786,12 @@ namespace
         if (write_err != ESP_OK)
         {
             big_delete(sets);
-            return send_error(req, "500 Internal Server Error", "Settings could not be written to NVS");
+            const esp_err_t send_err = send_error(req, "500 Internal Server Error", "Settings could not be written to NVS");
+            // The certificate is stored and in use already: the connections are closed as after a complete import, or
+            // they would keep the old certificate while the page reloads over new ones (seen in ESP32-ConsoleServer)
+            if (tls_changed)
+                httpd_queue_work(s_server, close_sessions_work, nullptr);
+            return send_err;
         }
         if (!restart)
         {
