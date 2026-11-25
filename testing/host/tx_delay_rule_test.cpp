@@ -4,6 +4,7 @@
 
 #include "custom/tx_delay_rule.h"
 
+#include <algorithm>
 #include <random>
 #include <vector>
 
@@ -38,7 +39,7 @@ void run_tests()
     {
         tx_delay_rule_t r = started(g, base);
         CHECK(r.samples == TX_DELAY_START_SAMPLES);
-        CHECK(near(r.estimate_ns, base - 400, 400)); // the smallest of the first samples
+        CHECK(near(r.estimate_ns, base, 500)); // the second smallest of the first samples
         int fed = 0;
         for (int i = 0; i < 5000; ++i)
             fed += tx_delay_rule_update(r, quiet(g, base)) == tx_delay_step_t::fed;
@@ -82,7 +83,7 @@ void run_tests()
         const int32_t up = base + 40000;
         int steps = 0;
         tx_delay_step_t s = tx_delay_step_t::above;
-        while (s != tx_delay_step_t::rebased_up && steps < 1000)
+        while (s != tx_delay_step_t::rebased_up && steps < 5000)
         {
             s = tx_delay_rule_update(r, quiet(g, up));
             ++steps;
@@ -102,7 +103,7 @@ void run_tests()
         const int32_t up = base + 40000;
         int steps = 0;
         tx_delay_step_t s = tx_delay_step_t::above;
-        while (s != tx_delay_step_t::rebased_up && steps < 1000)
+        while (s != tx_delay_step_t::rebased_up && steps < 5000)
         {
             s = tx_delay_rule_update(r, (steps % 3 == 0) ? up + 100000 : quiet(g, up));
             ++steps;
@@ -143,7 +144,7 @@ void run_tests()
         CHECK(highest <= base + (quiet_percent >= 20 ? 1000 : 4000));
         // after the load: at most TX_DELAY_REBASE_DOWN_SAMPLES quiet samples until the estimate is quiet again
         int n = 0;
-        while (r.estimate_ns > base + 500 && n < 100)
+        while (r.estimate_ns > base + 2500 && n < 100) // within the band of the quiet delay
         {
             tx_delay_rule_update(r, quiet(g, base));
             ++n;
@@ -156,12 +157,72 @@ void run_tests()
         for (int i = 0; i < 100; ++i)
             tx_delay_rule_update(r, quiet(g, base + 10000)); // too high by the steps below: the estimate at +10 us
         r.estimate_ns = base + 10000;
+        r.confirmed_by = TX_DELAY_CONFIRM_SAMPLES; // a running estimate
         for (int i = 0; i < TX_DELAY_REBASE_DOWN_SAMPLES - 1; ++i)
         {
             CHECK(tx_delay_rule_update(r, quiet(g, base)) == tx_delay_step_t::below);
             CHECK(tx_delay_rule_update(r, base + 40000) == tx_delay_step_t::above);
         }
         CHECK(tx_delay_rule_update(r, quiet(g, base)) == tx_delay_step_t::rebased_down);
+    }
+    // The start with low samples among normal ones (before the device was synchronised such samples ran from -74 to
+    // +69 us; main.cpp no longer takes them, but a glitch must not decide the start either)
+    for (uint32_t at = 0; at < TX_DELAY_START_SAMPLES; ++at) // one low sample, wherever it comes
+    {
+        tx_delay_rule_t r;
+        for (uint32_t i = 0; i < TX_DELAY_START_SAMPLES; ++i)
+            tx_delay_rule_update(r, i == at ? 2700 : quiet(g, base));
+        CHECK(near(r.estimate_ns, base, 500));
+    }
+    {
+        tx_delay_rule_t r; // two low samples: the start value (stated limit), brought up only by a long run
+        for (uint32_t i = 0; i < TX_DELAY_START_SAMPLES; ++i)
+            tx_delay_rule_update(r, (i == 3 || i == 9) ? 2700 : quiet(g, base));
+        CHECK(r.estimate_ns == 2700);
+    }
+    // The start value is the second smallest whatever the order of the samples
+    for (int k = 0; k < 2000; ++k)
+    {
+        tx_delay_rule_t r;
+        std::vector<int32_t> v;
+        for (uint32_t i = 0; i < TX_DELAY_START_SAMPLES; ++i)
+        {
+            v.push_back(static_cast<int32_t>(g() % 500001));
+            tx_delay_rule_update(r, v.back());
+        }
+        std::sort(v.begin(), v.end());
+        CHECK(r.estimate_ns == v[1]);
+    }
+    // A start entirely under load: the second smallest of late samples; the first 2 quiet samples after the load bring
+    // it down (the estimate is not confirmed yet)
+    {
+        tx_delay_rule_t r;
+        for (uint32_t i = 0; i < TX_DELAY_START_SAMPLES; ++i)
+            tx_delay_rule_update(r, base + 20000 + static_cast<int32_t>(g() % 60000));
+        CHECK(r.estimate_ns >= base + 20000);
+        for (int i = 0; i < TX_DELAY_REBASE_DOWN_SAMPLES; ++i)
+            tx_delay_rule_update(r, quiet(g, base));
+        CHECK(near(r.estimate_ns, base, 500));
+    }
+    // The down re-base with late samples and one glitch among the low ones: the second smallest, not a late one
+    {
+        tx_delay_rule_t r = started(g, base);
+        r.estimate_ns = base + 30000; // too high (a running estimate)
+        r.confirmed_by = TX_DELAY_CONFIRM_SAMPLES;
+        CHECK(tx_delay_rule_update(r, base + 20000) == tx_delay_step_t::below); // late, but below the estimate
+        CHECK(tx_delay_rule_update(r, quiet(g, base)) == tx_delay_step_t::below);
+        CHECK(tx_delay_rule_update(r, 1000) == tx_delay_step_t::below); // a glitch
+        CHECK(tx_delay_rule_update(r, quiet(g, base)) == tx_delay_step_t::rebased_down);
+        CHECK(near(r.estimate_ns, base, 500));
+    }
+    // A load of up to TX_DELAY_REBASE_UP_SAMPLES - 1 late samples in a row (a single-request client: no quiet answer
+    // in between) does not move the estimate
+    {
+        tx_delay_rule_t r = started(g, base);
+        const int32_t before = r.estimate_ns;
+        for (int i = 0; i < TX_DELAY_REBASE_UP_SAMPLES - 1; ++i)
+            CHECK(tx_delay_rule_update(r, base + 2500 + static_cast<int32_t>(g() % 100000)) == tx_delay_step_t::above);
+        CHECK(r.estimate_ns == before);
     }
     // A single spurious low sample (and three): no change
     {
@@ -177,12 +238,12 @@ void run_tests()
             CHECK(near(r.estimate_ns, before, 300));
         }
     }
-    // A start under load: the first samples mostly late; the smallest is taken, the answers after the load are right
+    // A start under load: the first samples mostly late; the second smallest is taken, the answers after the load are right
     {
         tx_delay_rule_t r;
         for (uint32_t i = 0; i < TX_DELAY_START_SAMPLES; ++i)
             tx_delay_rule_update(r, (i % 4 == 3) ? quiet(g, base) : base + 20000 + static_cast<int32_t>(g() % 100000));
-        CHECK(near(r.estimate_ns, base - 400, 400));
+        CHECK(near(r.estimate_ns, base, 500)); // 4 quiet samples among 16: the second smallest is a quiet one
         // a start where every first sample was late: too high, brought down by the first quiet samples
         tx_delay_rule_t h;
         for (uint32_t i = 0; i < TX_DELAY_START_SAMPLES; ++i)
@@ -194,7 +255,55 @@ void run_tests()
             tx_delay_rule_update(h, quiet(g, base));
             ++n;
         }
-        CHECK(n == TX_DELAY_REBASE_DOWN_SAMPLES);
+        CHECK(n == TX_DELAY_REBASE_DOWN_UNCONFIRMED);
+    }
+    // A start under a load with no quiet sample among the first 16: the start value is a late one; samples within its
+    // band (late ones too) do not end the run of quiet ones, so 2 quiet answers during the load bring it down
+    {
+        tx_delay_rule_t r;
+        for (uint32_t i = 0; i < TX_DELAY_START_SAMPLES; ++i)
+            tx_delay_rule_update(r, base + 40000 + static_cast<int32_t>(g() % 30000));
+        const int32_t high = r.estimate_ns;
+        CHECK(high >= base + 40000);
+        CHECK(tx_delay_rule_update(r, quiet(g, base)) == tx_delay_step_t::below);
+        for (int i = 0; i < 5; ++i)
+        {
+            CHECK(tx_delay_rule_update(r, high + 500) == tx_delay_step_t::fed); // a late sample in the band
+            CHECK(tx_delay_rule_update(r, high + 30000) == tx_delay_step_t::above);
+        }
+        CHECK(tx_delay_rule_update(r, quiet(g, base)) == tx_delay_step_t::rebased_down);
+        CHECK(near(r.estimate_ns, base, 500));
+        // the re-based estimate: late samples do not move it, the quiet ones confirm it
+        for (int i = 0; i < 300; ++i)
+            tx_delay_rule_update(r, (i % 3 == 0) ? quiet(g, base) : base + 5000 + static_cast<int32_t>(g() % 60000));
+        CHECK(near(r.estimate_ns, base, 500));
+        CHECK(r.confirmed_by == TX_DELAY_CONFIRM_SAMPLES);
+    }
+    // Confirmation: one low sample right after a quiet start changes nothing; two before 16 samples in the band are the
+    // stated limit (they decide); once confirmed, low samples separated by samples in the band do nothing
+    {
+        tx_delay_rule_t r = started(g, base);
+        const int32_t start = r.estimate_ns;
+        CHECK(r.confirmed_by == 0);
+        CHECK(tx_delay_rule_update(r, 2700) == tx_delay_step_t::below);
+        for (int i = 0; i < TX_DELAY_CONFIRM_SAMPLES; ++i)
+            tx_delay_rule_update(r, start); // exactly on the estimate: fed, never above
+        CHECK(r.confirmed_by == TX_DELAY_CONFIRM_SAMPLES);
+        CHECK(r.estimate_ns == start);
+        CHECK(tx_delay_rule_update(r, 2700) == tx_delay_step_t::below); // the run of early ones goes on: 2 of 4
+        tx_delay_rule_update(r, start);                                     // now ended by a sample in the band
+        for (int k = 0; k < 10; ++k)
+        {
+            CHECK(tx_delay_rule_update(r, 2700) == tx_delay_step_t::below);
+            CHECK(tx_delay_rule_update(r, start) == tx_delay_step_t::fed);
+        }
+        CHECK(r.estimate_ns == start);
+        tx_delay_rule_t u = started(g, base);
+        CHECK(tx_delay_rule_update(u, 2700) == tx_delay_step_t::below);
+        tx_delay_rule_update(u, u.estimate_ns);
+        CHECK(tx_delay_rule_update(u, 3100) == tx_delay_step_t::rebased_down);
+        CHECK(u.estimate_ns == 3100); // the larger of the two
+        CHECK(u.confirmed_by == 0);
     }
     // Limits: 0, 500 us, values above, a long run; no overflow, the counters do not wrap
     {

@@ -1033,6 +1033,9 @@ static std::atomic<bool> s_ptp_comp_valid{false};      // PTP clock drift compen
 static std::atomic<uint32_t> s_ptp_relock_residual_ns{0}; // residual of the PTP mapping after a holdover (ns, see ptp_relock_residual)
 static std::atomic<int32_t> s_clock_ppb{0};            // oscillator error in ppb, >0 = clock runs fast
 
+// PPS outliers counted by the servo, published at every servo update (ptp_diag_publish()): the hardware NTP task takes
+// no transmit delay sample shortly after one (update_tx_delay_estimate())
+static std::atomic<uint32_t> s_ptp_outliers_published{0};
 #if !PTP_FREE_RUNNING
 // ---- PTP clock compensation, PTP_FREE_RUNNING 0 (seqlock, the PPS task is the only writer) ----
 // A raw EMAC time stamp ts (ns) is converted to true time like the model clock:
@@ -3670,10 +3673,11 @@ __attribute__((noinline)) static esp_err_t transmit_with_hw_timestamp(esp_eth_ha
 // before the transmit call. The real transmit instant is later by the time needed for the rest of the packet
 // (checksum, MAC with authentication) and the EMAC DMA. The hardware TX time stamp of every response measures this
 // delay; an estimate of the delay of an undisturbed transmission is added to the T3 of later basic mode responses
-// (custom/tx_delay_rule.h: the smallest of the first 16 samples, then a running mean with weight 1/32 of the samples
-// close to it; a sample far above it, delayed by a disturbance such as cache refills, a flash write or preemption,
-// does not move it, so the answers after a disturbance are not stamped too late; a lasting change of the delay is
-// followed after 64 samples above or 4 below). Separate estimates are kept for IPv4 / IPv6 and with / without
+// (custom/tx_delay_rule.h: the second smallest of the first 16 samples, then a running mean with weight 1/32 of the
+// samples close to it; a sample far above it, delayed by a disturbance such as cache refills, a flash write or
+// preemption, does not move it, so the answers after a disturbance are not stamped too late; a lasting change of the
+// delay is followed after 1024 samples above or 4 below (2 for a new estimate); samples are taken only while the answer is sent synchronised
+// and not shortly after a PPS outlier, see update_tx_delay_estimate()). Separate estimates are kept for IPv4 / IPv6 and with / without
 // authentication, because these paths take different times. Interleaved responses are not affected (their T3 is the
 // hardware TX time stamp itself).
 // 1 = compensate, 0 = T3 is the clock reading before the transmit call (previous behaviour)
@@ -3722,7 +3726,15 @@ static uint64_t compensate_basic_t3(uint64_t t3, bool ipv6, bool authenticated)
 }
 
 // Called by the hardware NTP task (only writer) with the uncompensated software T3 and the hardware TX time stamp
-__attribute__((noinline)) static void update_tx_delay_estimate(bool ipv6, bool authenticated, uint64_t software_t3, uint64_t hardware_t3)
+// A sample is the hardware stamp (the PTP clock) minus the clock reading before the transmit call (the model clock):
+// a transmit delay only while both agree. Not taken while the answer is not sent synchronised (before the first
+// synchronisation the two differed by -74 to +69 us: measured after a restart) and for TX_DELAY_OUTLIER_HOLD_US after
+// the servo counted a PPS outlier (after a flood of Saves answers were off by up to 46 us right after outliers while
+// the estimate stayed: measured). An estimate is kept while no sample is taken.
+static constexpr int64_t TX_DELAY_OUTLIER_HOLD_US = 60000000;
+
+__attribute__((noinline)) static void update_tx_delay_estimate(bool ipv6, bool authenticated, uint64_t software_t3, uint64_t hardware_t3,
+                                                               bool synchronised)
 {
     if (software_t3 == 0 || hardware_t3 == 0)
         return;
@@ -3734,11 +3746,23 @@ __attribute__((noinline)) static void update_tx_delay_estimate(bool ipv6, bool a
         return;
 
     // The estimate (custom/tx_delay_rule.h); the diagnostics below still see every sample
-    tx_delay_rule_t &rule = s_tx_delay_rule[ipv6 ? 1 : 0][authenticated ? 1 : 0];
-    tx_delay_rule_update(rule, static_cast<int32_t>(sample_ns));
-    tx_delay_estimate_t &estimate = s_tx_delay[ipv6 ? 1 : 0][authenticated ? 1 : 0];
-    estimate.delay_ns.store(rule.estimate_ns, std::memory_order_relaxed);
-    estimate.samples.store(rule.samples, std::memory_order_relaxed);
+    static uint32_t outliers_seen = 0;
+    static int64_t usable_from_us = 0;
+    const uint32_t outliers = s_ptp_outliers_published.load(std::memory_order_relaxed);
+    const int64_t now_us = esp_timer_get_time();
+    if (outliers != outliers_seen)
+    {
+        outliers_seen = outliers;
+        usable_from_us = now_us + TX_DELAY_OUTLIER_HOLD_US;
+    }
+    if (synchronised && now_us >= usable_from_us)
+    {
+        tx_delay_rule_t &rule = s_tx_delay_rule[ipv6 ? 1 : 0][authenticated ? 1 : 0];
+        tx_delay_rule_update(rule, static_cast<int32_t>(sample_ns));
+        tx_delay_estimate_t &estimate = s_tx_delay[ipv6 ? 1 : 0][authenticated ? 1 : 0];
+        estimate.delay_ns.store(rule.estimate_ns, std::memory_order_relaxed);
+        estimate.samples.store(rule.samples, std::memory_order_relaxed);
+    }
 
     if (authenticated)
         return;
@@ -3757,7 +3781,7 @@ __attribute__((noinline)) static void update_tx_delay_estimate(bool ipv6, bool a
 }
 #else
 static inline uint64_t compensate_basic_t3(uint64_t t3, bool, bool) { return t3; }
-static inline void update_tx_delay_estimate(bool, bool, uint64_t, uint64_t) {}
+static inline void update_tx_delay_estimate(bool, bool, uint64_t, uint64_t, bool) {}
 #endif
 
 static bool is_ipv4_ntp_request(const uint8_t *frame, uint32_t length, size_t *ip_offset, size_t *udp_offset)
@@ -4207,7 +4231,8 @@ static esp_err_t process_hardware_ntp_request(esp_eth_handle_t handle, uint8_t *
             ntp_cache_update_ipv6(&client_ipv6, cache_slot, stored_t2, hardware_transmit_time);
         else
             ntp_cache_update(client_ipv4, cache_slot, stored_t2, hardware_transmit_time);
-        update_tx_delay_estimate(ipv6, authenticated_request, raw_transmit_time, hardware_transmit_time);
+        update_tx_delay_estimate(ipv6, authenticated_request, raw_transmit_time, hardware_transmit_time,
+                                 status.stratum == 1 && status.gnss_synchronized && status.pps_disciplined && !status.holdover);
         s_diag_ntp_hw_replies.fetch_add(1, std::memory_order_relaxed);
         if (interleaved_reply)
             s_diag_ntp_hw_interleaved.fetch_add(1, std::memory_order_relaxed);
@@ -6975,6 +7000,7 @@ static SemaphoreHandle_t s_ptp_diag_mutex = nullptr;
 
 static void ptp_diag_publish()
 {
+    s_ptp_outliers_published.store(s_ptp_servo.outliers, std::memory_order_relaxed);
     if (s_ptp_diag_mutex == nullptr || xSemaphoreTake(s_ptp_diag_mutex, 0) != pdTRUE)
         return;
     const ptp_servo_state_t &st = s_ptp_servo;
