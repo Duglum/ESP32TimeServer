@@ -4,6 +4,7 @@
 // Settings of the logins without ESP-IDF (see auth_config.h). Host tested and fuzzed.
 
 #include "auth/auth_config.h"
+#include "core/json_tree.h"
 #include "sys/secret.h"
 #include "net/ip_text.h"
 
@@ -291,7 +292,7 @@ void auth_settings_to_json(cJSON *object, const radius_settings_t &r, const web_
             cJSON_AddStringToObject(server, "secret", s.secret);
         else
             cJSON_AddBoolToObject(server, "secret_set", s.secret[0] != '\0');
-        cJSON_AddItemToArray(servers, server);
+        json_array_add(servers, server);
     }
     cJSON_AddNumberToObject(radius, "timeout_s", r.timeout_s);
     cJSON_AddNumberToObject(radius, "retries", r.retries);

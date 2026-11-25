@@ -76,7 +76,7 @@ $targets = [ordered]@{
     radius_test    = @("$here\radius_test.cpp", "$main\auth\radius_proto.cpp", "$main\auth\radius_client.cpp")
     totp_test      = @("$here\totp_test.cpp", "$main\auth\totp.cpp", "$main\third_party\qrcodegen\qrcodegen.c")
     auth_config_test = @("$here\auth_config_test.cpp", "$main\auth\auth_config.cpp", "$main\auth\radius_proto.cpp",
-        "$main\net\ip_text.cpp", "$cjson\cJSON.c")
+        "$main\net\ip_text.cpp", "$main\core\json_tree.cpp", "$cjson\cJSON.c")
     # The stored form of the own web certificate and the NVS room check
     web_tls_pair_test = @("$here\web_tls_pair_test.cpp", "$main\web\web_tls_pair.cpp")
     # An NVS blob written only when its bytes changed (ESP-IDF 6.1.1 compares a blob of several chunks wrongly)
@@ -98,9 +98,11 @@ $targets = [ordered]@{
     tx_delay_rule_test = @("$here\tx_delay_rule_test.cpp", "$main\custom\tx_delay_rule.cpp")
     # The short answers of the web API without allocation (from ESP32-WebTherm), against cJSON
     json_reply_test = @("$here\json_reply_test.cpp", "$main\core\json_reply.cpp", "$main\core\json_writer.cpp", "$cjson\cJSON.c")
+    # cJSON trees when memory is short: an item that cannot be added is deleted (from ESP32-WebTherm)
+    json_tree_test = @("$here\json_tree_test.cpp", "$main\core\json_tree.cpp", "$cjson\cJSON.c")
 }
 # Test programs without a fuzz target
-$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test', 'record_mark_test', 'nvs_state_test', 'nvs_purge_test', 'json_reply_test', 'tx_delay_rule_test')
+$no_fuzz = @('ptp_selection_test', 'mqtt_queue_test', 'ntp_auth_test', 'ptp_auth_test', 'nvs_hash_test', 'record_mark_test', 'nvs_state_test', 'nvs_purge_test', 'json_reply_test', 'tx_delay_rule_test', 'json_tree_test')
 # Test programs with TF-PSA-Crypto
 $with_psa = @('radius_test', 'totp_test', 'auth_config_test')
 

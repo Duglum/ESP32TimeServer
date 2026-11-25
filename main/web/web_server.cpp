@@ -11,6 +11,7 @@
 #include "auth/radius_task.h"
 #include "auth/totp_store.h"
 #include "core/json_reply.h"
+#include "core/json_tree.h"
 #include "custom/app_metadata.h"
 #include "custom/crash_dump.h"
 #include "custom/gnss_uart.h"
@@ -718,7 +719,7 @@ namespace
             cJSON *item = cJSON_CreateObject();
             cJSON_AddNumberToObject(item, "id", keys[i].id);
             cJSON_AddStringToObject(item, "key", keys[i].key);
-            cJSON_AddItemToArray(array, item);
+            json_array_add(array, item);
         }
     }
 
@@ -739,7 +740,7 @@ namespace
         cJSON *dns = cJSON_AddArrayToObject(object, "dns");
         for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
             if (s.dns[i][0] != '\0')
-                cJSON_AddItemToArray(dns, cJSON_CreateString(s.dns[i]));
+                json_array_add(dns, cJSON_CreateString(s.dns[i]));
         cJSON_AddStringToObject(object, "mac_address", s.mac_address);
         cJSON_AddNumberToObject(object, "ntp_client_rate_limit", s.ntp_client_rate_limit);
         cJSON_AddStringToObject(object, "gnss_protocol", s.gnss_ublox ? "ubx" : "nmea");
@@ -1265,12 +1266,12 @@ namespace
         if (s_pending->applied.ip_mode != web_ip_mode_t::ipv6 && !s_pending->applied.ipv4_dhcp)
         {
             snprintf(url, sizeof(url), "https://%s/", s_pending->applied.ipv4_address);
-            cJSON_AddItemToArray(urls, cJSON_CreateString(url));
+            json_array_add(urls, cJSON_CreateString(url));
         }
         if (s_pending->applied.ip_mode != web_ip_mode_t::ipv4 && s_pending->applied.ipv6_address[0] != '\0')
         {
             snprintf(url, sizeof(url), "https://[%s]/", s_pending->applied.ipv6_address);
-            cJSON_AddItemToArray(urls, cJSON_CreateString(url));
+            json_array_add(urls, cJSON_CreateString(url));
         }
     }
 
@@ -1562,7 +1563,7 @@ namespace
             cJSON_AddNumberToObject(row, "rejects", s.rejects);
             cJSON_AddNumberToObject(row, "timeouts", s.timeouts);
             cJSON_AddNumberToObject(row, "dropped", s.dropped);
-            cJSON_AddItemToArray(servers, row);
+            json_array_add(servers, row);
         }
         cJSON_AddNumberToObject(object, "accepted", st.accepted);
         cJSON_AddNumberToObject(object, "rejected", st.rejected);
@@ -1709,7 +1710,7 @@ namespace
                     row[at++] = HEX[nibble];
                 }
                 row[at] = '\0';
-                cJSON_AddItemToArray(rows, cJSON_CreateString(row));
+                json_array_add(rows, cJSON_CreateString(row));
             }
         }
         big_delete(b); // zeroed: the key is in the code
@@ -1774,7 +1775,7 @@ namespace
         {
             cJSON *list = cJSON_AddArrayToObject(reply, "recovery_codes");
             for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
-                cJSON_AddItemToArray(list, cJSON_CreateString(store->codes[i]));
+                json_array_add(list, cJSON_CreateString(store->codes[i]));
         }
         char *text = print_reply(reply);
         if (text == nullptr)
@@ -2223,7 +2224,7 @@ namespace
         cJSON_AddStringToObject(reply, "user", slot->user);
         cJSON *list = cJSON_AddArrayToObject(reply, "recovery_codes");
         for (size_t i = 0; i < TOTP_RECOVERY_CODES; ++i)
-            cJSON_AddItemToArray(list, cJSON_CreateString(c->codes[i]));
+            json_array_add(list, cJSON_CreateString(c->codes[i]));
         char *text = print_reply(reply);
         if (text == nullptr)
         {
@@ -2296,7 +2297,7 @@ namespace
             cJSON_AddNumberToObject(row, "created", static_cast<double>(tokens[i].created_s));
             cJSON_AddNumberToObject(row, "last_used", static_cast<double>(tokens[i].last_used_s));
             cJSON_AddNumberToObject(row, "recovery_left", tokens[i].recovery_left);
-            cJSON_AddItemToArray(list, row);
+            json_array_add(list, row);
         }
         big_delete_array(tokens, TOTP_TOKENS_MAX);
         return true;
@@ -2344,7 +2345,7 @@ namespace
         cJSON_AddStringToObject(own, "issuer", info->issuer);
         cJSON *san = cJSON_AddArrayToObject(own, "san");
         for (size_t i = 0; i < info->san_count; ++i)
-            cJSON_AddItemToArray(san, cJSON_CreateString(info->san[i]));
+            json_array_add(san, cJSON_CreateString(info->san[i]));
         add_utc(own, "not_before", info->not_before);
         add_utc(own, "not_after", info->not_after);
         const time_t now = time(nullptr);
@@ -2433,7 +2434,7 @@ namespace
         {
             char text[64];
             web_auth_format_cidr(entries[i], text, sizeof(text));
-            cJSON_AddItemToArray(allow, cJSON_CreateString(text));
+            json_array_add(allow, cJSON_CreateString(text));
         }
 
         cJSON *status = cJSON_AddObjectToObject(root, "status");
@@ -2448,17 +2449,17 @@ namespace
         cJSON_AddStringToObject(status, "ipv4_gateway", sets->net.ipv4_gateway);
         cJSON *ipv6 = cJSON_AddArrayToObject(status, "ipv6");
         for (size_t i = 0; i < sets->net.ipv6_count; ++i)
-            cJSON_AddItemToArray(ipv6, cJSON_CreateString(sets->net.ipv6[i]));
+            json_array_add(ipv6, cJSON_CreateString(sets->net.ipv6[i]));
         cJSON *dns = cJSON_AddArrayToObject(status, "dns");
         for (size_t i = 0; i < WEB_DNS_SERVER_COUNT; ++i)
             if (sets->net.dns[i][0] != '\0')
-                cJSON_AddItemToArray(dns, cJSON_CreateString(sets->net.dns[i]));
+                json_array_add(dns, cJSON_CreateString(sets->net.dns[i]));
         cJSON *dns_v4 = cJSON_AddArrayToObject(status, "dns_received_v4");
         for (size_t i = 0; i < sets->net.dns_received_v4_count; ++i)
-            cJSON_AddItemToArray(dns_v4, cJSON_CreateString(sets->net.dns_received_v4[i]));
+            json_array_add(dns_v4, cJSON_CreateString(sets->net.dns_received_v4[i]));
         cJSON *dns_v6 = cJSON_AddArrayToObject(status, "dns_received_v6");
         for (size_t i = 0; i < sets->net.dns_received_v6_count; ++i)
-            cJSON_AddItemToArray(dns_v6, cJSON_CreateString(sets->net.dns_received_v6[i]));
+            json_array_add(dns_v6, cJSON_CreateString(sets->net.dns_received_v6[i]));
         cJSON_AddStringToObject(status, "firmware", sets->app.firmware_version);
         cJSON_AddStringToObject(status, "build", sets->app.build);
         cJSON_AddBoolToObject(status, "firmware_check_pending", sets->app.firmware_check_pending);
@@ -2996,7 +2997,7 @@ namespace
             cJSON_AddNumberToObject(item, "foreign_announces", port.foreign_announces);
             cJSON_AddNumberToObject(item, "auth_rejected", port.auth_rejected);
             cJSON_AddNumberToObject(item, "unsigned_refused", port.unsigned_refused);
-            cJSON_AddItemToArray(ports, item);
+            json_array_add(ports, item);
         }
         cJSON *followers = cJSON_AddArrayToObject(root, "followers");
         for (size_t i = 0; i < p->follower_count; ++i)
@@ -3014,7 +3015,7 @@ namespace
                      pi[5], pi[6], pi[7], static_cast<unsigned>((pi[8] << 8) | pi[9]));
             cJSON_AddStringToObject(item, "port_identity", port_identity);
             cJSON_AddNumberToObject(item, "last_seen_s", follower.last_seen_s);
-            cJSON_AddItemToArray(followers, item);
+            json_array_add(followers, item);
         }
         big_delete(p);
         return send_json(req, "200 OK", root);
@@ -3091,10 +3092,10 @@ namespace
             cJSON_AddNumberToObject(row, "tau", d->tau_s[i]);
             cJSON_AddNumberToObject(row, "adev", d->adev[i]);
             cJSON_AddNumberToObject(row, "tdev_ns", d->tdev_ns[i]);
-            cJSON_AddItemToArray(stability, row);
+            json_array_add(stability, row);
         }
         cJSON_AddNumberToObject(root, "isr_latency_us", d->isr_latency_us);
-        cJSON_AddItemToObject(root, "isr_bins", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->isr_bins), WEB_DIAG_ISR_BINS));
+        json_object_add(root, "isr_bins", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->isr_bins), WEB_DIAG_ISR_BINS));
         cJSON_AddNumberToObject(root, "isr_total", d->isr_total);
         cJSON_AddNumberToObject(root, "isr_max_ns", d->isr_max_ns);
         cJSON_AddBoolToObject(root, "ublox", d->ublox);
@@ -3123,8 +3124,8 @@ namespace
         cJSON_AddNumberToObject(root, "tx_delay_v4_samples", d->tx_delay_v4_samples);
         cJSON_AddNumberToObject(root, "tx_delay_v6_ns", d->tx_delay_v6_ns);
         cJSON_AddNumberToObject(root, "tx_delay_v6_samples", d->tx_delay_v6_samples);
-        cJSON_AddItemToObject(root, "tx_delay_min_ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_min_ns), 2));
-        cJSON_AddItemToObject(root, "tx_delay_max_ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_max_ns), 2));
+        json_object_add(root, "tx_delay_min_ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_min_ns), 2));
+        json_object_add(root, "tx_delay_max_ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_max_ns), 2));
         cJSON *tasks = cJSON_AddArrayToObject(root, "tasks");
         for (size_t i = 0; i < d->task_count; ++i)
         {
@@ -3132,7 +3133,7 @@ namespace
             cJSON_AddStringToObject(row, "name", d->tasks[i].name);
             cJSON_AddNumberToObject(row, "size", d->tasks[i].stack_size);
             cJSON_AddNumberToObject(row, "free", d->tasks[i].least_free);
-            cJSON_AddItemToArray(tasks, row);
+            json_array_add(tasks, row);
         }
         cJSON_AddNumberToObject(root, "heap_free", d->heap_free);
         cJSON_AddNumberToObject(root, "heap_min_free", d->heap_min_free);
@@ -3152,14 +3153,14 @@ namespace
         for (size_t family = 0; family < 2; ++family)
         {
             cJSON *row = cJSON_CreateObject();
-            cJSON_AddItemToObject(row, "ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_phase_ns[family]), WEB_DIAG_TX_PHASE_BINS));
-            cJSON_AddItemToObject(row, "n", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_phase_samples[family]), WEB_DIAG_TX_PHASE_BINS));
-            cJSON_AddItemToArray(phase, row);
+            json_object_add(row, "ns", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_phase_ns[family]), WEB_DIAG_TX_PHASE_BINS));
+            json_object_add(row, "n", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->tx_delay_phase_samples[family]), WEB_DIAG_TX_PHASE_BINS));
+            json_array_add(phase, row);
         }
         cJSON_AddNumberToObject(root, "uart_overflows", d->uart_overflows);
         cJSON_AddNumberToObject(root, "nmea_sentences", d->nmea_sentences);
         cJSON_AddNumberToObject(root, "nmea_checksum_errors", d->nmea_checksum_errors);
-        cJSON_AddItemToObject(root, "rmc_phase_bins", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->rmc_phase_bins), WEB_DIAG_RMC_BINS));
+        json_object_add(root, "rmc_phase_bins", cJSON_CreateIntArray(reinterpret_cast<const int *>(d->rmc_phase_bins), WEB_DIAG_RMC_BINS));
         cJSON_AddNumberToObject(root, "ubx_frames", d->ubx_frames);
         cJSON_AddNumberToObject(root, "ubx_naks", d->ubx_naks);
         cJSON_AddNumberToObject(root, "first_resolved_s", static_cast<double>(d->first_resolved_s));
@@ -3361,7 +3362,7 @@ namespace
             cJSON_AddStringToObject(item, "kind", entry.kind < 3 ? kinds[entry.kind] : "text");
             cJSON_AddBoolToObject(item, "periodic", entry.periodic);
             cJSON_AddStringToObject(item, "text", entry.text);
-            cJSON_AddItemToArray(list, item);
+            json_array_add(list, item);
             after = entry.seq;
         }
         cJSON_AddBoolToObject(root, "skipped", skipped);
@@ -3567,7 +3568,7 @@ namespace
         {
             char text[64];
             web_auth_format_cidr(entries[i], text, sizeof(text));
-            cJSON_AddItemToArray(allow, cJSON_CreateString(text));
+            json_array_add(allow, cJSON_CreateString(text));
         }
         cJSON *tls = cJSON_AddObjectToObject(root, "tls");
         cJSON_AddStringToObject(tls, "mode", s_identity.own ? "own" : "self");

@@ -30,6 +30,7 @@ set(MAIN_SOURCES
         "custom/time_diag.cpp"
         "custom/tx_delay_rule.cpp"
         "core/json_reply.cpp"
+        "core/json_tree.cpp"
         "core/json_writer.cpp"
         "net/emac_halt.cpp"
         "net/ip_text.cpp"
