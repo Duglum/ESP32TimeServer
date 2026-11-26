@@ -6,6 +6,7 @@
 
 #include "sys/mbedtls_mem.h"
 
+#include <atomic>
 #include <cstddef>
 
 #include "esp_heap_caps.h"
@@ -16,9 +17,22 @@ extern "C"
 #include "mbedtls/platform.h"
 }
 
+namespace
+{
+    std::atomic<unsigned> s_failures{0};
+} // namespace
+
 extern "C" void *esp_mbedtls_mem_calloc(size_t n, size_t size)
 {
-    return heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    void *block = heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (block == nullptr && n != 0 && size != 0)
+        s_failures.fetch_add(1, std::memory_order_relaxed);
+    return block;
+}
+
+unsigned mbedtls_mem_failures()
+{
+    return s_failures.load(std::memory_order_relaxed);
 }
 
 // With ESP-IDF's dynamic TLS buffers (CONFIG_MBEDTLS_DYNAMIC_BUFFER) a record buffer is freed through here

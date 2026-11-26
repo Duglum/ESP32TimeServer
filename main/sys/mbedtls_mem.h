@@ -13,3 +13,10 @@
 
 // mbedTLS gets esp_mbedtls_mem_calloc() and esp_mbedtls_mem_free() of mbedtls_mem.cpp
 void mbedtls_mem_install();
+
+// The allocations of mbedTLS (and PSA Crypto) that failed since the start, in every task. mbedTLS does not always report
+// a lack of memory as such: a failed allocation inside a key or certificate parse or a signature can end in an error of
+// the format, of the public key or of an argument. A caller that must tell a lack of memory from a stored key or
+// certificate that is not valid compares the count before and after the call; a failure of another task at the same
+// time counts too (the caller then takes the safe side).
+unsigned mbedtls_mem_failures();

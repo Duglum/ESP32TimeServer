@@ -14,6 +14,7 @@
 
 #include "web_settings.h"
 #include "sys/big_alloc.h"
+#include "sys/mbedtls_mem.h"
 #include "sys/nvs_state.h"
 
 extern "C"
@@ -96,7 +97,8 @@ namespace
 
     // length: the bytes of data. On an error of the second read NVS may set the length to the stored size, which can
     // be more than was allocated (ESP-IDF 6.1.1 nvs_api.cpp 616-618): the size of the buffer is kept apart.
-    bool read_blob(nvs_handle_t handle, const char *key, uint8_t *&data, size_t &length, size_t max)
+    // no_memory (when given) is set when the item is stored but its buffer could not be allocated.
+    bool read_blob(nvs_handle_t handle, const char *key, uint8_t *&data, size_t &length, size_t max, bool *no_memory = nullptr)
     {
         data = nullptr;
         length = 0;
@@ -105,7 +107,11 @@ namespace
             return false;
         uint8_t *buffer = static_cast<uint8_t *>(alloc_prefer_psram(size));
         if (buffer == nullptr)
+        {
+            if (no_memory != nullptr)
+                *no_memory = true; // stored, but not read
             return false;
+        }
         size_t read = size;
         if (nvs_get_blob(handle, key, buffer, &read) != ESP_OK || read != size)
         {
@@ -469,18 +475,27 @@ namespace
     // The private key belongs to the public key of the certificate: a signature over a random hash made with it is
     // verified with the certificate's key. mbedtls_pk_check_pair() alone is not used: it compares the exported public
     // keys byte for byte and refused matching RSA 2048 pairs on the device (board test 1.13); its result is logged.
-    bool key_belongs(mbedtls_pk_context &pub, mbedtls_pk_context &prv)
+    // no_memory (when given) is set when the check could not be made for lack of memory: its signature buffer, or a
+    // failed allocation of mbedTLS during the signature or its check (sys/mbedtls_mem.h)
+    bool key_belongs(mbedtls_pk_context &pub, mbedtls_pk_context &prv, bool *no_memory = nullptr)
     {
         uint8_t hash[32];
         esp_fill_random(hash, sizeof(hash));
         uint8_t *signature = static_cast<uint8_t *>(alloc_prefer_psram(MBEDTLS_PK_SIGNATURE_MAX_SIZE));
         if (signature == nullptr)
+        {
+            if (no_memory != nullptr)
+                *no_memory = true;
             return false;
+        }
         size_t length = 0;
+        const unsigned failures = mbedtls_mem_failures();
         int ret = mbedtls_pk_sign(&prv, MBEDTLS_MD_SHA256, hash, sizeof(hash), signature, MBEDTLS_PK_SIGNATURE_MAX_SIZE, &length);
         if (ret == 0)
             ret = mbedtls_pk_verify(&pub, MBEDTLS_MD_SHA256, hash, sizeof(hash), signature, length);
         free(signature);
+        if (no_memory != nullptr && (ret == PSA_ERROR_INSUFFICIENT_MEMORY || mbedtls_mem_failures() != failures))
+            *no_memory = true;
         const int pair = mbedtls_pk_check_pair(&pub, &prv);
         if (ret == 0 && pair != 0)
             ESP_LOGI(TAG, "mbedtls_pk_check_pair refused the pair (-0x%04x), the signature check accepts it", static_cast<unsigned>(-pair));
@@ -700,7 +715,17 @@ namespace
         if (crt == nullptr)
             return true; // not checked: the certificate is used as before
         mbedtls_x509_crt_init(crt);
-        const bool ok = mbedtls_x509_crt_parse_der(crt, s_self_cert, s_self_cert_length) == 0 && key_belongs(crt->pk, pk);
+        // Without memory for the parse or for the check of the pair: not checked either (a certificate issued again
+        // would have another fingerprint). mbedTLS does not always say so by its error code: a failed allocation of
+        // mbedTLS during the check counts too (sys/mbedtls_mem.h)
+        const unsigned failures = mbedtls_mem_failures();
+        const int parsed = mbedtls_x509_crt_parse_der(crt, s_self_cert, s_self_cert_length);
+        bool no_memory = parsed == PSA_ERROR_INSUFFICIENT_MEMORY;
+        bool ok = no_memory || (parsed == 0 && (key_belongs(crt->pk, pk, &no_memory) || no_memory));
+        if (mbedtls_mem_failures() != failures)
+            no_memory = ok = true;
+        if (no_memory)
+            ESP_LOGW(TAG, "The stored self-signed certificate could not be checked (out of memory): it is used unchecked");
         mbedtls_x509_crt_free(crt);
         free(crt);
         return ok;
@@ -713,12 +738,34 @@ namespace
         char stored_name[256] = "";
         size_t name_length = sizeof(stored_name);
         const bool have_name = nvs && nvs_get_str(handle, NVS_KEY_NAME, stored_name, &name_length) == ESP_OK;
-        const bool have_key = nvs && read_blob(handle, NVS_KEY_KEY, s_self_key, s_self_key_length, MAX_DER);
-        const bool have_cert = nvs && read_blob(handle, NVS_KEY_CERT, s_self_cert, s_self_cert_length, MAX_DER);
+        bool no_memory = false;
+        const bool have_key = nvs && read_blob(handle, NVS_KEY_KEY, s_self_key, s_self_key_length, MAX_DER, &no_memory);
+        const bool have_cert = nvs && read_blob(handle, NVS_KEY_CERT, s_self_cert, s_self_cert_length, MAX_DER, &no_memory);
 
         mbedtls_pk_context pk;
         mbedtls_pk_init(&pk);
-        const bool key_ok = have_key && mbedtls_pk_parse_key(&pk, s_self_key, s_self_key_length, nullptr, 0) == 0;
+        const unsigned failures = mbedtls_mem_failures();
+        const int parsed = have_key ? mbedtls_pk_parse_key(&pk, s_self_key, s_self_key_length, nullptr, 0) : -1;
+        // MBEDTLS_ERR_PK_ALLOC_FAILED is PSA_ERROR_INSUFFICIENT_MEMORY in this mbedTLS; a failed allocation inside the
+        // parse can also end in an error of the key format: a failed allocation of mbedTLS during it counts as well
+        if (parsed == PSA_ERROR_INSUFFICIENT_MEMORY || mbedtls_mem_failures() != failures)
+            no_memory = true;
+        const bool key_ok = parsed == 0;
+        // A stored key or certificate that could not be read or parsed for lack of memory is not made anew: a new one
+        // would be stored over it, with a new fingerprint that every browser would have to accept again. No identity
+        // at this start then: no settings page until the next start (as without the namespace). NTP, PTP and the GNSS
+        // discipline do not use it and run.
+        if (no_memory)
+        {
+            ESP_LOGE(TAG, "The self-signed key or certificate could not be read (out of memory): none is made at this start");
+            mbedtls_pk_free(&pk);
+            free_data_secret(s_self_key, s_self_key_length); // not used at this start
+            s_self_key_length = 0;
+            free(s_self_cert);
+            s_self_cert = nullptr;
+            s_self_cert_length = 0;
+            return false;
+        }
         bool ok = key_ok && have_cert && have_name && strcmp(stored_name, fqdn) == 0;
         // Key, certificate and name are three writes: a new key (made when the stored one was missing or unreadable)
         // whose certificate write then failed or was cut off leaves the certificate of the former key, and with that
